@@ -976,6 +976,9 @@ def validate_planned_writes(root: Path, writes: dict[str, bytes]) -> None:
         knowledge_rel = _knowledge_rel(root)
         shutil.copytree(root / knowledge_rel, staging / knowledge_rel)
         shutil.copytree(root / STORE_REL, staging / STORE_REL)
+        instance_config = root / "project-intelligence.json"
+        if instance_config.is_file():
+            shutil.copy2(instance_config, staging / instance_config.name)
         for rel, data in writes.items():
             target = staging / Path(*PurePosixPath(rel).parts)
             target.parent.mkdir(parents=True, exist_ok=True)
