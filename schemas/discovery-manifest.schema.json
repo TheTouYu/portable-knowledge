@@ -1,0 +1,15 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "PPI Bounded Discovery Manifest 1",
+  "type": "object",
+  "required": ["schema_version", "read_paths", "excluded_paths", "expansions", "working_tree", "model"],
+  "properties": {
+    "schema_version": {"const": 1},
+    "read_paths": {"type": "array", "items": {"type": "string"}},
+    "excluded_paths": {"type": "array", "items": {"type": "string"}},
+    "expansions": {"type": "array"},
+    "working_tree": {"type": "object"},
+    "model": {"type": "object", "required": ["provider", "name", "transfer"]}
+  },
+  "additionalProperties": false
+}

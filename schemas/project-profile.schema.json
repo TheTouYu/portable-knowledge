@@ -1,0 +1,18 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "PPI Existing Project Profile 1",
+  "type": "object",
+  "required": ["schema_version", "project", "primary_production_task", "machine_truth_sources", "memory_role_candidates", "input_types", "evidence_types", "state_sources", "policy", "completion_gates", "exclusions"],
+  "properties": {
+    "schema_version": {"const": 1},
+    "project": {"type": "object", "required": ["id", "name", "goal", "users"]},
+    "primary_production_task": {"type": "string", "minLength": 1},
+    "machine_truth_sources": {"type": "array"},
+    "memory_role_candidates": {"type": "array"},
+    "state_sources": {"type": "object", "required": ["committed", "working", "released", "external"]},
+    "policy": {"type": "object", "required": ["permissions", "remote_models"]},
+    "completion_gates": {"type": "array", "minItems": 1},
+    "exclusions": {"type": "array"}
+  },
+  "additionalProperties": false
+}

@@ -1,0 +1,15 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "PPI Approved Blueprint 1",
+  "type": "object",
+  "required": ["schema_version", "candidate", "provenance", "approved_by", "approval_id", "approved_hash"],
+  "properties": {
+    "schema_version": {"const": 1},
+    "candidate": {"type": "object"},
+    "provenance": {"type": "object", "required": ["profile_hash", "pack", "model", "read_paths", "excluded_paths", "working_tree", "candidate_ids", "user_decisions"]},
+    "approved_by": {"type": "string"},
+    "approval_id": {"type": "string"},
+    "approved_hash": {"type": "string", "pattern": "^[0-9a-f]{64}$"}
+  },
+  "additionalProperties": false
+}
