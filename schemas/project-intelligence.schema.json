@@ -1,0 +1,16 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://portable-project-intelligence.invalid/project-intelligence.schema.json",
+  "title": "PPI Project Instance 1",
+  "type": "object",
+  "required": ["schema_version", "instance", "pkc", "authority", "identities", "memory"],
+  "properties": {
+    "schema_version": {"const": 1},
+    "instance": {"type": "object", "required": ["id", "name"]},
+    "pkc": {"type": "object", "required": ["version", "projection_path"]},
+    "authority": {"type": "object", "required": ["registry", "actors", "store", "knowledge"]},
+    "identities": {"type": "object", "required": ["principal", "executor", "workspace", "writer"]},
+    "memory": {"type": "object", "required": ["roles", "contexts", "startup_budget", "applies_to"]}
+  },
+  "additionalProperties": true
+}

@@ -1,0 +1,6 @@
+{
+  "schema_version": 1,
+  "nodes": [{"id": "N-01", "name": "Neutral Concepts", "path": "domain/topic", "boundary": "Reusable neutral fixture concepts", "keywords": ["neutral"], "migration_status": "managed"}],
+  "topics": [{"id": "N-01-basic", "node_id": "N-01", "title": "Basic Contract", "path": "domain/topic/basic.md", "summary": "A neutral deterministic retrieval fixture", "keywords": ["contract"], "permission": "internal"}],
+  "relationships": []
+}
