@@ -1,0 +1,16 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "PPI Authority Reference 1",
+  "type": "object",
+  "required": ["path", "locator", "role", "baseline_state", "change_policy"],
+  "properties": {
+    "path": {"type": "string"}, "locator": {"type": "string"},
+    "role": {"enum": ["design_intent", "current_implementation", "documented_contract", "external_environment_behavior"]},
+    "baseline_state": {"enum": ["committed_baseline", "working_tree_observation", "released_baseline", "external_environment"]},
+    "approved_hash": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
+    "fragment_hash": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
+    "change_policy": {"enum": ["existence_only", "review_on_change", "invalidate_on_change", "manual_review"]},
+    "claim_ids": {"type": "array", "items": {"type": "string"}}
+  },
+  "additionalProperties": false
+}
