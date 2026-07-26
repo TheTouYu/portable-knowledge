@@ -1,0 +1,16 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "PPI Existing Project Domain Pack 1",
+  "type": "object",
+  "required": ["schema_version", "id", "version", "project_kind", "discovery_questions", "candidate_facets", "machine_truth_sources", "memory_discovery_rules", "evidence_kinds", "claim_confirmation_rules", "non_substitutable_evidence", "risks", "exclusions", "representative_query_seeds", "upgrade_policy"],
+  "properties": {
+    "schema_version": {"const": 1},
+    "id": {"enum": ["personal-brand-existing", "software-existing"]},
+    "upgrade_policy": {"const": "never_rewrite_instance"},
+    "candidate_facets": {"type": "array", "minItems": 3},
+    "evidence_kinds": {"type": "array", "minItems": 2},
+    "claim_confirmation_rules": {"type": "array", "minItems": 1},
+    "non_substitutable_evidence": {"type": "array", "minItems": 1}
+  },
+  "additionalProperties": false
+}

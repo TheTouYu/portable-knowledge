@@ -1,0 +1,17 @@
+{
+  "schema_version": 1,
+  "id": "personal-brand-existing",
+  "version": "1.0.0",
+  "project_kind": "existing personal brand",
+  "discovery_questions": ["Who is the core audience?", "Which production task creates the most value?", "Which statements require owner confirmation?", "Where are published promises recorded?"],
+  "candidate_facets": [{"id":"audience-needs","title":"Audience needs"},{"id":"offers-delivery","title":"Offers and delivery"},{"id":"voice-boundaries","title":"Voice and boundaries"},{"id":"content-production","title":"Content production"},{"id":"feedback-learning","title":"Feedback and learning"}],
+  "machine_truth_sources": ["offer catalog", "publication index", "delivery checklist", "consent register"],
+  "memory_discovery_rules": ["Map current campaign recovery in place", "Treat editorial calendar as working state", "Treat owner decisions as design intent only"],
+  "evidence_kinds": ["owner_confirmation", "audience_statement", "delivery_observation", "published_artifact", "outcome_observation"],
+  "claim_confirmation_rules": ["Identity and positioning require owner confirmation", "Audience language needs a traceable audience source", "Outcome claims require scoped outcome observation"],
+  "non_substitutable_evidence": ["Owner preference does not substitute for audience behavior", "Published wording does not substitute for delivered behavior", "A testimonial does not substitute for representative outcomes"],
+  "risks": ["personal information", "third-party rights", "working drafts mistaken for commitments"],
+  "exclusions": ["private conversations without authorization", "credentials", "historical chat archives", "fixed taxonomy IDs"],
+  "representative_query_seeds": ["What audience constraint applies to this draft?", "Which promise is published?", "What requires owner confirmation?"],
+  "upgrade_policy": "never_rewrite_instance"
+}

@@ -1,0 +1,17 @@
+{
+  "schema_version": 1,
+  "id": "software-existing",
+  "version": "1.0.0",
+  "project_kind": "existing software",
+  "discovery_questions": ["What is the primary engineering production task?", "Where are build and test entry points?", "What distinguishes working, released, and deployed behavior?", "Which environment evidence is reproducible?"],
+  "candidate_facets": [{"id":"system-contracts","title":"System contracts"},{"id":"diagnostic-paths","title":"Diagnostic paths"},{"id":"verification-gates","title":"Verification gates"},{"id":"release-behavior","title":"Release behavior"},{"id":"environment-variance","title":"Environment variance"}],
+  "machine_truth_sources": ["source entry points", "configuration schema", "test runner", "release manifest", "runtime diagnostics"],
+  "memory_discovery_rules": ["Map active work status in place", "Use branch scope before current-state documents", "Read decision records by identifier or keyword"],
+  "evidence_kinds": ["regression_test", "runtime_reproduction", "release_artifact", "environment_observation", "code_review"],
+  "claim_confirmation_rules": ["Implementation claims require current source or tests", "Released claims require a release baseline", "Environment behavior requires scoped environment observation"],
+  "non_substitutable_evidence": ["Source code does not substitute for runtime behavior", "A unit test does not substitute for external environment behavior", "A design decision does not substitute for current implementation"],
+  "risks": ["credentials in configuration", "generated assets", "dependency trees", "working changes mistaken for baseline"],
+  "exclusions": ["repository history by default", "generated directories", "dependencies", "large binary assets", "project-specific module names"],
+  "representative_query_seeds": ["Where should this failure first be isolated?", "Which baseline supports this behavior?", "What validation remains environment-specific?"],
+  "upgrade_policy": "never_rewrite_instance"
+}
