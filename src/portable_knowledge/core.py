@@ -1226,12 +1226,14 @@ def bundle_apply_command(root: Path, args: argparse.Namespace) -> dict[str, Any]
     approved = read_json(approval_path)
     if not args.apply:
         return {"ok": True, "command": "bundle-apply", "bundle_id": args.bundle_id, "content_hash": bundle["content_hash"], "applied": False, "dry_run": True, "changed_files": bundle["expected_changed_files"], "errors": []}
-    changed = apply_bundle(root, bundle, approved, transactional_replace)
-    receipt = {"schema_version": 1, "bundle_id": args.bundle_id, "content_hash": bundle["content_hash"], "changed_files": changed}
     receipt_rel = relpath(root, receipt_path)
-    transactional_replace(root, "bundle-receipt", {receipt_rel: bundle_json(receipt)})
+    receipt = {"schema_version": 1, "bundle_id": args.bundle_id, "content_hash": bundle["content_hash"], "changed_files": bundle["expected_changed_files"]}
+    def replace_with_receipt(target_root: Path, command: str, writes: dict[str, bytes]) -> list[str]:
+        complete = {**writes, receipt_rel: bundle_json(receipt)}
+        return transactional_replace(target_root, command, complete, lambda _: validate_planned_writes(target_root, writes))
+    changed = apply_bundle(root, bundle, approved, replace_with_receipt)
     validation, projection = validate(root), rebuild(root)
-    return {"ok": validation["ok"] and projection["ok"], "command": "bundle-apply", "bundle_id": args.bundle_id, "applied": True, "dry_run": False, "changed_files": changed + [receipt_rel], "validation": validation, "projection": projection, "git_status": git_status(root), "errors": validation["errors"] + projection.get("errors", [])}
+    return {"ok": validation["ok"] and projection["ok"], "command": "bundle-apply", "bundle_id": args.bundle_id, "applied": True, "dry_run": False, "changed_files": changed, "validation": validation, "projection": projection, "git_status": git_status(root), "errors": validation["errors"] + projection.get("errors", [])}
 
 
 def bundle_inspect_command(root: Path, bundle_id: str | None) -> dict[str, Any]:
