@@ -57,6 +57,19 @@ def build_bundle(root: Path, manifest: dict[str, Any], identities: dict[str, Any
     return {**body, "bundle_id": f"bnd_{content_hash[:26]}", "content_hash": content_hash}
 
 
+def capture_bundle_draft(root: Path, request: dict[str, Any], identities: dict[str, Any]) -> dict[str, Any]:
+    """Run required intake declarations and return an immutable Bundle draft without writing it."""
+    required = {"duplicate", "conflict", "authority", "scope", "repository_state", "deletion_test"}
+    checks = request.get("capture_checks")
+    if not isinstance(checks, dict) or required - set(checks) or any(checks.get(key) in {None, "", "not_checked"} for key in required):
+        raise BundleError("capture_checks must declare duplicate, conflict, authority, scope, repository_state, and deletion_test")
+    bundle = build_bundle(root, request, identities)
+    return {"ok": True, "command": "capture", "draft_only": True, "approved": False, "applied": False,
+            "checks": {key: checks[key] for key in sorted(required)}, "bundle_id": bundle["bundle_id"],
+            "content_hash": bundle["content_hash"], "expected_changed_files": bundle["expected_changed_files"],
+            "bundle": bundle, "errors": []}
+
+
 def verify_bundle(bundle: dict[str, Any]) -> None:
     claimed = bundle.get("content_hash")
     body = {k: v for k, v in bundle.items() if k not in {"bundle_id", "content_hash"}}

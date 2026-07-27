@@ -72,6 +72,10 @@ def validate_project_memory(instance: Instance) -> dict[str, Any]:
         value = authority.get(key)
         if not _relative(value): error("AUTHORITY_PATH", CONFIG_NAME, f"invalid authority path: {key}")
         elif not (root / value).exists(): error("AUTHORITY_MISSING", str(value), "configured authority path does not exist")
+    refs_path = authority.get("authority_refs")
+    if refs_path is not None:
+        if not _relative(refs_path): error("AUTHORITY_PATH", CONFIG_NAME, "invalid authority path: authority_refs")
+        elif not (root / refs_path).is_file(): error("AUTHORITY_MISSING", str(refs_path), "configured authority refs file does not exist")
     identities = raw.get("identities", {})
     for key in ("principal", "executor", "workspace", "writer"):
         if not isinstance(identities.get(key), dict) or not identities[key].get("id"): error("IDENTITY_MISSING", CONFIG_NAME, f"missing {key}.id")

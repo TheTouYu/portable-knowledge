@@ -27,7 +27,9 @@ from pathlib import Path, PurePosixPath
 from typing import Any, Iterable, Iterator
 
 from .instance import Instance, InstanceError, load_instance, validate_project_memory
-from .bundle import BundleError, apply_bundle, approval, build_bundle, bundle_paths, canonical as bundle_json, rollback_bundle, verify_bundle
+from .bundle import BundleError, apply_bundle, approval, build_bundle, bundle_paths, canonical as bundle_json, capture_bundle_draft, rollback_bundle, verify_bundle
+from .authority import observe_authority_refs
+from .retrieval import RetrievalError, build_progressive_scope
 
 SCHEMA_VERSION = 1
 REGISTRY_REL = Path("data/knowledge/registry.json")
@@ -677,6 +679,98 @@ def query_command(root: Path, query: str, level: int, limit: int, cursor: int, p
             "scope_note": "Local deterministic projection only; permission and lifecycle filters were applied before pagination. A limited result is not proof of repository-wide absence.", "errors": []}
 
 
+def progressive_query_command(root: Path, instance: Instance, context_id: str, intent: str, max_level: int,
+                              limit: int, permission: str, check_authority: bool, cursor: int = 0) -> dict[str, Any]:
+    registry, _ = load_authority(root)
+    scope = build_progressive_scope(instance.raw, registry, context_id=context_id, intent=intent, limit=limit)
+    settings = instance.raw.get("retrieval", {})
+    character_limit = min(12_000, max(500, int(settings.get("max_characters", 6_000))))
+    topic_items = [{key: topic.get(key) for key in ("id", "node_id", "title", "summary", "path", "permission")}
+                   for topic in scope["topics"]]
+    node_items = [{key: node.get(key) for key in ("id", "name", "boundary")}
+                  for node in scope["nodes"]]
+    claim_items: list[dict[str, Any]] = []
+    claims_truncated = False
+    next_cursor: int | None = None
+    if max_level >= 2:
+        connection = ensure_projection(root)
+        rank = {"restricted": 0, "internal": 1, "public_redacted": 2, "public": 3}
+        all_claims: list[dict[str, Any]] = []
+        for topic in scope["topics"]:
+            rows = connection.execute("SELECT id,node_id,topic_id,title,statement,lifecycle,confirmation,conflict,permission FROM claims WHERE topic_id=? AND lifecycle='active' ORDER BY id", (topic["id"],)).fetchall()
+            for row in rows:
+                if rank[row[8]] < rank[permission]:
+                    continue
+                all_claims.append({"kind": "claim", "id": row[0], "node_id": row[1], "topic_id": row[2], "title": row[3],
+                                   "summary": row[4][:500], "lifecycle": row[5], "confirmation": row[6], "conflict": row[7], "permission": row[8]})
+        connection.close()
+        claim_limit = min(12, max(1, int(settings.get("max_claims", 6))))
+        claim_items = all_claims[cursor:cursor + claim_limit]
+        claims_truncated = cursor + len(claim_items) < len(all_claims)
+        next_cursor = cursor + len(claim_items) if claims_truncated else None
+    claim_ids = {claim["id"] for claim in claim_items}
+    ref_items: list[dict[str, Any]] = []
+    refs_path_value = instance.authority.get("authority_refs")
+    if refs_path_value and claim_ids:
+        refs_doc = read_json(root / refs_path_value)
+        matching = [ref for ref in refs_doc.get("refs", []) if claim_ids.intersection(ref.get("claim_ids", []))]
+        requested_roles = set(scope["route"].get("verification_roles", [])) if max_level >= 3 else set()
+        if requested_roles:
+            matching = [ref for ref in matching if ref.get("role") in requested_roles]
+        observations = observe_authority_refs(root, matching) if check_authority else matching
+        blocked_ids = set().union(*(set(ref.get("claim_ids", [])) for ref in observations if ref.get("status") in {"invalidated", "missing", "invalid_ref", "working_observation"}), set())
+        if blocked_ids:
+            claim_items = [claim for claim in claim_items if claim["id"] not in blocked_ids]
+            claim_ids = {claim["id"] for claim in claim_items}
+            observations = [ref for ref in observations if claim_ids.intersection(ref.get("claim_ids", []))]
+        ref_items = [{key: ref.get(key) for key in ("id", "path", "locator", "role", "baseline_state", "change_policy", "status", "claim_ids") if key in ref}
+                     for ref in observations]
+    minimum_files = list(dict.fromkeys(
+        [topic["path"] for topic in topic_items]
+        + ([ref["path"] for ref in ref_items if ref.get("status", "current") == "current"] if max_level >= 3 else [])
+    ))
+    payload = {
+        "ok": True, "command": "progressive-query", "context": {key: scope["context"].get(key) for key in ("id", "lifecycle", "goal", "current_recovery")},
+        "intent": scope["route"].get("id"), "query": intent, "max_level": max_level,
+        "retrieval_strategy": scope["retrieval_strategy"], "candidate_topics": scope["candidate_topics"],
+        "confidence": scope["confidence"], "margin": scope["margin"], "failure_type": None,
+        "nodes": node_items, "topics": topic_items, "claims": claim_items,
+        "escalate_to_l3": bool(scope["route"].get("escalate_to_l3", False)),
+        "authority_refs": ref_items, "minimum_files": minimum_files,
+        "read_only": True, "operation_authorized": False,
+        "truncated": scope["truncated"] or claims_truncated, "next_cursor": next_cursor, "errors": [],
+        "budget": character_limit,
+        "scope_note": "Context-scoped explicit route or bounded metadata retrieval only; no full knowledge document or unregistered authority file was read. This is a read-only retrieval result, not operation authorization.",
+    }
+    if _json_characters(payload) > character_limit:
+        payload["claims"] = [{key: claim.get(key) for key in ("id", "node_id", "topic_id", "title", "confirmation", "conflict")} for claim in claim_items]
+        payload["context"].pop("goal", None)
+        payload["nodes"] = [{key: node.get(key) for key in ("id", "name")} for node in node_items]
+        payload["topics"] = [{key: topic.get(key) for key in ("id", "node_id", "title", "path")} for topic in topic_items]
+        payload["authority_refs"] = [{key: ref.get(key) for key in ("id", "path", "role", "status")} for ref in ref_items]
+        payload["truncated"] = True
+    while payload["candidate_topics"] and _json_characters(payload) + 32 > character_limit:
+        payload["candidate_topics"].pop()
+        payload["truncated"] = True
+    while payload["claims"] and _json_characters(payload) + 32 > character_limit:
+        payload["claims"].pop()
+        payload["truncated"] = True
+        payload["next_cursor"] = cursor + len(payload["claims"])
+    while payload["authority_refs"] and _json_characters(payload) + 32 > character_limit:
+        payload["authority_refs"].pop()
+        payload["truncated"] = True
+    if _json_characters(payload) + 32 > character_limit:
+        payload["scope_note"] = "Bounded read-only route; no operation authorization."
+        payload["query"] = str(payload["query"])[:120]
+        payload["truncated"] = True
+    payload["used_characters"] = 0
+    for _ in range(4):
+        payload["used_characters"] = _json_characters(payload)
+    if payload["used_characters"] > character_limit:
+        raise RetrievalError(f"response budget too small for mandatory progressive-query metadata: {character_limit}")
+    return payload
+
+
 def show_claim(root: Path, claim_id: str, evidence_limit: int, cursor: int, permission: str) -> dict[str, Any]:
     if not ID_RE["claim"].fullmatch(claim_id):
         raise KnowledgeError("invalid claim ID")
@@ -1201,6 +1295,11 @@ def _load_bundle(root: Path, bundle_id: str) -> dict[str, Any]:
     return value
 
 
+def capture_command(root: Path, args: argparse.Namespace, instance: Instance) -> dict[str, Any]:
+    request = read_json(Path(args.manifest))
+    return capture_bundle_draft(root, request, instance.identities)
+
+
 def bundle_create_command(root: Path, args: argparse.Namespace, instance: Instance) -> dict[str, Any]:
     manifest = read_json(root / args.manifest)
     bundle = build_bundle(root, manifest, instance.identities)
@@ -1371,6 +1470,14 @@ def parser_build() -> argparse.ArgumentParser:
     query.add_argument("--permission", choices=tuple(PERMISSIONS), default="internal")
     query.add_argument("--node")
     query.add_argument("--topic")
+    progressive = command("progressive-query", aliases=["query-context"])
+    progressive.add_argument("--context", required=True)
+    progressive.add_argument("--intent", required=True)
+    progressive.add_argument("--max-level", type=int, choices=(1, 2, 3), default=2)
+    progressive.add_argument("--limit", type=int, default=3)
+    progressive.add_argument("--cursor", type=int, default=0)
+    progressive.add_argument("--permission", choices=tuple(PERMISSIONS), default="internal")
+    progressive.add_argument("--check-authority", action="store_true")
     show = command("show-claim")
     show.add_argument("claim_id")
     show.add_argument("--evidence-limit", type=int, default=10)
@@ -1451,6 +1558,8 @@ def parser_build() -> argparse.ArgumentParser:
     permission_change.add_argument("claim_id")
     permission_change.add_argument("--permission", choices=tuple(PERMISSIONS), required=True)
     permission_change.add_argument("--reason", required=True)
+    capture = command("capture")
+    capture.add_argument("--manifest", required=True)
     bundle_create = mutation("bundle-create")
     bundle_create.add_argument("--manifest", required=True)
     bundle_approve = mutation("bundle-approve")
@@ -1517,6 +1626,7 @@ def main(argv: list[str] | None = None) -> int:
         elif args.command == "rebuild": payload = rebuild(root)
         elif args.command == "tree": payload = tree_command(root)
         elif args.command == "query": payload = query_command(root, args.query, args.level, args.limit, args.cursor, args.permission, args.node, args.topic)
+        elif args.command in {"progressive-query", "query-context"}: payload = progressive_query_command(root, instance, args.context, args.intent, args.max_level, args.limit, args.permission, args.check_authority, args.cursor)
         elif args.command == "show-claim": payload = show_claim(root, args.claim_id, args.evidence_limit, args.cursor, args.permission)
         elif args.command == "register-source": payload = register_source_command(root, args)
         elif args.command == "new-claim": payload = new_claim_command(root, args)
@@ -1529,6 +1639,7 @@ def main(argv: list[str] | None = None) -> int:
         elif args.command == "retract-evidence": payload = retract_evidence_command(root, args)
         elif args.command == "confirm-claim": payload = append_semantic_event(root, args, "confirm-claim", "claim_confirmed", {"claim_id": args.claim_id, "confirmation": args.confirmation, "reason": args.reason})
         elif args.command == "change-permission": payload = append_semantic_event(root, args, "change-permission", "claim_permission_changed", {"claim_id": args.claim_id, "permission": args.permission, "reason": args.reason})
+        elif args.command == "capture": payload = capture_command(root, args, instance)
         elif args.command == "bundle-create": payload = bundle_create_command(root, args, instance)
         elif args.command == "bundle-approve": payload = bundle_approve_command(root, args, instance)
         elif args.command == "bundle-apply": payload = bundle_apply_command(root, args)
@@ -1541,8 +1652,12 @@ def main(argv: list[str] | None = None) -> int:
         elif args.command == "abandon": payload = abandon_transaction(root, args.operation_id)
         elif args.command == "new-id": payload = {"ok": True, "command": "new-id", "kind": args.kind, "id": new_id(args.kind), "errors": []}
         else: raise KnowledgeError(f"unknown command: {args.command}")
-    except (KnowledgeError, BundleError, OSError, sqlite3.Error) as exc:
-        payload = {"ok": False, "command": args.command, "errors": [{"code": "KNOWLEDGE_ERROR", "path": ".", "message": str(exc)}]}
+    except (KnowledgeError, RetrievalError, BundleError, OSError, sqlite3.Error) as exc:
+        error = {"code": getattr(exc, "code", "KNOWLEDGE_ERROR"), "path": ".", "message": str(exc)}
+        if isinstance(exc, RetrievalError):
+            error.update(exc.details)
+        payload = {"ok": False, "command": args.command, "read_only": args.command in {"progressive-query", "query-context", "capture"},
+                   "operation_authorized": False, "errors": [error]}
     if args.command in {"recover", "rollback", "abandon"}:
         payload["git_status"] = git_status(root)
     output(payload, args.format)

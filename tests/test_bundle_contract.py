@@ -4,7 +4,7 @@ from pathlib import Path
 
 PACKAGE=Path(__file__).resolve().parents[1]
 sys.path.insert(0,str(PACKAGE/'src'))
-from portable_knowledge.bundle import BundleError, apply_bundle, approval, build_bundle, verify_bundle
+from portable_knowledge.bundle import BundleError, apply_bundle, approval, build_bundle, capture_bundle_draft, verify_bundle
 from portable_knowledge.core import transactional_replace
 
 IDENTITIES={"principal":{"id":"owner"},"executor":{"id":"agent"},"workspace":{"id":"test"},"writer":{"id":"channel"}}
@@ -29,6 +29,20 @@ class BundleContractTests(unittest.TestCase):
         with self.assertRaises(BundleError): apply_bundle(self.root,bundle,approved,transactional_replace)
         self.assertEqual(before,{p:p.read_bytes() for p in (self.root/'data/knowledge').glob('*.txt')})
         self.assertFalse((self.root/'data/knowledge/b.txt').exists())
+    def test_capture_only_returns_an_existing_bundle_draft(self):
+        request={**self.manifest,"capture_checks":{"duplicate":"checked","conflict":"checked","authority":"checked","scope":"checked","repository_state":"working_tree_observation","deletion_test":"passed"}}
+        result=capture_bundle_draft(self.root,request,IDENTITIES)
+        self.assertEqual(result["command"],"capture")
+        self.assertTrue(result["draft_only"])
+        self.assertFalse(result["approved"])
+        self.assertFalse(result["applied"])
+        verify_bundle(result["bundle"])
+        self.assertFalse((self.root/'data/knowledge/bundles').exists())
+
+    def test_capture_fails_closed_when_required_checks_are_missing(self):
+        with self.assertRaisesRegex(BundleError,"capture_checks"):
+            capture_bundle_draft(self.root,self.manifest,IDENTITIES)
+
     def test_controlled_bundle_classes_are_independent(self):
         for kind in ('source_evidence','claim_create','claim_revise','permission_expansion','lifecycle_change','node_boundary_change'):
             manifest=dict(self.manifest); manifest['bundle_type']=kind
