@@ -28,7 +28,7 @@ from typing import Any, Iterable, Iterator
 
 from .instance import Instance, InstanceError, load_instance, validate_project_memory
 from .bundle import BundleError, apply_bundle, approval, build_bundle, bundle_paths, canonical as bundle_json, capture_bundle_draft, rollback_bundle, verify_bundle
-from .authority import observe_authority_refs
+from .authority import observe_authority_refs, validate_authority_coverage, validate_authority_ref
 from .retrieval import RetrievalError, build_progressive_scope
 
 SCHEMA_VERSION = 1
@@ -236,6 +236,7 @@ def iter_jsonl(root: Path) -> Iterator[tuple[str, str, int, dict[str, Any]]]:
 def parse_claims(root: Path, registry: dict[str, Any]) -> tuple[list[dict[str, Any]], list[Finding]]:
     findings: list[Finding] = []
     topics = {topic["path"]: topic for topic in registry.get("topics", [])}
+    claim_metadata = registry.get("claim_metadata", {})
     claims: list[dict[str, Any]] = []
     seen: dict[str, str] = {}
     for path in sorted((root / _knowledge_rel(root)).rglob("*.md")):
@@ -276,6 +277,7 @@ def parse_claims(root: Path, registry: dict[str, Any]) -> tuple[list[dict[str, A
                         "lifecycle": "active", "confirmation": "unconfirmed", "conflict": "none",
                         "permission": topic.get("permission", "internal") if topic else "internal",
                         "content_hash": content_hash(body), "fingerprint": text_fingerprint(body),
+                        "fact_classes": claim_metadata.get(claim_id, {}).get("fact_classes", []),
                     })
                     if claim_id in seen:
                         findings.append(Finding("CLAIM_ID_DUPLICATE", rel, f"also appears in {seen[claim_id]}"))
@@ -383,6 +385,17 @@ def validate(root: Path) -> dict[str, Any]:
     claims, claim_findings = parse_claims(root, registry)
     findings.extend(claim_findings)
     claim_ids = {claim["id"] for claim in claims}
+    try:
+        instance_for_refs = load_instance(root)
+        refs_value = instance_for_refs.authority.get("authority_refs")
+        refs = read_json(root / refs_value).get("refs", []) if refs_value else []
+        for ref in refs:
+            for error in validate_authority_ref(ref)["errors"]:
+                findings.append(Finding(error["code"], refs_value or "authority_ref", error["message"]))
+        for coverage in validate_authority_coverage(claims, refs):
+            findings.append(Finding(coverage["code"], str(refs_value or REGISTRY_REL), f"{coverage['claim_id']}: missing {', '.join(coverage['missing_fact_classes'])}"))
+    except (InstanceError, OSError, json.JSONDecodeError):
+        pass
     event_ids: dict[str, str] = {}
     source_ids: dict[str, str] = {}
     family_hashes: dict[tuple[str, str], str] = {}
@@ -593,7 +606,16 @@ def ensure_projection(root: Path) -> sqlite3.Connection:
 
 def tree_command(root: Path) -> dict[str, Any]:
     registry, _ = load_authority(root)
-    nodes = [{key: node[key] for key in ("id", "name", "path", "boundary", "keywords", "migration_status")} for node in registry["nodes"]]
+    claims, _ = parse_claims(root, registry)
+    nodes = []
+    for node in registry["nodes"]:
+        item = {key: node[key] for key in ("id", "name", "path", "boundary", "keywords", "migration_status")}
+        item["topics"] = [
+            {**{key: topic.get(key) for key in ("id", "title", "path", "summary")},
+             "claim_count": sum(claim.get("topic_id") == topic.get("id") for claim in claims)}
+            for topic in registry.get("topics", []) if topic.get("node_id") == node.get("id")
+        ]
+        nodes.append(item)
     return {"ok": True, "command": "tree", "count": len(nodes), "nodes": nodes, "truncated": False, "next_cursor": None, "errors": []}
 
 
@@ -679,6 +701,28 @@ def query_command(root: Path, query: str, level: int, limit: int, cursor: int, p
             "scope_note": "Local deterministic projection only; permission and lifecycle filters were applied before pagination. A limited result is not proof of repository-wide absence.", "errors": []}
 
 
+def _claim_summary(statement: str, limit: int = 500) -> dict[str, Any]:
+    boundary_marker = "#### 适用边界"
+    assertion, _, boundary = statement.partition(boundary_marker)
+    assertion = assertion.strip()
+    boundary = boundary.strip()
+    full = assertion + (("\n\n" + boundary_marker + "\n\n" + boundary) if boundary else "")
+    if len(full) <= limit:
+        return {"summary": full, "assertion": assertion, "safety_boundary": boundary or None,
+                "summary_truncated": False, "truncated_sections": [], "full_claim_requires_l3": False}
+    # Safety boundaries are mandatory. Trim the assertion first and report every local truncation.
+    boundary_budget = min(len(boundary), max(120, limit // 2)) if boundary else 0
+    assertion_budget = max(80, limit - boundary_budget - (len(boundary_marker) + 4 if boundary else 0))
+    compact_assertion = assertion[:assertion_budget].rstrip()
+    compact_boundary = boundary[:boundary_budget].rstrip()
+    sections = []
+    if len(compact_assertion) < len(assertion): sections.append("assertion")
+    if len(compact_boundary) < len(boundary): sections.append("safety_boundary")
+    summary = compact_assertion + (("\n\n" + boundary_marker + "\n\n" + compact_boundary) if boundary else "")
+    return {"summary": summary, "assertion": compact_assertion, "safety_boundary": compact_boundary or None,
+            "summary_truncated": True, "truncated_sections": sections, "full_claim_requires_l3": True}
+
+
 def progressive_query_command(root: Path, instance: Instance, context_id: str, intent: str, max_level: int,
                               limit: int, permission: str, check_authority: bool, cursor: int = 0) -> dict[str, Any]:
     registry, _ = load_authority(root)
@@ -702,7 +746,18 @@ def progressive_query_command(root: Path, instance: Instance, context_id: str, i
                 if rank[row[8]] < rank[permission]:
                     continue
                 all_claims.append({"kind": "claim", "id": row[0], "node_id": row[1], "topic_id": row[2], "title": row[3],
-                                   "summary": row[4][:500], "lifecycle": row[5], "confirmation": row[6], "conflict": row[7], "permission": row[8]})
+                                   **_claim_summary(row[4]), "lifecycle": row[5], "governance_confirmation": row[6],
+                                   "confirmation": row[6], "conflict": row[7], "permission": row[8]})
+        evidence_rows = connection.execute("SELECT claim_id,support_type,evidence_kind FROM evidence").fetchall()
+        evidence_by_claim: dict[str, list[tuple[str, str]]] = {}
+        for claim_id_value, support_type, evidence_kind in evidence_rows:
+            evidence_by_claim.setdefault(claim_id_value, []).append((support_type, evidence_kind))
+        for claim in all_claims:
+            evidence = evidence_by_claim.get(claim["id"], [])
+            kinds = sorted({kind for support, kind in evidence if support == "supports"})
+            claim["evidence_strength"] = {"status": "supported" if kinds else "not_registered", "supporting_kinds": kinds,
+                                          "qualifier_count": sum(support == "qualifies" for support, _ in evidence),
+                                          "contradiction_count": sum(support == "contradicts" for support, _ in evidence)}
         connection.close()
         claim_limit = min(12, max(1, int(settings.get("max_claims", 6))))
         claim_items = all_claims[cursor:cursor + claim_limit]
@@ -723,11 +778,11 @@ def progressive_query_command(root: Path, instance: Instance, context_id: str, i
             claim_items = [claim for claim in claim_items if claim["id"] not in blocked_ids]
             claim_ids = {claim["id"] for claim in claim_items}
             observations = [ref for ref in observations if claim_ids.intersection(ref.get("claim_ids", []))]
-        ref_items = [{key: ref.get(key) for key in ("id", "path", "locator", "role", "baseline_state", "change_policy", "status", "claim_ids") if key in ref}
+        ref_items = [{key: ref.get(key) for key in ("id", "path", "locator", "role", "baseline_state", "change_policy", "status", "baseline_status", "working_tree_status", "effective_status", "supports_fact_classes", "claim_ids") if key in ref}
                      for ref in observations]
     minimum_files = list(dict.fromkeys(
         [topic["path"] for topic in topic_items]
-        + ([ref["path"] for ref in ref_items if ref.get("status", "current") == "current"] if max_level >= 3 else [])
+        + ([ref["path"] for ref in ref_items if ref.get("effective_status", ref.get("status", "current")) in {"current", "pending_review"}] if max_level >= 3 else [])
     ))
     payload = {
         "ok": True, "command": "progressive-query", "context": {key: scope["context"].get(key) for key in ("id", "lifecycle", "goal", "current_recovery")},
@@ -737,11 +792,20 @@ def progressive_query_command(root: Path, instance: Instance, context_id: str, i
         "nodes": node_items, "topics": topic_items, "claims": claim_items,
         "escalate_to_l3": bool(scope["route"].get("escalate_to_l3", False)),
         "authority_refs": ref_items, "minimum_files": minimum_files,
+        "capabilities": scope["route"].get("capabilities", {"read_knowledge": True, "write": False}),
         "read_only": True, "operation_authorized": False,
         "truncated": scope["truncated"] or claims_truncated, "next_cursor": next_cursor, "errors": [],
+        "summary_truncated": any(claim.get("summary_truncated", False) for claim in claim_items),
+        "truncated_claims": [{"id": claim["id"], "sections": claim.get("truncated_sections", [])} for claim in claim_items if claim.get("summary_truncated")],
+        "warnings": [f"authority pending review: {ref.get('path')}" for ref in ref_items if ref.get("effective_status") == "pending_review"],
         "budget": character_limit,
         "scope_note": "Context-scoped explicit route or bounded metadata retrieval only; no full knowledge document or unregistered authority file was read. This is a read-only retrieval result, not operation authorization.",
     }
+    if scope["route"].get("result_profile") == "production_progress":
+        payload["durable_baseline"] = {"claims": [{"id": claim["id"], "title": claim["title"]} for claim in claim_items], "status": "historically_verified"}
+        payload["current_recovery"] = {"path": payload["context"].get("current_recovery"), "status": "requires_memory_read"}
+        payload["working_observations"] = []
+        payload["staleness"] = {"target_rechecked": False, "still_current": "unknown", "recheck_required": True}
     if _json_characters(payload) > character_limit:
         payload["claims"] = [{key: claim.get(key) for key in ("id", "node_id", "topic_id", "title", "confirmation", "conflict")} for claim in claim_items]
         payload["context"].pop("goal", None)
@@ -1306,9 +1370,9 @@ def bundle_create_command(root: Path, args: argparse.Namespace, instance: Instan
     path, _, _ = bundle_paths(root, bundle["bundle_id"])
     writes = {relpath(root, path): bundle_json(bundle)}
     if not args.apply:
-        return {"ok": True, "command": "bundle-create", "bundle_id": bundle["bundle_id"], "content_hash": bundle["content_hash"], "applied": False, "dry_run": True, "changed_files": sorted(writes), "bundle": bundle, "errors": []}
+        return {"ok": True, "command": "bundle-create", "bundle_id": bundle["bundle_id"], "content_hash": bundle["content_hash"], "applied": False, "dry_run": True, "changed_files": sorted(writes), "bundle": bundle, "next_step": f"Re-run bundle-create --manifest {args.manifest} --apply. This creates the immutable Bundle file only; it does not apply knowledge changes.", "errors": []}
     changed = transactional_replace(root, "bundle-create", writes)
-    return {"ok": True, "command": "bundle-create", "bundle_id": bundle["bundle_id"], "content_hash": bundle["content_hash"], "applied": True, "dry_run": False, "changed_files": changed, "errors": []}
+    return {"ok": True, "command": "bundle-create", "bundle_id": bundle["bundle_id"], "content_hash": bundle["content_hash"], "applied": True, "dry_run": False, "changed_files": changed, "next_step": f"Inspect {bundle['bundle_id']}, then obtain exact-hash approval before bundle-approve. Knowledge changes are not yet applied.", "errors": []}
 
 
 def bundle_approve_command(root: Path, args: argparse.Namespace, instance: Instance) -> dict[str, Any]:
@@ -1437,13 +1501,41 @@ def git_status(root: Path) -> list[str]:
 def output(payload: dict[str, Any], fmt: str) -> None:
     if fmt == "json":
         print(json.dumps(payload, ensure_ascii=False, indent=2))
-    elif payload.get("ok"):
-        print(f"OK: {payload.get('command')}")
-        if "count" in payload:
-            print(f"count: {payload['count']}")
-    else:
+    elif not payload.get("ok"):
         for error in payload.get("errors", []):
             print(f"ERROR [{error.get('code', 'ERROR')}] {error.get('path', '.')}: {error.get('message', '')}")
+    elif payload.get("command") == "tree":
+        print("OK: tree")
+        print("Knowledge tree")
+        for node in payload.get("nodes", []):
+            print(f"{node.get('id')} — {node.get('name')}")
+            for topic in node.get("topics", []):
+                print(f"  └─ {topic.get('id')} — {topic.get('title')} ({topic.get('claim_count', 0)} claims)")
+    elif payload.get("command") == "progressive-query":
+        print(f"Context: {payload.get('context', {}).get('id')}")
+        print(f"Intent: {payload.get('intent') or '(dynamic)'}")
+        print(f"Strategy: {payload.get('retrieval_strategy')}")
+        print("Topics: " + ", ".join(item.get("id", "") for item in payload.get("topics", [])))
+        print("Claims:")
+        for claim in payload.get("claims", []): print(f"  - {claim.get('id')}: {claim.get('title')}")
+        print("Authority: " + (", ".join(f"{ref.get('id', ref.get('path'))}={ref.get('effective_status', ref.get('status', 'unchecked'))}" for ref in payload.get("authority_refs", [])) or "none"))
+        print("Minimum files: " + (", ".join(payload.get("minimum_files", [])) or "none"))
+        print(f"Escalate to L3: {str(bool(payload.get('escalate_to_l3'))).lower()}")
+        print(f"Operation authorized: {str(bool(payload.get('operation_authorized'))).lower()}")
+        print(f"Budget: {payload.get('used_characters', 0)}/{payload.get('budget', 0)}")
+        print("Warnings: " + (", ".join(payload.get("warnings", [])) or "none"))
+    elif payload.get("command") == "show-claim":
+        claim = payload.get("claim", {})
+        print(f"Claim: {claim.get('id')} — {claim.get('title')}")
+        print(claim.get("statement", ""))
+        print(f"Governance confirmation: {claim.get('confirmation')}")
+        print(f"Conflict: {claim.get('conflict')}")
+        print(f"Evidence strength: {payload.get('evidence_status')}")
+        print(f"Evidence: {len(payload.get('evidence', []))}/{payload.get('evidence_total', 0)}")
+    else:
+        print(f"OK: {payload.get('command')}")
+        if "count" in payload: print(f"count: {payload['count']}")
+        if payload.get("next_step"): print(f"Next step: {payload['next_step']}")
 
 
 def parser_build() -> argparse.ArgumentParser:
@@ -1485,8 +1577,8 @@ def parser_build() -> argparse.ArgumentParser:
     show.add_argument("--permission", choices=tuple(PERMISSIONS), default="internal")
     def mutation(name: str) -> argparse.ArgumentParser:
         child = command(name)
-        child.add_argument("--actor", default="dongzhi-arch")
-        child.add_argument("--performed-by", default="pi")
+        child.add_argument("--actor")
+        child.add_argument("--performed-by")
         child.add_argument("--created-at")
         mode = child.add_mutually_exclusive_group()
         mode.add_argument("--apply", action="store_true")
@@ -1616,6 +1708,9 @@ def main(argv: list[str] | None = None) -> int:
     try:
         instance = load_instance(root, args.config)
         configure(instance)
+        if hasattr(args, "actor"):
+            args.actor = args.actor or instance.identities["writer"]["id"]
+            args.performed_by = args.performed_by or instance.identities["executor"]["id"]
         memory = validate_project_memory(instance)
         if not memory["ok"] and args.command in {"validate", "rebuild"}:
             payload = {"ok": False, "command": args.command, "errors": memory["errors"]}

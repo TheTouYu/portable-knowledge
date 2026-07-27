@@ -42,6 +42,8 @@ class MemoryAuthorityContractTests(unittest.TestCase):
    target.write_text('v2\n')
    observations=observe_authority_refs(root,[review,invalid])
    self.assertEqual([x['status'] for x in observations],['stale','invalidated'])
+   self.assertEqual(observations[0]['baseline_status'],'stale')
+   self.assertEqual(observations[0]['effective_status'],'stale')
    self.assertEqual(queryable_claim_ids({'clm_a','clm_b','clm_c'},observations),{'clm_c'})
    working=dict(review,baseline_state='working_tree_observation',change_policy='existence_only',claim_ids=['clm_c'])
    self.assertEqual(queryable_claim_ids({'clm_c'},observe_authority_refs(root,[working])),set())
@@ -58,13 +60,14 @@ class MemoryAuthorityContractTests(unittest.TestCase):
   self.assertEqual([x["id"] for x in writeback["topics"]],["closure","writeback"])
 
  def test_unknown_and_ambiguous_intents_fail_closed(self):
-  config={"retrieval":{"intent_routes":[
-   {"id":"screenshot","contexts":["c"],"keywords":["截图","只看图"],"blocked_by":["不看图"]},
-   {"id":"writeback","contexts":["c"],"keywords":["写回","ID"],"blocked_by":["不写回"]},
+  config={"retrieval":{"semantic_groups":{"read_only":["不写回","别动地图","do not write"],"visual_only":["只看图","仅分析图片"]},"intent_routes":[
+   {"id":"screenshot","contexts":["c"],"keywords":["截图","只看图","仅分析图片"],"blocked_by":["不看图"]},
+   {"id":"writeback","contexts":["c"],"keywords":["写回","ID"],"blocked_by_groups":["read_only","visual_only"]},
   ]}}
   with self.assertRaisesRegex(RetrievalError,"no configured"): select_intent_route(config,context_id="c",intent="未知")
   with self.assertRaisesRegex(RetrievalError,"ambiguous"): select_intent_route(config,context_id="c",intent="看截图并准备写回")
   self.assertEqual(select_intent_route(config,context_id="c",intent="只看图，不写回")["id"],"screenshot")
+  self.assertEqual(select_intent_route(config,context_id="c",intent="仅分析图片，别动地图")["id"],"screenshot")
   with self.assertRaisesRegex(RetrievalError,"no configured"): select_intent_route(config,context_id="c",intent="不看图")
   with self.assertRaisesRegex(RetrievalError,"no configured"): select_intent_route(config,context_id="c",intent="VALID identifier")
 

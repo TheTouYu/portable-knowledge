@@ -17,6 +17,14 @@ def _normalized(value: str) -> str:
     return " ".join(value.casefold().split())
 
 
+def _semantic_values(config: dict[str, Any], route: dict[str, Any], field: str, group_field: str) -> set[str]:
+    values = {_normalized(str(value)) for value in route.get(field, []) if str(value).strip()}
+    groups = config.get("retrieval", {}).get("semantic_groups", {})
+    for group_id in route.get(group_field, []):
+        values.update(_normalized(str(value)) for value in groups.get(group_id, []) if str(value).strip())
+    return values
+
+
 def _terms(value: str) -> set[str]:
     normalized = _normalized(value)
     latin = set(re.findall(r"[a-z0-9_][a-z0-9_.-]*", normalized))
@@ -38,7 +46,7 @@ def select_intent_route(config: dict[str, Any], *, context_id: str, intent: str)
 
     scored: list[tuple[int, int, str, dict[str, Any]]] = []
     for route in candidates:
-        blocked = {_normalized(str(value)) for value in route.get("blocked_by", []) if str(value).strip()}
+        blocked = _semantic_values(config, route, "blocked_by", "blocked_by_groups")
         if any(value in normalized for value in blocked):
             continue
         keywords = {_normalized(str(value)) for value in route.get("keywords", []) if str(value).strip()}
@@ -102,7 +110,7 @@ def _dynamic_route(config: dict[str, Any], registry: dict[str, Any], *, context_
         topic_id
         for route in config.get("retrieval", {}).get("intent_routes", [])
         if context_id in route.get("contexts", [])
-        and any(_normalized(str(term)) in normalized for term in route.get("blocked_by", []) if str(term).strip())
+        and any(term in normalized for term in _semantic_values(config, route, "blocked_by", "blocked_by_groups"))
         for topic_id in route.get("topic_ids", [])
     }
     candidates = [item for item in all_candidates if item["node_id"] in linked_nodes and item["id"] not in blocked_topics][:candidate_limit]

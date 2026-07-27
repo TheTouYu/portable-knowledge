@@ -10,7 +10,8 @@
     "approved_hash": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
     "fragment_hash": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
     "change_policy": {"enum": ["existence_only", "review_on_change", "invalidate_on_change", "manual_review"]},
-    "claim_ids": {"type": "array", "items": {"type": "string"}}
+    "claim_ids": {"type": "array", "items": {"type": "string"}},
+    "supports_fact_classes": {"type": "array", "uniqueItems": true, "items": {"enum": ["runtime_behavior", "public_type_surface", "cli_behavior", "documented_contract", "external_game_evidence", "transform_defaults", "writeback_behavior", "evidence_scope"]}}
   },
   "additionalProperties": false
 }
