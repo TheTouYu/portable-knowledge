@@ -1,0 +1,23 @@
+{
+  "schema_version": 1,
+  "instance": {"id": "minimal-existing", "name": "Minimal Existing Project"},
+  "pkc": {"version": "0.2.0rc1", "projection_path": ".local/pkc"},
+  "authority": {"registry": "data/store/registry.json", "actors": "data/store/actors.json", "store": "data/store", "knowledge": "domain"},
+  "identities": {
+    "principal": {"id": "owner"},
+    "executor": {"id": "configured-agent"},
+    "workspace": {"id": "minimal-workspace", "path": "."},
+    "writer": {"id": "owner-channel"}
+  },
+  "compatibility": {"v1_actor_map": {"owner-channel": "owner"}},
+  "memory": {
+    "roles": [
+      {"role": "operating_entry", "path": "memory/OPERATING.md", "mutation_policy": "reference"},
+      {"role": "current_recovery", "path": "memory/CURRENT.md", "mutation_policy": "replace"},
+      {"role": "decision_entry", "path": "memory/DECISIONS.md", "mutation_policy": "supersede"}
+    ],
+    "contexts": [{"id": "default", "default": true, "lifecycle": "active", "goal": "Maintain the configured project", "recovery_role": "current_recovery", "validation_gate": "pkc validate"}],
+    "startup_budget": {"max_files": 3, "max_characters": 4000},
+    "applies_to": {"workspace": ".", "branches": ["*"]}
+  }
+}

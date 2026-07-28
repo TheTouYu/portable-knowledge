@@ -1,0 +1,86 @@
+# PKC Agent Operating Contract
+
+This is the canonical entry for an AI model configuring or operating Portable Knowledge Core from a fresh context.
+
+## Read order
+
+1. `README.md`
+2. `INSTALL.md`
+3. `docs/QUICKSTART.md`
+4. Read `docs/SEMANTIC-CHANGES.md` only if a write is requested.
+5. In a target project, read its configured `operating_entry`, `current_recovery`, and `decision_entry` roles before complex work.
+
+Do not begin by reading all tests, all source files, Git history, `.local/`, SQLite, model traces, or every knowledge document.
+
+## Installation contract
+
+- Use Python 3.11 or newer.
+- Install PKC non-editably into a project-owned or tool-owned virtual environment.
+- Do not set `PYTHONPATH` to a source checkout in production.
+- Verify `pkc capabilities`, distribution version, and module origin as described in `INSTALL.md`.
+- The target project's `project-intelligence.json` is instance authority. Do not copy business facts from examples or Domain Packs.
+
+## Canonical CLI
+
+The only command entry is `pkc`.
+
+Discover commands with:
+
+```bash
+pkc --help
+pkc capabilities
+pkc knowledge-plan --help
+```
+
+Do not guess unsupported forms such as `pkc --version`, `pkc semantic-plan`, or `pkc query --text ...`.
+
+Global options precede the command:
+
+```bash
+pkc --root /path/to/project --config project-intelligence.json validate
+```
+
+Inside the target project, `--root` and `--config` normally use their defaults.
+
+## Safety boundaries
+
+- Git text assets are authoritative; `.local/` and SQLite are disposable projections.
+- Never read or modify SQLite directly.
+- Never assemble JSON manifests in shell, use Python APIs, or call `bundle-create --manifest` for normal production knowledge ingestion.
+- Use high-level `knowledge-plan` operations for Claim and Authority Reference changes.
+- Do not use compatibility/maintainer mode unless a human explicitly requests recovery work.
+- Do not mutate Git state (`add`, `commit`, `push`, reset, clean, checkout) unless the human explicitly requests it.
+- Preserve existing working-tree changes.
+- Working-tree-only observations cannot become stable authority.
+- Do not weaken permission, lifecycle, Authority coverage, provenance, staged validation, or exact-hash checks.
+
+## Read workflow
+
+```text
+validate/rebuild if projection is absent or stale
+→ tree or progressive-query for bounded routing
+→ query at L1/L2
+→ show-claim or L3 only for exact evidence/Authority boundaries
+```
+
+A limited query cannot justify a repository-wide absence statement.
+
+## Write workflow
+
+Use the exact contract in `docs/SEMANTIC-CHANGES.md`:
+
+```text
+knowledge-plan init
+→ add all Claims and Authority Refs
+→ one delta check
+→ finalize (full staged preflight)
+→ inspect immutable Bundle and exact content hash
+→ stop for explicit human approval
+→ approve that exact hash
+→ apply that same exact hash
+→ rebuild → validate → representative query → lifecycle inspection
+```
+
+Before approval, report semantic difference, evidence/Authority basis, exclusions, permission effect, expected changed files, risk, and the full content hash. Changed content invalidates approval.
+
+Never treat installation success, a neutral example, synthetic fixture, or local automated test as real-project evidence.

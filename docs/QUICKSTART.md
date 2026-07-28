@@ -1,0 +1,101 @@
+# Quickstart: First Project
+
+This walkthrough uses neutral data only. It proves tool configuration, not real-world knowledge.
+
+## 1. Create a disposable project
+
+From the PKC repository root:
+
+### Linux/macOS
+
+```bash
+cp -R examples/minimal-project /tmp/pkc-quickstart
+cd /tmp/pkc-quickstart
+git init
+git add .
+git commit -m "Initialize neutral PKC project"
+```
+
+### Windows PowerShell
+
+```powershell
+Copy-Item -Recurse .\examples\minimal-project $env:TEMP\pkc-quickstart
+Set-Location $env:TEMP\pkc-quickstart
+git init
+git add .
+git commit -m "Initialize neutral PKC project"
+```
+
+If Git requires an identity for this disposable repository, configure a local-only test identity. Do not change a user's global Git configuration without approval.
+
+## 2. Understand the instance
+
+`project-intelligence.json` connects PKC to the project. It declares:
+
+- instance and required PKC version;
+- authority registry, actor, store, and knowledge paths;
+- principal, executor, workspace, and writer identities;
+- Project Memory role files;
+- active Context and startup budget.
+
+Read `memory/OPERATING.md`, `memory/CURRENT.md`, and `memory/DECISIONS.md`. In a real project these are the bounded startup memory, not proof of current implementation or external behavior.
+
+## 3. Validate and build the projection
+
+Run with the `pkc` executable installed in `INSTALL.md`:
+
+```bash
+pkc capabilities
+pkc validate
+pkc rebuild
+pkc validate
+```
+
+Expected counts are one Node, one Topic, and one Claim. `.local/pkc/knowledge.sqlite` is generated and ignored by Git.
+
+## 4. Explore and retrieve
+
+```bash
+pkc tree --format text
+pkc query "deterministic lookup" --level 1 --format text
+pkc query "deterministic lookup" --level 2 --format json
+pkc show-claim clm_00000000000000000000000000 --format json
+```
+
+Levels:
+
+- L1: route and compact discovery.
+- L2: bounded Claim summaries plus configured metadata.
+- L3 / `show-claim`: exact boundary, Authority, evidence, conflict, and verification detail.
+
+Start bounded. Escalate only when exact evidence or Authority boundaries are needed.
+
+## 5. Use PKC in another project
+
+Do not copy the neutral Claim as project knowledge. Instead:
+
+1. Copy only the structural files you need.
+2. Map existing project documents to Memory roles in place; do not create duplicate status/decision bodies.
+3. Choose project-owned authority and knowledge paths.
+4. Define explicit identities and one Primary Context.
+5. Create Node/Topic structure only after project owner approval.
+6. Commit the baseline.
+7. Use high-level semantic plans for production Claim/Authority changes.
+
+The fact-free files under `domain-packs/` can help propose candidate structure for existing personal-brand or software projects. They do not preload Claims and cannot decide the project's actual facts.
+
+## 6. Read-only operating sequence for an AI model
+
+```text
+read project operating/current/decision entries
+→ pkc capabilities
+→ pkc validate
+→ pkc rebuild only if needed
+→ pkc tree or progressive-query
+→ pkc query at L1/L2
+→ show-claim only for exact verification
+```
+
+Never read `.local` or SQLite directly. Never report a local miss as proof of global absence.
+
+For writes, continue with [`SEMANTIC-CHANGES.md`](SEMANTIC-CHANGES.md).

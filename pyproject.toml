@@ -5,9 +5,20 @@ build-backend = "setuptools.build_meta"
 [project]
 name = "portable-knowledge"
 version = "0.2.0rc1"
-description = "Deterministic Portable Knowledge Core"
+description = "Deterministic, local-first knowledge authority, retrieval, and transaction core"
+readme = "README.md"
 requires-python = ">=3.11"
 dependencies = []
+classifiers = [
+  "Development Status :: 4 - Beta",
+  "Environment :: Console",
+  "Programming Language :: Python :: 3",
+  "Programming Language :: Python :: 3 :: Only",
+  "Programming Language :: Python :: 3.11",
+  "Programming Language :: Python :: 3.12",
+  "Programming Language :: Python :: 3.13",
+  "Topic :: Software Development :: Libraries :: Python Modules",
+]
 
 [project.scripts]
 pkc = "portable_knowledge.cli:main"

@@ -1955,6 +1955,10 @@ def main(argv: list[str] | None = None) -> int:
         parser.error(str(exc))
     root = args.root.resolve()
     try:
+        if args.command == "capabilities":
+            payload = capabilities_command()
+            output(payload, args.format)
+            return 0
         instance = load_instance(root, args.config)
         configure(instance)
         if hasattr(args, "actor"):
@@ -1965,8 +1969,7 @@ def main(argv: list[str] | None = None) -> int:
             payload = {"ok": False, "command": args.command, "errors": memory["errors"]}
             output(payload, args.format)
             return 1
-        if args.command == "capabilities": payload = capabilities_command()
-        elif args.command == "validate": payload = validate(root)
+        if args.command == "validate": payload = validate(root)
         elif args.command == "validate-merge": payload = validate_merge_command(root, args.base)
         elif args.command == "rebuild": payload = rebuild(root)
         elif args.command == "tree": payload = tree_command(root)

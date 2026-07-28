@@ -6,7 +6,7 @@ from typing import Any
 
 PACK_IDS={"personal-brand-existing","software-existing"}
 REQUIRED={"schema_version","id","version","project_kind","discovery_questions","candidate_facets","machine_truth_sources","memory_discovery_rules","evidence_kinds","claim_confirmation_rules","non_substitutable_evidence","risks","exclusions","representative_query_seeds","upgrade_policy"}
-CONTAMINATION=(re.compile(r"(?i)genshin|dongzhi|ai brand lab"),re.compile(r"\b(?:W|P|M|E|X)-\d+\b"),re.compile(r"(?:^|[ /])~?/[^ ]+"))
+CONTAMINATION=(re.compile(r"\b(?:W|P|M|E|X)-\d+\b"),re.compile(r"(?:^|[ /])~?/[^ ]+"))
 
 class DomainPackError(Exception): pass
 
