@@ -61,8 +61,9 @@ See [`INSTALL.md`](INSTALL.md) for production installation and Windows instructi
 - L1/L2/L3 query and claim inspection
 - Context-scoped progressive retrieval
 - Immutable Semantic Change Bundles
-- High-level typed `knowledge-plan` operations
-- Delta validation, full preflight, exact-hash approval, transactional apply, and recovery
+- High-level typed `knowledge-plan` operations for creation, Claim revision, and Topic refactoring
+- Stable-ID Topic moves with atomic destination-Node creation and exact-path relocation
+- Delta validation, full preflight, exact-hash approval, transactional apply/rollback, and recovery
 - Fact-free Domain Packs for existing personal-brand and software projects
 
 Run `pkc capabilities` to inspect the installed runtime's machine-readable capability set.

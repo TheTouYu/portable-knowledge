@@ -157,6 +157,8 @@ pkc query "representative query" --level 2
 
 Never rewrite historical JSONL merely to upgrade PKC.
 
+Capability compatibility: `migration_plan` remains as a deprecated ambiguous field for old clients and means non-atomic multi-Bundle orchestration. New clients should read `bundle_orchestration_plan` or `bundle_migration_plan`. Governed Topic relocation is advertised separately as `knowledge_structure_refactor`; governed existing-Claim correction as `claim_revision_plan`.
+
 ## 8. Uninstall
 
 Remove the dedicated virtual environment. Project authority remains in Git-owned text assets. `.local/` can be deleted and rebuilt at any time:

@@ -3,6 +3,8 @@ from __future__ import annotations
 
 import argparse
 import base64
+import contextlib
+import datetime as dt
 import hashlib
 import json
 import shutil
@@ -110,9 +112,9 @@ def _ensure_open(root: Path, plan: dict[str, Any]) -> None:
         _fail("PLAN_STALE_BASELINE", "committed baseline changed since plan init")
 
 
-def _decode_writes(plan: dict[str, Any]) -> dict[str, bytes]:
+def _decode_writes(plan: dict[str, Any]) -> dict[str, bytes | None]:
     try:
-        return {path: base64.b64decode(value, validate=True) for path, value in plan.get("writes", {}).items()}
+        return {path: (base64.b64decode(value, validate=True) if value is not None else None) for path, value in plan.get("writes", {}).items()}
     except (ValueError, TypeError) as exc:
         _fail("PLAN_ARTIFACT_INVALID", f"invalid planned write encoding: {exc}")
 
@@ -122,7 +124,7 @@ def _content_digest(plan: dict[str, Any]) -> str:
         "plan_id": plan["plan_id"],
         "baseline_commit": plan["baseline_commit"],
         "operations": plan.get("operations", []),
-        "writes": {key: hashlib.sha256(value).hexdigest() for key, value in sorted(_decode_writes(plan).items())},
+        "writes": {key: (hashlib.sha256(value).hexdigest() if value is not None else None) for key, value in sorted(_decode_writes(plan).items())},
     })
 
 
@@ -142,8 +144,12 @@ def _with_overlay(root: Path, plan: dict[str, Any]):
         shutil.copytree(child, destination) if child.is_dir() else shutil.copy2(child, destination)
     for rel, value in _decode_writes(plan).items():
         target = staging / rel
-        target.parent.mkdir(parents=True, exist_ok=True)
-        target.write_bytes(value)
+        if value is None:
+            with contextlib.suppress(FileNotFoundError):
+                target.unlink()
+        else:
+            target.parent.mkdir(parents=True, exist_ok=True)
+            target.write_bytes(value)
     return temporary, staging
 
 
@@ -194,7 +200,8 @@ def init_plan(root: Path, instance: Instance, args: argparse.Namespace) -> dict[
         _, existing = _load(root, instance, plan_id)
         return _summary(existing, "init", artifact_path=_local_base(instance).joinpath(path.name).as_posix())
     plan = {"schema_version": 2, "plan_id": plan_id, "plan_digest": plan_digest, **identity, "state": "open",
-            "operations": [], "writes": {}, "claims": {}, "authority_refs": [], "delta": None,
+            "operations": [], "writes": {}, "claims": {}, "existing_claim_changes": {}, "structure_changes": [],
+            "authority_refs": [], "affected_topics": [], "affected_nodes": [], "path_operations": {}, "delta": None,
             "finalized_bundle": None, "full_preflight_receipt": None, "post_apply_receipt": None,
             "budgets": dict(DEFAULT_BUDGETS), "counters": {key: 0 for key in COUNTER_KEYS}}
     _save(path, plan)
@@ -233,11 +240,73 @@ def add_claim(root: Path, instance: Instance, args: argparse.Namespace) -> dict[
         temporary.cleanup()
     operation["claim_id"] = claim_id
     plan["operations"].append(operation); plan["claims"][claim_id] = {**canonical_input, "claim_id": claim_id}
-    plan["writes"].update({rel: base64.b64encode(value).decode("ascii") for rel, value in writes.items()})
+    plan["writes"].update({rel: (base64.b64encode(value).decode("ascii") if value is not None else None) for rel, value in writes.items()})
+    for rel in writes:
+        plan.setdefault("path_operations", {}).setdefault(rel, []).append("add_claim")
     plan["delta"] = None
     plan["counters"]["semantic_amplification"] += int(details.get("amplification", {}).get("knowledge_markdown_character_change", 0))
     _counters(plan); _save(path, plan)
     return _summary(plan, "add-claim", operation_id=operation["operation_id"], claim_id=claim_id, replayed=False)
+
+
+def revise_claim(root: Path, instance: Instance, args: argparse.Namespace) -> dict[str, Any]:
+    path, plan = _load(root, instance, args.plan_id); _ensure_open(root, plan)
+    canonical_input = {"claim_id": args.claim_id, "title": args.title, "statement": args.statement.strip(),
+                       "boundary": args.boundary.strip(), "semantic_declaration": args.semantic_declaration,
+                       "reason": args.reason.strip()}
+    if not canonical_input["reason"]:
+        _fail("PLAN_INPUT_INVALID", "revision reason is required")
+    operation = _operation(plan["plan_id"], "revise_claim", canonical_input)
+    if any(item["operation_id"] == operation["operation_id"] for item in plan["operations"]):
+        return _summary(plan, "revise-claim", operation_id=operation["operation_id"], claim_id=args.claim_id, replayed=True)
+    event_id = f"evt_{operation['operation_digest'][:26].upper()}"
+    created_at = dt.datetime.now().astimezone().isoformat(timespec="seconds")
+    temporary, staging = _with_overlay(root, plan)
+    try:
+        ns = argparse.Namespace(**vars(args), actor=plan["writer"])
+        writes, details = _core().plan_revise_claim(staging, ns, event_id=event_id, created_at=created_at)
+    finally:
+        temporary.cleanup()
+    operation["claim_id"] = args.claim_id
+    plan["operations"].append(operation); plan["existing_claim_changes"][args.claim_id] = {**canonical_input, **details}
+    plan["writes"].update({rel: (base64.b64encode(value).decode("ascii") if value is not None else None) for rel, value in writes.items()})
+    for rel in writes:
+        plan.setdefault("path_operations", {}).setdefault(rel, []).append("revise_claim")
+    plan["affected_topics"] = sorted(set(plan["affected_topics"] + [details["topic_id"]]))
+    plan["affected_nodes"] = sorted(set(plan["affected_nodes"] + [details["node_id"]]))
+    plan["delta"] = None; _counters(plan); _save(path, plan)
+    return _summary(plan, "revise-claim", operation_id=operation["operation_id"], claim_id=args.claim_id,
+                    before_hash=details["before_hash"], after_hash=details["after_hash"], replayed=False)
+
+
+def move_topic(root: Path, instance: Instance, args: argparse.Namespace) -> dict[str, Any]:
+    path, plan = _load(root, instance, args.plan_id); _ensure_open(root, plan)
+    canonical_input = {"topic_id": args.topic_id, "to_node": args.to_node, "to_path": args.to_path,
+                       "node_name": args.node_name, "node_path": args.node_path, "node_boundary": args.node_boundary,
+                       "node_keywords": sorted(set(args.node_keywords)), "reason": args.reason.strip()}
+    if not canonical_input["reason"]:
+        _fail("PLAN_INPUT_INVALID", "move reason is required")
+    operation = _operation(plan["plan_id"], "move_topic", canonical_input)
+    if any(item["operation_id"] == operation["operation_id"] for item in plan["operations"]):
+        return _summary(plan, "move-topic", operation_id=operation["operation_id"], topic_id=args.topic_id, replayed=True)
+    event_id = f"evt_{operation['operation_digest'][:26].upper()}"
+    created_at = dt.datetime.now().astimezone().isoformat(timespec="seconds")
+    temporary, staging = _with_overlay(root, plan)
+    try:
+        ns = argparse.Namespace(**vars(args), actor=plan["writer"])
+        writes, details = _core().plan_move_topic(staging, ns, event_id=event_id, created_at=created_at)
+    finally:
+        temporary.cleanup()
+    operation["topic_id"] = args.topic_id; operation["claim_ids"] = details["claim_ids"]
+    plan["operations"].append(operation); plan["structure_changes"].append(details)
+    plan["writes"].update({rel: (base64.b64encode(value).decode("ascii") if value is not None else None) for rel, value in writes.items()})
+    for rel in writes:
+        plan.setdefault("path_operations", {}).setdefault(rel, []).append("move_topic")
+    plan["affected_topics"] = sorted(set(plan["affected_topics"] + [args.topic_id]))
+    plan["affected_nodes"] = sorted(set(plan["affected_nodes"] + [details["from_node"], details["to_node"]]))
+    plan["delta"] = None; _counters(plan); _save(path, plan)
+    return _summary(plan, "move-topic", operation_id=operation["operation_id"], topic_id=args.topic_id,
+                    moved_claim_ids=details["claim_ids"], node_created=details["node_created"], warning=details["warning"], replayed=False)
 
 
 def add_authority_ref(root: Path, instance: Instance, args: argparse.Namespace) -> dict[str, Any]:
@@ -284,6 +353,7 @@ def add_authority_ref(root: Path, instance: Instance, args: argparse.Namespace) 
             _fail("PLAN_AUTHORITY_REFS_UNCOMMITTED", "authority_refs registry is not committed", path=refs_rel)
     data = json.loads(current.decode("utf-8")); data.setdefault("refs", []).append(ref); data["refs"] = sorted(data["refs"], key=lambda item: item["id"])
     plan["writes"][refs_rel] = base64.b64encode((json.dumps(data, ensure_ascii=False, indent=2) + "\n").encode()).decode("ascii")
+    plan.setdefault("path_operations", {}).setdefault(refs_rel, []).append("add_authority_ref")
     plan["authority_refs"].append(ref); plan["operations"].append(operation); plan["delta"] = None
     _counters(plan); _save(path, plan)
     return _summary(plan, "add-authority-ref", operation_id=operation["operation_id"], authority_ref_id=ref["id"],
@@ -301,8 +371,13 @@ def _evaluation_cases(root: Path, instance: Instance) -> list[dict[str, Any]]:
 
 
 def _affected_cases(root: Path, instance: Instance, plan: dict[str, Any]) -> list[dict[str, Any]]:
-    touched_topics = {claim["topic_id"] for claim in plan.get("claims", {}).values()}
-    return [case for case in _evaluation_cases(root, instance) if touched_topics.intersection(case.get("topic_ids", []))]
+    touched_topics = {claim["topic_id"] for claim in plan.get("claims", {}).values()} | set(plan.get("affected_topics", []))
+    touched_nodes = set(plan.get("affected_nodes", []))
+    touched_claims = set(plan.get("existing_claim_changes", []))
+    return [case for case in _evaluation_cases(root, instance)
+            if touched_topics.intersection(case.get("topic_ids", []))
+            or touched_nodes.intersection(case.get("node_ids", []))
+            or touched_claims.intersection(case.get("claim_ids", []))]
 
 
 def _run_cases(staging: Path, cases: list[dict[str, Any]]) -> list[dict[str, Any]]:
@@ -345,10 +420,16 @@ def check_delta(root: Path, instance: Instance, args: argparse.Namespace) -> dic
     try:
         registry, _ = _core().load_authority(staging)
         claims, parse_findings = _core().parse_claims(staging, registry)
-        planned_claims = [claim for claim in claims if claim["id"] in plan["claims"]]
+        changed_ids = set(plan["claims"]) | set(plan.get("existing_claim_changes", {}))
+        planned_claims = [claim for claim in claims if claim["id"] in changed_ids]
         findings = [{"code": item.code, "path": item.path, "message": item.message} for item in parse_findings]
-        findings.extend({**item, "path": instance.authority.get("authority_refs", "authority_ref"), "message": "missing planned Authority fact coverage"}
-                        for item in validate_authority_coverage(planned_claims, plan["authority_refs"]))
+        refs_rel = instance.authority.get("authority_refs")
+        all_refs = json.loads((staging / refs_rel).read_text(encoding="utf-8")).get("refs", []) if refs_rel else []
+        findings.extend({**item, "path": refs_rel or "authority_ref", "message": "missing changed Claim Authority fact coverage"}
+                        for item in validate_authority_coverage(planned_claims, all_refs))
+        for claim_id, change in plan.get("existing_claim_changes", {}).items():
+            if change["semantic_declaration"] in {"correct", "expand"} and not any(claim_id in ref.get("claim_ids", []) for ref in all_refs):
+                findings.append({"code": "PLAN_CLAIM_AUTHORITY_INSUFFICIENT", "path": refs_rel or "authority_ref", "message": f"{claim_id} correction/expansion lacks Authority coverage"})
         for ref in plan["authority_refs"]:
             committed = _committed_bytes(root, plan["baseline_commit"], ref["path"])
             if committed is None or hashlib.sha256(committed).hexdigest() != ref["approved_hash"]:
@@ -380,9 +461,11 @@ def check_delta(root: Path, instance: Instance, args: argparse.Namespace) -> dic
 
 
 def _action_operation(plan: dict[str, Any], rel: str) -> str:
-    if "authority-ref" in rel.casefold():
-        return "semantic_overlay:add_authority_ref"
-    return "semantic_overlay:add_claim"
+    operations = plan.get("path_operations", {}).get(rel, [])
+    if not operations:
+        _fail("PLAN_PROVENANCE_MISMATCH", f"no semantic operation owns changed path: {rel}", path=rel)
+    # The last operation produced the exact after-image; its provenance owns it.
+    return f"semantic_overlay:{operations[-1]}"
 
 
 def _assert_finalized_environment(root: Path, plan: dict[str, Any], *, allow_applied: bool = False) -> None:
@@ -420,19 +503,32 @@ def finalize(root: Path, instance: Instance, args: argparse.Namespace) -> dict[s
     actions = []
     for rel, after in sorted(_decode_writes(plan).items()):
         target = root / rel
-        before = target.read_bytes() if target.exists() else b""
-        if before == after:
+        existed = target.exists(); before = target.read_bytes() if existed else b""
+        if (after is not None and before == after) or (after is None and not existed):
             plan["counters"]["noop_actions"] += 1
             _save(path, plan); _assert_budget(plan)
-        new_hash = hashlib.sha256(after).hexdigest(); operation_type = _action_operation(plan, rel)
+        new_hash = hashlib.sha256(after).hexdigest() if after is not None else None; operation_type = _action_operation(plan, rel)
         descriptor = {"plan_id": plan["plan_id"], "operation_type": operation_type, "core_version": _runtime_version(), "path": rel, "new_hash": new_hash}
         operation_digest = canonical_digest(descriptor)
         provenance = {"plan_id": plan["plan_id"], "operation_id": f"op_{operation_digest[:26]}", "operation_type": operation_type,
                       "operation_digest": operation_digest, "core_version": _runtime_version()}
-        actions.append({"operation": "replace", "path": rel, "content": after.decode("utf-8"), "provenance": provenance})
-    manifest = {"bundle_type": "claim_create", "intent": plan["intent"],
-                "semantic_diff": {"plan_digest": content_digest, "operations": len(plan["operations"]), "claims": sorted(plan["claims"]),
-                                  "authority_refs": [item["id"] for item in plan["authority_refs"]]},
+        actions.append({"operation": "replace" if after is not None else "delete", "path": rel,
+                        "content": after.decode("utf-8") if after is not None else None, "provenance": provenance})
+    operation_types = {item["operation_type"] for item in plan["operations"]}
+    if "move_topic" in operation_types and "revise_claim" in operation_types:
+        bundle_type = "knowledge_refactor"
+    elif "move_topic" in operation_types:
+        bundle_type = "knowledge_structure_change"
+    elif "revise_claim" in operation_types:
+        bundle_type = "claim_revise"
+    else:
+        bundle_type = "claim_create"
+    manifest = {"bundle_type": bundle_type, "intent": plan["intent"],
+                "semantic_diff": {"plan_digest": content_digest, "operations": len(plan["operations"]), "claims_created": sorted(plan["claims"]),
+                                  "claims_revised": sorted(plan.get("existing_claim_changes", {})),
+                                  "structure_changes": plan.get("structure_changes", []),
+                                  "affected_topics": plan.get("affected_topics", []), "affected_nodes": plan.get("affected_nodes", []),
+                                  "authority_refs_added": [item["id"] for item in plan["authority_refs"]]},
                 "evidence_refs": [], "authority_refs": [item["id"] for item in plan["authority_refs"]], "permission_effect": "none",
                 "risk": plan["risk"], "actions": actions}
     bundle = build_bundle(root, manifest, instance.identities)
@@ -543,6 +639,7 @@ def _summary(plan: dict[str, Any], action: str, **extra: Any) -> dict[str, Any]:
 
 
 def dispatch_plan_command(root: Path, args: argparse.Namespace, instance: Instance) -> dict[str, Any]:
-    commands = {"init": init_plan, "add-claim": add_claim, "add-authority-ref": add_authority_ref,
-                "check": check_delta, "finalize": finalize, "inspect": inspect, "abandon": abandon}
+    commands = {"init": init_plan, "add-claim": add_claim, "revise-claim": revise_claim, "move-topic": move_topic,
+                "add-authority-ref": add_authority_ref, "check": check_delta, "finalize": finalize,
+                "inspect": inspect, "abandon": abandon}
     return commands[args.plan_command](root, instance, args)

@@ -70,6 +70,16 @@ python tools/pkc.py knowledge-plan add-claim PLAN_ID \
 #   --duplicate-resolution create_distinct_with_boundary
 # For a new Node + first Topic + first Claim, additionally provide complete:
 #   --node-name ... --node-path knowledge/node --node-boundary ... [--node-keyword ...]
+# Existing knowledge maintenance can instead/additionally use:
+python tools/pkc.py knowledge-plan revise-claim PLAN_ID \
+  --claim-id CLAIM_ID --title "Corrected title" \
+  --statement "Corrected assertion." --boundary "Exact boundary." \
+  --semantic-declaration correct --reason "Verified reason"
+python tools/pkc.py knowledge-plan move-topic PLAN_ID \
+  --topic-id TOPIC_ID --to-node TARGET_NODE \
+  --to-path knowledge/target/topic.md --reason "Lifecycle boundary changed"
+# For atomic target-Node creation, move-topic also requires complete
+# --node-name, --node-path, and --node-boundary metadata.
 python tools/pkc.py knowledge-plan add-authority-ref PLAN_ID \
   --claim-id CLAIM_ID --path src/module.py --locator "function:name" \
   --role current_implementation --change-policy invalidate_on_change \
@@ -89,6 +99,8 @@ python tools/pkc.py validate
 python tools/pkc.py query "representative question" --level 2
 python tools/pkc.py bundle-inspect BUNDLE_ID --format json
 ```
+
+Use `add-claim` for new knowledge, `revise-claim` for correction, and `move-topic` for ownership/path refactoring. Multi-Bundle orchestration (`bundle_migration_plan`, formerly the ambiguous `migration_plan`) is non-atomic across phases and is not structure migration.
 
 Valid Authority roles are `design_intent`, `current_implementation`, `documented_contract`, and `external_environment_behavior`. Valid fact classes are `runtime_behavior`, `public_type_surface`, `cli_behavior`, `documented_contract`, `external_game_evidence`, `transform_defaults`, `writeback_behavior`, and `evidence_scope`. A role and a fact class are different controlled vocabularies. `bundle-status` has no positional Bundle ID. Query text is positional; there is no `--text` option.
 

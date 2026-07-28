@@ -7,7 +7,7 @@ import json
 from pathlib import Path, PurePosixPath
 from typing import Any, Callable
 
-BUNDLE_TYPES = {"source_evidence", "claim_create", "claim_revise", "permission_expansion", "lifecycle_change", "node_boundary_change", "memory_change"}
+BUNDLE_TYPES = {"source_evidence", "claim_create", "claim_revise", "knowledge_structure_change", "knowledge_refactor", "permission_expansion", "lifecycle_change", "node_boundary_change", "memory_change"}
 RISK_LEVELS = {"low", "medium", "high"}
 LIFECYCLE_EVENTS = {"bundle_failed", "bundle_abandoned", "bundle_superseded", "bundle_rolled_back"}
 
@@ -24,8 +24,8 @@ def digest(value: Any) -> str:
 
 
 def overlay_digest(actions: list[dict[str, Any]]) -> str:
-    """Hash the exact ordered after-images validated before approval."""
-    return digest([{"path": action["path"], "new_hash": action["new_hash"]} for action in actions])
+    """Hash the exact ordered after-images (including deletions) validated before approval."""
+    return digest([{"operation": action["operation"], "path": action["path"], "new_hash": action["new_hash"]} for action in actions])
 
 
 def seal_preflight(bundle: dict[str, Any], findings: list[dict[str, Any]]) -> dict[str, Any]:
@@ -119,19 +119,27 @@ def build_bundle(root: Path, manifest: dict[str, Any], identities: dict[str, Any
     normalized = []
     for action in actions:
         path = action.get("path", "")
-        if action.get("operation") not in {"replace", "append"} or not _safe_path(path): raise BundleError(f"invalid action: {path}")
+        if action.get("operation") not in {"replace", "append", "delete"} or not _safe_path(path): raise BundleError(f"invalid action: {path}")
         target = root / path
-        before = target.read_bytes() if target.exists() else b""
+        existed = target.exists()
+        before = target.read_bytes() if existed else b""
         supplied = action.get("content")
-        if not isinstance(supplied, str): raise BundleError("action content must be UTF-8 text")
-        addition = supplied.encode("utf-8")
-        after = addition if action["operation"] == "replace" else before + addition
-        new_hash = hashlib.sha256(after).hexdigest()
+        if action["operation"] == "delete":
+            if not existed:
+                raise BundleError(f"cannot delete missing authority: {path}")
+            after = None
+        else:
+            if not isinstance(supplied, str): raise BundleError("action content must be UTF-8 text")
+            addition = supplied.encode("utf-8")
+            after = addition if action["operation"] == "replace" else before + addition
+        new_hash = hashlib.sha256(after).hexdigest() if after is not None else None
         provenance = _provenance_for(action, path=path, new_hash=new_hash)
         if _controlled_authority_path(path) and provenance is None and not compatibility_mode:
             raise BundleError("controlled authority action requires Core semantic-plan provenance; use explicit compatibility mode only for maintainer fixtures/recovery")
-        normalized_action = {"operation": action["operation"], "path": path, "expected_hash": hashlib.sha256(before).hexdigest() if target.exists() else None,
-                             "before": base64.b64encode(before).decode("ascii"), "content": base64.b64encode(after).decode("ascii"), "new_hash": new_hash}
+        normalized_action = {"operation": action["operation"], "path": path, "expected_hash": hashlib.sha256(before).hexdigest() if existed else None,
+                             "before": base64.b64encode(before).decode("ascii"),
+                             "content": base64.b64encode(after).decode("ascii") if after is not None else None,
+                             "new_hash": new_hash}
         if provenance is not None:
             normalized_action["provenance"] = provenance
         normalized.append(normalized_action)
@@ -218,11 +226,16 @@ def verify_approval(bundle: dict[str, Any], value: dict[str, Any]) -> None:
 
 def apply_bundle(root: Path, bundle: dict[str, Any], approved: dict[str, Any], replace: Callable[..., list[str]]) -> list[str]:
     verify_bundle(bundle); verify_approval(bundle, approved)
-    writes: dict[str, bytes] = {}
+    writes: dict[str, bytes | None] = {}
     for action in bundle["actions"]:
         target = root / action["path"]
         old = hashlib.sha256(target.read_bytes()).hexdigest() if target.exists() else None
         if old != action["expected_hash"]: raise BundleError(f"authority changed: {action['path']}")
+        if action["operation"] == "delete":
+            if action.get("content") is not None or action.get("new_hash") is not None:
+                raise BundleError("delete action must have a null after-image")
+            writes[action["path"]] = None
+            continue
         content = base64.b64decode(action["content"], validate=True)
         if hashlib.sha256(content).hexdigest() != action["new_hash"]: raise BundleError("action content hash mismatch")
         writes[action["path"]] = content
@@ -231,10 +244,11 @@ def apply_bundle(root: Path, bundle: dict[str, Any], approved: dict[str, Any], r
 
 def rollback_bundle(root: Path, bundle: dict[str, Any], replace: Callable[..., list[str]]) -> list[str]:
     verify_bundle(bundle)
-    writes = {}
+    writes: dict[str, bytes | None] = {}
     for action in bundle["actions"]:
         target = root / action["path"]
         current = hashlib.sha256(target.read_bytes()).hexdigest() if target.exists() else None
         if current != action["new_hash"]: raise BundleError(f"cannot rollback changed authority: {action['path']}")
-        writes[action["path"]] = base64.b64decode(action["before"], validate=True)
+        before = base64.b64decode(action["before"], validate=True)
+        writes[action["path"]] = before if action["expected_hash"] is not None else None
     return replace(root, "bundle-rollback", writes)

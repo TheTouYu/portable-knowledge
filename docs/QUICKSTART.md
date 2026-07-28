@@ -99,3 +99,13 @@ read project operating/current/decision entries
 Never read `.local` or SQLite directly. Never report a local miss as proof of global absence.
 
 For writes, continue with [`SEMANTIC-CHANGES.md`](SEMANTIC-CHANGES.md).
+
+## 7. Maintain existing knowledge
+
+Use the operation that matches the semantic intent:
+
+- new knowledge: `knowledge-plan add-claim`;
+- correct or clarify an existing proposition: `knowledge-plan revise-claim`;
+- change an existing Topic's ownership/path while preserving IDs and history: `knowledge-plan move-topic`.
+
+These operations may share one plan and one immutable Bundle. Run one delta check after all operations, finalize for full staged preflight, then stop for exact-hash review. Multi-Bundle orchestration (`bundle_migration_plan`, historically the ambiguous `migration_plan`) is non-atomic across phases and is not a substitute for a structure-refactor Bundle.

@@ -85,7 +85,9 @@ class SemanticPlanContractTests(unittest.TestCase):
     def test_capabilities_are_runtime_machine_readable(self):
         payload = self.cli("capabilities")
         self.assertEqual(payload["runtime_version"], core._runtime_version())
-        for name in ("semantic_plan", "provenance", "delta_validation", "authority_ref", "lifecycle", "supersede", "migration_plan"):
+        for name in ("semantic_plan", "provenance", "delta_validation", "authority_ref", "lifecycle", "supersede",
+                     "migration_plan", "bundle_orchestration_plan", "bundle_migration_plan",
+                     "knowledge_structure_refactor", "claim_revision_plan"):
             self.assertTrue(payload["capabilities"][name])
         from portable_knowledge import __version__
         self.assertEqual(__version__, payload["runtime_version"])
@@ -417,6 +419,76 @@ class SemanticPlanContractTests(unittest.TestCase):
                 self.assertEqual(len(list((self.root / "data/knowledge/bundles").glob("bnd_*.json"))), 0)
                 self.assertEqual(self.formal_authority(), self.authority_before)
                 shutil.rmtree(self.root / ".local", ignore_errors=True)
+
+    def test_governed_move_topic_create_node_revise_apply_and_rollback(self):
+        # Establish one governed Claim + Authority Ref, then commit that applied
+        # authority as the immutable baseline for a maintenance plan.
+        initial = self.init()["plan_id"]
+        added = self.add_claim(initial, "schema", "Schema ownership", "Schema structures are authored manually.",
+                               ("documented_contract",))
+        self.add_ref(initial, added["claim_id"], "schema", "authority/schema-contract.md",
+                     "documented_contract", "documented_contract")
+        self.cli("knowledge-plan", "check", initial, "--mode", "delta")
+        first = self.cli("knowledge-plan", "finalize", initial)
+        self.cli("bundle-approve", first["bundle_id"], "--content-hash", first["content_hash"], "--apply")
+        self.cli("bundle-apply", first["bundle_id"], "--content-hash", first["content_hash"], "--apply")
+        subprocess.run(["git", "add", "data/store", "domain/topics/schema.md"], cwd=self.root, check=True)
+        subprocess.run(["git", "commit", "-qm", "governed claim baseline"], cwd=self.root, check=True)
+        before = self.formal_authority()
+
+        plan_id = self.cli("knowledge-plan", "init", "--intent", "Separate reusable schema tooling", "--risk", "high")["plan_id"]
+        moved = self.cli(
+            "knowledge-plan", "move-topic", plan_id, "--topic-id", "topic-schema",
+            "--to-node", "schema-toolchain", "--node-name", "Schema Toolchain",
+            "--node-path", "domain/toolchain", "--node-boundary", "Reusable schema authoring contracts",
+            "--node-keyword", "schema", "--to-path", "domain/toolchain/schema.md",
+            "--reason", "The Topic lifecycle is broader than the software core.",
+        )
+        self.assertEqual(moved["moved_claim_ids"], [added["claim_id"]])
+        revised = self.cli(
+            "knowledge-plan", "revise-claim", plan_id, "--claim-id", added["claim_id"],
+            "--title", "Schema ownership has a bounded automation exception",
+            "--statement", "Schema structures remain authored assets, while verified static assembly may generate bounded structures.",
+            "--boundary", "Static assembly still requires committed templates and identifiers.",
+            "--semantic-declaration", "correct", "--reason", "Verified assembly narrows the manual-only wording.",
+        )
+        self.assertNotEqual(revised["before_hash"], revised["after_hash"])
+        plan_value = json.loads((self.root / ".local/pkc/semantic-plans" / f"{plan_id}.json").read_text(encoding="utf-8"))
+        with mock.patch.object(core, "content_hash", wraps=core.content_hash):
+            overlay = base64.b64decode(plan_value["writes"]["domain/toolchain/schema.md"]).decode("utf-8")
+        registry_overlay = json.loads(base64.b64decode(plan_value["writes"]["data/store/registry.json"]))
+        with tempfile.TemporaryDirectory() as temporary:
+            staged = Path(temporary)
+            shutil.copytree(self.root, staged, dirs_exist_ok=True, ignore=shutil.ignore_patterns(".git", ".local"))
+            (staged / "data/store/registry.json").write_bytes(base64.b64decode(plan_value["writes"]["data/store/registry.json"]))
+            (staged / "domain/toolchain").mkdir(parents=True, exist_ok=True)
+            (staged / "domain/toolchain/schema.md").write_text(overlay, encoding="utf-8")
+            (staged / "domain/topics/schema.md").unlink()
+            parsed = next(item for item in core.parse_claims(staged, registry_overlay)[0] if item["id"] == added["claim_id"])
+        self.assertEqual(revised["after_hash"], parsed["content_hash"])
+        delta = self.cli("knowledge-plan", "check", plan_id, "--mode", "delta")
+        self.assertTrue(delta["can_finalize"])
+        finalized = self.cli("knowledge-plan", "finalize", plan_id)
+        bundle = json.loads((self.root / "data/knowledge/bundles" / f"{finalized['bundle_id']}.json").read_text(encoding="utf-8"))
+        self.assertEqual(bundle["bundle_type"], "knowledge_refactor")
+        self.assertEqual({action["operation"] for action in bundle["actions"]}, {"replace", "delete"})
+        provenance = {action["provenance"]["operation_type"] for action in bundle["actions"]}
+        self.assertIn("semantic_overlay:move_topic", provenance)
+        self.assertIn("semantic_overlay:revise_claim", provenance)
+        self.assertEqual(self.formal_authority(), before)
+
+        self.cli("bundle-approve", finalized["bundle_id"], "--content-hash", finalized["content_hash"], "--apply")
+        applied = self.cli("bundle-apply", finalized["bundle_id"], "--content-hash", finalized["content_hash"], "--apply")
+        self.assertTrue(applied["post_apply_full_receipt"]["ok"])
+        registry = json.loads((self.root / "data/store/registry.json").read_text(encoding="utf-8"))
+        topic = next(item for item in registry["topics"] if item["id"] == "topic-schema")
+        self.assertEqual((topic["node_id"], topic["path"]), ("schema-toolchain", "domain/toolchain/schema.md"))
+        self.assertFalse((self.root / "domain/topics/schema.md").exists())
+        self.assertTrue((self.root / "domain/toolchain/schema.md").is_file())
+        self.assertTrue(self.cli("bundle-recover", finalized["bundle_id"])["ok"])
+        rolled = self.cli("bundle-rollback", finalized["bundle_id"], "--apply")
+        self.assertTrue(rolled["ok"])
+        self.assertEqual(self.formal_authority(), before)
 
     def test_low_level_manifest_requires_explicit_compatibility_mode(self):
         manifest = {"bundle_type": "claim_create", "intent": "Low-level compatibility test", "semantic_diff": {"before": "same", "after": "same"},

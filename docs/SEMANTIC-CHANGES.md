@@ -64,6 +64,32 @@ pkc knowledge-plan add-claim PLAN_ID \
 
 To create a Node, its first Topic, and its first Claim as one governed operation, additionally provide `--node-name`, `--node-path`, and `--node-boundary`; `--node-keyword` is repeatable. A new Topic path must remain under its Node path. Node or Topic metadata supplied for an existing object is rejected rather than silently ignored. Empty Nodes and Topics are not created independently.
 
+Revise an existing Claim without changing its ID, Topic, permission, Authority links, or history:
+
+```bash
+pkc knowledge-plan revise-claim PLAN_ID \
+  --claim-id CLAIM_ID \
+  --title "Corrected bounded title" \
+  --statement "Corrected atomic assertion." \
+  --boundary "Exact scope and exclusions." \
+  --semantic-declaration correct \
+  --reason "Verified evidence narrows the former wording"
+```
+
+Declarations are `clarify`, `correct`, `narrow`, or `expand`. `correct` and `expand` fail closed without Authority fact-class coverage; `expand` should use high risk. Revision appends a `claim_revised` event with before/after hashes.
+
+Move an existing Topic and all of its stable-ID Claims to an existing Node:
+
+```bash
+pkc knowledge-plan move-topic PLAN_ID \
+  --topic-id EXISTING_TOPIC \
+  --to-node TARGET_NODE \
+  --to-path knowledge/target/existing-topic.md \
+  --reason "The Topic has a distinct lifecycle and Authority boundary"
+```
+
+If the target Node does not exist, the same operation may create it atomically by also supplying complete `--node-name`, `--node-path`, `--node-boundary`, and optional repeatable `--node-keyword` metadata. `--to-path` is always explicit and must remain under the target Node path. The old Markdown path is deleted in the same transaction; Topic ID, Claim IDs, Authority References, and prior events are preserved. Empty source Nodes are warned about, not implicitly deleted.
+
 Add an Authority Reference:
 
 ```bash
@@ -178,11 +204,13 @@ pkc knowledge-plan abandon PLAN_ID --reason "Explain why this plan will not cont
 
 ## Provenance and no-op checks
 
-A valid production Bundle records Core-generated provenance for each authority-changing action. Final review should confirm:
+A valid production Bundle records Core-generated provenance for each authority-changing action (`add_claim`, `add_authority_ref`, `revise_claim`, or `move_topic`). Bundle type is derived from the operation set: `claim_create`, `claim_revise`, `knowledge_structure_change`, or mixed `knowledge_refactor`. Final review should confirm:
 
 - provenance coverage is complete;
 - no unexpected action or changed file exists;
 - no no-op action was used to pad a plan;
+- Topic relocation contains both the target after-image and old-path deletion;
+- `migration_plan` is the deprecated ambiguous name for non-atomic multi-Bundle orchestration; use `bundle_orchestration_plan`/`bundle_migration_plan`. It is not knowledge structure refactoring. `knowledge_structure_refactor` reports the typed move capability;
 - prospective changes match the semantic intent;
 - pre-apply formal authority is unchanged;
 - post-apply changes occur only through the authorized transaction.

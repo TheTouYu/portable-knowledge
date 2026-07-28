@@ -99,7 +99,7 @@ discard | source-only | evidence | new claim | revise
 
 Unknown permission stops. Unsupported formats do not produce partial archives. `source-only` and `discard` are successful closures. Keep raw material, Evidence, Claim, Authority Reference, and Project Memory in separate truth sources.
 
-For Domain Knowledge use only installed high-level PKC `knowledge-plan` operations. No Python APIs, shell manifests, direct JSON/Markdown authority writes, SQLite, `bundle-create --manifest`, or compatibility mode. Follow the exact workflow in the repository's `docs/SEMANTIC-CHANGES.md` or [the mode contract](references/MODES.md).
+For Domain Knowledge use only installed high-level PKC `knowledge-plan` operations. Use `add-claim` for new knowledge, `revise-claim` to correct/clarify an existing proposition, and `move-topic` to change an existing Topic's Node/path while preserving IDs, Authority links, and history. These operations may share one immutable refactor Bundle. Multi-Bundle orchestration (`bundle_migration_plan`, historically `migration_plan`) is not knowledge structure migration. No Python APIs, shell manifests, direct JSON/Markdown authority writes, SQLite, `bundle-create --manifest`, or compatibility mode. Follow the exact workflow in the repository's `docs/SEMANTIC-CHANGES.md` or [the mode contract](references/MODES.md).
 
 ## Memory
 

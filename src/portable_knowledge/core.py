@@ -60,7 +60,7 @@ EVENT_TYPES = {
     "evidence": {"evidence_added", "evidence_corrected", "evidence_retracted"},
     "proposals": {
         "proposal_created", "proposal_resolved", "claim_revised", "claim_superseded",
-        "claims_merged", "claim_confirmed", "claim_permission_changed",
+        "claims_merged", "claim_confirmed", "claim_permission_changed", "topic_moved",
     },
 }
 LIFECYCLES = {"draft", "active", "superseded", "deprecated", "rejected"}
@@ -1016,7 +1016,7 @@ def transaction_dirs(root: Path) -> list[Path]:
     return sorted(path for path in directory.glob("*") if path.is_dir()) if directory.exists() else []
 
 
-def transactional_replace(root: Path, command: str, writes: dict[str, bytes], validate_staged: Any | None = None) -> list[str]:
+def transactional_replace(root: Path, command: str, writes: dict[str, bytes | None], validate_staged: Any | None = None) -> list[str]:
     """Replace one or more authority files with rollback on any local failure.
 
     Staged files and backups stay in the local transaction directory. Existing
@@ -1031,7 +1031,7 @@ def transactional_replace(root: Path, command: str, writes: dict[str, bytes], va
     directory = root / LOCAL_REL / "transactions" / operation_id
     backup_dir = directory / "backup"
     backup_dir.mkdir(parents=True)
-    normalized: list[tuple[str, Path, Path, bytes, str | None]] = []
+    normalized: list[tuple[str, Path, Path, bytes | None, str | None]] = []
     for rel, data in sorted(writes.items()):
         error = _portable_relative_path(rel)
         if error or rel.startswith(".local/"):
@@ -1044,14 +1044,15 @@ def transactional_replace(root: Path, command: str, writes: dict[str, bytes], va
         staged = target.with_name(f".{target.name}.{operation_id}.tmp")
         normalized.append((rel, target, staged, data, file_hash(target)))
     plan_path = directory / "plan.json"
-    plan: dict[str, Any] = {"schema_version": 1, "operation_id": operation_id, "command": command, "stage": "planned", "writes": [{"path": rel, "staged_path": relpath(root, staged), "expected_hash": digest, "new_hash": sha256_bytes(data)} for rel, _, staged, data, digest in normalized], "failure": None}
+    plan: dict[str, Any] = {"schema_version": 1, "operation_id": operation_id, "command": command, "stage": "planned", "writes": [{"path": rel, "staged_path": relpath(root, staged) if data is not None else None, "expected_hash": digest, "new_hash": sha256_bytes(data) if data is not None else None} for rel, _, staged, data, digest in normalized], "failure": None}
     atomic_write(plan_path, (canonical_json(plan) + "\n").encode(), None)
     try:
         for index, (rel, target, staged, data, digest) in enumerate(normalized):
             target.parent.mkdir(parents=True, exist_ok=True)
-            atomic_write(staged, data, None)
-            if file_hash(staged) != sha256_bytes(data):
-                raise KnowledgeError(f"staged hash mismatch: {rel}")
+            if data is not None:
+                atomic_write(staged, data, None)
+                if file_hash(staged) != sha256_bytes(data):
+                    raise KnowledgeError(f"staged hash mismatch: {rel}")
             if target.exists():
                 atomic_write(backup_dir / str(index), target.read_bytes(), None)
         plan["stage"] = "staged"
@@ -1064,8 +1065,11 @@ def transactional_replace(root: Path, command: str, writes: dict[str, bytes], va
                     raise KnowledgeError(f"target hash changed before transaction: {target.as_posix()}")
             replaced: list[int] = []
             try:
-                for index, (_, target, staged, _, _) in enumerate(normalized):
-                    os.replace(staged, target)
+                for index, (_, target, staged, data, _) in enumerate(normalized):
+                    if data is None:
+                        target.unlink()
+                    else:
+                        os.replace(staged, target)
                     replaced.append(index)
             except Exception:
                 for index in reversed(replaced):
@@ -1182,7 +1186,7 @@ def append_jsonl_bytes(path: Path, event: dict[str, Any]) -> bytes:
     return old + (canonical_json(event) + "\n").encode("utf-8")
 
 
-def staged_validation_findings(root: Path, writes: dict[str, bytes]) -> list[dict[str, Any]]:
+def staged_validation_findings(root: Path, writes: dict[str, bytes | None]) -> list[dict[str, Any]]:
     """Return every finding for a complete authority overlay without touching authority."""
     with tempfile.TemporaryDirectory() as temporary:
         staging = Path(temporary)
@@ -1199,8 +1203,12 @@ def staged_validation_findings(root: Path, writes: dict[str, bytes]) -> list[dic
             shutil.copy2(instance_config, staging / instance_config.name)
         for rel, data in writes.items():
             target = staging / Path(*PurePosixPath(rel).parts)
-            target.parent.mkdir(parents=True, exist_ok=True)
-            target.write_bytes(data)
+            if data is None:
+                with contextlib.suppress(FileNotFoundError):
+                    target.unlink()
+            else:
+                target.parent.mkdir(parents=True, exist_ok=True)
+                target.write_bytes(data)
         result = validate(staging)
         findings = list(result["errors"])
         if any(item["code"] == "AUTHORITY_FACT_COVERAGE" for item in findings):
@@ -1218,24 +1226,29 @@ def staged_validation_findings(root: Path, writes: dict[str, bytes]) -> list[dic
         return findings
 
 
-def validate_planned_writes(root: Path, writes: dict[str, bytes], *, phase: str = "preflight") -> None:
+def validate_planned_writes(root: Path, writes: dict[str, bytes | None], *, phase: str = "preflight") -> None:
     """Validate a complete authority overlay before transactional replacement."""
     findings = staged_validation_findings(root, writes)
     if findings:
         raise StagedValidationError(findings, phase)
 
 
-def _bundle_writes(root: Path, bundle: dict[str, Any]) -> dict[str, bytes]:
-    """Decode and hash-check Bundle after-images against the current baseline."""
-    writes: dict[str, bytes] = {}
+def _bundle_writes(root: Path, bundle: dict[str, Any]) -> dict[str, bytes | None]:
+    """Decode and hash-check Bundle after-images (including deletions) against the current baseline."""
+    writes: dict[str, bytes | None] = {}
     for action in bundle["actions"]:
         target = root / action["path"]
         old_hash = file_hash(target) if target.exists() else None
         if old_hash != action["expected_hash"]:
             raise BundleError(f"authority changed: {action['path']}")
+        if action["operation"] == "delete":
+            if action.get("content") is not None or action.get("new_hash") is not None:
+                raise BundleError("delete action must have a null after-image")
+            writes[action["path"]] = None
+            continue
         try:
             content = base64.b64decode(action["content"], validate=True)
-        except (ValueError, binascii.Error) as exc:
+        except (ValueError, TypeError, binascii.Error) as exc:
             raise BundleError("invalid action content") from exc
         if hashlib.sha256(content).hexdigest() != action["new_hash"]:
             raise BundleError("action content hash mismatch")
@@ -1325,12 +1338,13 @@ def revise_claim_command(root: Path, args: argparse.Namespace) -> dict[str, Any]
         raise KnowledgeError("claim not found")
     old = (root / claim["path"]).read_text(encoding="utf-8")
     pattern = re.compile(rf"<!--\s*CLAIM:START\s+{re.escape(args.claim_id)}\s*-->.*?<!--\s*CLAIM:END\s+{re.escape(args.claim_id)}\s*-->", re.S)
-    replacement = claim_markdown(args.title or claim["title"], args.claim_id, args.statement, args.boundary).strip()
+    title = args.title or claim["title"]
+    replacement = claim_markdown(title, args.claim_id, args.statement, args.boundary).strip()
     new = pattern.sub(replacement, old, count=1)
     created_at = now_iso(args.created_at)
     event = {**event_identity(root, args), "event_id": new_id("event"), "event_type": "claim_revised",
              "claim_id": args.claim_id, "before_hash": claim["content_hash"],
-             "after_hash": content_hash(replacement), "semantic_declaration": args.semantic_declaration,
+             "after_hash": content_hash(claim_body_markdown(title, args.statement, args.boundary)), "semantic_declaration": args.semantic_declaration,
              "reason": args.reason, "created_at": created_at}
     rel = shard_rel("proposals", args.actor, created_at)
     writes = {claim["path"]: new.encode("utf-8"), rel: append_jsonl_bytes(root / rel, event)}
@@ -1376,9 +1390,14 @@ def register_source_command(root: Path, args: argparse.Namespace) -> dict[str, A
                             "amplification": ingestion_amplification(1, 1, 0, 0, 0)})
 
 
+def claim_body_markdown(title: str, statement: str, boundary: str) -> str:
+    """Return the exact body parsed and hashed between stable Claim markers."""
+    return f"### {title}\n\n{statement.strip()}\n\n#### 适用边界\n\n{boundary.strip()}"
+
+
 def claim_markdown(title: str, claim_id: str, statement: str, boundary: str) -> str:
-    return (f"<!-- CLAIM:START {claim_id} -->\n\n### {title}\n\n{statement.strip()}\n\n"
-            f"#### 适用边界\n\n{boundary.strip()}\n\n<!-- CLAIM:END {claim_id} -->\n")
+    return (f"<!-- CLAIM:START {claim_id} -->\n\n{claim_body_markdown(title, statement, boundary)}\n\n"
+            f"<!-- CLAIM:END {claim_id} -->\n")
 
 
 def plan_new_claim(root: Path, args: argparse.Namespace, *, claim_id: str, fact_classes: list[str] | None = None) -> tuple[dict[str, bytes], dict[str, Any]]:
@@ -1456,6 +1475,92 @@ def plan_new_claim(root: Path, args: argparse.Namespace, *, claim_id: str, fact_
               topic_path: new_text.encode("utf-8")}
     return writes, {"claim_id": claim_id, "node_id": args.node, "topic_id": args.topic_id,
                     "amplification": ingestion_amplification(1, 0, 0, 1, len(block))}
+
+
+def plan_revise_claim(root: Path, args: argparse.Namespace, *, event_id: str, created_at: str) -> tuple[dict[str, bytes | None], dict[str, Any]]:
+    """Plan a governed in-place Claim correction while preserving its stable ID."""
+    ensure_actor(root, args.actor, review_required=True)
+    registry, _ = load_authority(root)
+    claims, findings = parse_claims(root, registry)
+    claim = next((item for item in claims if item["id"] == args.claim_id), None)
+    if findings or not claim:
+        raise SemanticPlanError("PLAN_CLAIM_REVISION_UNSUPPORTED", f"claim not found or authority inconsistent: {args.claim_id}")
+    old = (root / claim["path"]).read_text(encoding="utf-8")
+    pattern = re.compile(rf"<!--\s*CLAIM:START\s+{re.escape(args.claim_id)}\s*-->.*?<!--\s*CLAIM:END\s+{re.escape(args.claim_id)}\s*-->", re.S)
+    if len(pattern.findall(old)) != 1:
+        raise SemanticPlanError("PLAN_STRUCTURE_HISTORY_INCONSISTENT", f"Claim block is not unique: {args.claim_id}")
+    title = args.title or claim["title"]
+    replacement = claim_markdown(title, args.claim_id, args.statement, args.boundary).strip()
+    after_hash = content_hash(claim_body_markdown(title, args.statement, args.boundary))
+    if after_hash == claim["content_hash"]:
+        raise SemanticPlanError("PLAN_STRUCTURE_NOOP", "Claim revision does not change semantic content")
+    new = pattern.sub(replacement, old, count=1)
+    event = {**event_identity(root, args), "event_id": event_id, "event_type": "claim_revised",
+             "claim_id": args.claim_id, "before_hash": claim["content_hash"], "after_hash": after_hash,
+             "semantic_declaration": args.semantic_declaration, "reason": args.reason.strip(), "created_at": created_at}
+    rel = shard_rel("proposals", args.actor, created_at)
+    writes = {claim["path"]: new.encode("utf-8"), rel: append_jsonl_bytes(root / rel, event)}
+    return writes, {"claim_id": args.claim_id, "topic_id": claim["topic_id"], "node_id": claim["node_id"],
+                    "path": claim["path"], "before_hash": claim["content_hash"], "after_hash": after_hash,
+                    "event_id": event_id, "event_path": rel}
+
+
+def plan_move_topic(root: Path, args: argparse.Namespace, *, event_id: str, created_at: str) -> tuple[dict[str, bytes | None], dict[str, Any]]:
+    """Plan an atomic Topic move, optionally creating its destination Node."""
+    ensure_actor(root, args.actor, review_required=True)
+    registry, _ = load_authority(root)
+    topic = next((item for item in registry.get("topics", []) if item.get("id") == args.topic_id), None)
+    if not topic:
+        raise SemanticPlanError("PLAN_TOPIC_MOVE_SOURCE_MISSING", f"source Topic does not exist: {args.topic_id}")
+    source_path, source_node = topic["path"], topic["node_id"]
+    source = root / source_path
+    if not source.is_file():
+        raise SemanticPlanError("PLAN_STRUCTURE_HISTORY_INCONSISTENT", f"source Topic Markdown is missing: {source_path}")
+    claims, findings = parse_claims(root, registry)
+    moved_claims = sorted(item["id"] for item in claims if item["topic_id"] == args.topic_id)
+    if findings or not moved_claims:
+        raise SemanticPlanError("PLAN_STRUCTURE_HISTORY_INCONSISTENT", "source Topic authority is inconsistent or empty")
+    target = next((item for item in registry["nodes"] if item["id"] == args.to_node), None)
+    metadata = (args.node_name, args.node_path, args.node_boundary)
+    supplied = any(value is not None for value in metadata) or bool(args.node_keywords)
+    node_created = False
+    if target and supplied:
+        raise SemanticPlanError("PLAN_TOPIC_MOVE_PATH_CONFLICT", "node metadata is only valid when atomically creating the target Node")
+    if not target:
+        if not all(isinstance(value, str) and value.strip() for value in metadata):
+            raise SemanticPlanError("PLAN_TOPIC_MOVE_TARGET_NODE_MISSING", "new target Node requires --node-name, --node-path, and --node-boundary")
+        error = _portable_relative_path(args.node_path, _knowledge_rel(root).as_posix())
+        if error:
+            raise SemanticPlanError("PLAN_TOPIC_MOVE_PATH_OUTSIDE_NODE", f"invalid target Node path: {error}")
+        if any(item.get("path") == args.node_path for item in registry["nodes"]):
+            raise SemanticPlanError("PLAN_TOPIC_MOVE_PATH_CONFLICT", "target Node path conflicts with registry")
+        target = {"id": args.to_node, "name": args.node_name.strip(), "path": args.node_path,
+                  "boundary": args.node_boundary.strip(), "keywords": sorted(set(args.node_keywords)), "migration_status": "pilot"}
+        registry["nodes"].append(target); node_created = True
+    target_path = args.to_path
+    error = _portable_relative_path(target_path, target["path"])
+    if error or not target_path.endswith(".md"):
+        raise SemanticPlanError("PLAN_TOPIC_MOVE_PATH_OUTSIDE_NODE", f"invalid target Topic path: {error or 'must be Markdown'}")
+    if source_node == args.to_node and source_path == target_path:
+        raise SemanticPlanError("PLAN_STRUCTURE_NOOP", "Topic already has the requested Node and path")
+    if target_path != source_path and ((root / target_path).exists() or any(item.get("path", "").casefold() == target_path.casefold() for item in registry["topics"])):
+        raise SemanticPlanError("PLAN_TOPIC_MOVE_PATH_CONFLICT", f"target Topic path conflicts: {target_path}")
+    topic["node_id"], topic["path"] = args.to_node, target_path
+    event = {**event_identity(root, args), "event_id": event_id, "event_type": "topic_moved", "topic_id": args.topic_id,
+             "from_node_id": source_node, "to_node_id": args.to_node, "from_path": source_path, "to_path": target_path,
+             "claim_ids": moved_claims, "before_hash": sha256_bytes(source.read_bytes()),
+             "after_hash": sha256_bytes(source.read_bytes()), "reason": args.reason.strip(), "created_at": created_at}
+    rel = shard_rel("proposals", args.actor, created_at)
+    writes: dict[str, bytes | None] = {
+        REGISTRY_REL.as_posix(): (json.dumps(registry, ensure_ascii=False, indent=2) + "\n").encode("utf-8"),
+        target_path: source.read_bytes(), rel: append_jsonl_bytes(root / rel, event),
+    }
+    if target_path != source_path:
+        writes[source_path] = None
+    return writes, {"topic_id": args.topic_id, "from_node": source_node, "to_node": args.to_node,
+                    "from_path": source_path, "to_path": target_path, "claim_ids": moved_claims,
+                    "node_created": node_created, "event_id": event_id, "event_path": rel,
+                    "warning": "SOURCE_NODE_EMPTY_AFTER_MOVE" if sum(item.get("node_id") == source_node for item in registry["topics"]) == 0 else None}
 
 
 def new_claim_command(root: Path, args: argparse.Namespace) -> dict[str, Any]:
@@ -1561,7 +1666,7 @@ def bundle_apply_command(root: Path, args: argparse.Namespace, instance: Instanc
         return {"ok": True, "command": "bundle-apply", "bundle_id": args.bundle_id, "content_hash": bundle["content_hash"], "applied": False, "dry_run": True, "changed_files": bundle["expected_changed_files"], "errors": []}
     receipt_rel = relpath(root, receipt_path)
     receipt = {"schema_version": 1, "bundle_id": args.bundle_id, "content_hash": bundle["content_hash"], "changed_files": bundle["expected_changed_files"]}
-    def replace_with_receipt(target_root: Path, command: str, writes: dict[str, bytes]) -> list[str]:
+    def replace_with_receipt(target_root: Path, command: str, writes: dict[str, bytes | None]) -> list[str]:
         complete = {**writes, receipt_rel: bundle_json(receipt)}
         return transactional_replace(target_root, command, complete, lambda _: validate_planned_writes(target_root, writes, phase="apply"))
     changed = apply_bundle(root, bundle, approved, replace_with_receipt)
@@ -1626,7 +1731,9 @@ def bundle_recover_command(root: Path, bundle_id: str, instance: Instance) -> di
         from .semantic_plan import verify_finalized_bundle_provenance
         verify_finalized_bundle_provenance(root, instance, bundle, allow_applied=True)
     _, _, receipt = bundle_paths(root, bundle_id)
-    if not all((root / a["path"]).is_file() and file_hash(root / a["path"]) == a["new_hash"] for a in bundle["actions"]):
+    if not all((not (root / action["path"]).exists() if action["operation"] == "delete"
+                else (root / action["path"]).is_file() and file_hash(root / action["path"]) == action["new_hash"])
+               for action in bundle["actions"]):
         raise BundleError("authority does not match applied bundle")
     projection = rebuild(root)
     return {**projection, "command": "bundle-recover", "bundle_id": bundle_id, "receipt": receipt.is_file(), "git_status": git_status(root)}
@@ -1767,7 +1874,9 @@ def capabilities_command() -> dict[str, Any]:
     return {"ok": True, "command": "capabilities", "runtime_version": _runtime_version(), "core_version": _runtime_version(),
             "capabilities": {"semantic_plan": True, "provenance": True, "delta_validation": True,
                              "authority_ref": True, "lifecycle": True, "supersede": True,
-                             "migration_plan": True, "routes": False, "evaluation_cases": False,
+                             "migration_plan": True, "bundle_orchestration_plan": True,
+                             "bundle_migration_plan": True, "knowledge_structure_refactor": True,
+                             "claim_revision_plan": True, "routes": False, "evaluation_cases": False,
                              "manifest_compatibility_mode": True}, "errors": []}
 
 
@@ -1942,6 +2051,16 @@ def parser_build() -> argparse.ArgumentParser:
     plan_claim.add_argument("--permission", choices=tuple(PERMISSIONS), default="internal")
     plan_claim.add_argument("--duplicate-resolution", choices=("create_distinct_with_boundary", "cancel"), default="cancel")
     plan_claim.add_argument("--fact-class", action="append", default=[])
+    plan_revise = plan_command("revise-claim")
+    plan_revise.add_argument("plan_id"); plan_revise.add_argument("--claim-id", required=True)
+    plan_revise.add_argument("--title"); plan_revise.add_argument("--statement", required=True); plan_revise.add_argument("--boundary", required=True)
+    plan_revise.add_argument("--semantic-declaration", choices=("clarify", "correct", "narrow", "expand"), required=True)
+    plan_revise.add_argument("--reason", required=True)
+    plan_move_topic = plan_command("move-topic")
+    plan_move_topic.add_argument("plan_id"); plan_move_topic.add_argument("--topic-id", required=True); plan_move_topic.add_argument("--to-node", required=True)
+    plan_move_topic.add_argument("--to-path", required=True); plan_move_topic.add_argument("--reason", required=True)
+    plan_move_topic.add_argument("--node-name"); plan_move_topic.add_argument("--node-path"); plan_move_topic.add_argument("--node-boundary")
+    plan_move_topic.add_argument("--node-keyword", dest="node_keywords", action="append", default=[])
     plan_ref = plan_command("add-authority-ref")
     plan_ref.add_argument("plan_id"); plan_ref.add_argument("--claim-id", required=True)
     plan_ref.add_argument("--path", required=True); plan_ref.add_argument("--locator", required=True)
