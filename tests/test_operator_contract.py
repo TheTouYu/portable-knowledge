@@ -231,6 +231,8 @@ class OperatorContractTests(unittest.TestCase):
         args = type("Args", (), {"plan": plan_path, "plan_hash": plan["plan_hash"], "human_reviewed": True})()
         current_environment = {"python": "/python", "python_version": "3.11", "abi": "abi", "builder": "uv"}
 
+        retry = False
+
         def fake_run(command, **kwargs):
             if command[1:3] == ["-m", "venv"]:
                 runtime = Path(command[-1]); (runtime / "bin").mkdir(parents=True)
@@ -238,9 +240,13 @@ class OperatorContractTests(unittest.TestCase):
             if command[-2:] == ["pip", "--version"]:
                 return subprocess.CompletedProcess(command, 0, stdout="pip", stderr="")
             if command[-1:] == ["capabilities"]:
+                version = "0.2.0rc5" if retry else "9.9"
                 return subprocess.CompletedProcess(
                     command, 0,
-                    stdout=json.dumps({"ok": True, "runtime_version": "9.9", "capabilities": {}}), stderr="")
+                    stdout=json.dumps({"ok": True, "runtime_version": version, "capabilities": {}}), stderr="")
+            if len(command) >= 2 and command[1] == "-c":
+                origin = self.root / new_lock["runtime"] / "lib/portable_knowledge/__init__.py"
+                return subprocess.CompletedProcess(command, 0, stdout=f"{origin}\n", stderr="")
             return subprocess.CompletedProcess(command, 0, stdout="{}", stderr="")
 
         with mock.patch.object(operator, "git_state", return_value=plan["created_from"]), \
@@ -253,8 +259,45 @@ class OperatorContractTests(unittest.TestCase):
         receipt = json.loads(receipt_path.read_text(encoding="utf-8"))
         self.assertTrue(receipt["prior_selection_restored"])
         self.assertIn("runtime version mismatch", receipt["failure"])
-        self.assertEqual(receipt["retained_runtimes"], [old_lock["runtime"], new_lock["runtime"]])
+        self.assertEqual(receipt["retained_runtimes"][0], old_lock["runtime"])
+        failed_runtime = receipt["retained_runtimes"][1]
+        self.assertNotEqual(failed_runtime, new_lock["runtime"])
+        self.assertTrue((self.root / failed_runtime).is_dir())
+        self.assertFalse((self.root / new_lock["runtime"]).exists())
         self.assertIn("create a new plan", receipt["next"])
+
+        retry_plan = {**plan, "project_checks": []}
+        retry_plan["plan_hash"] = operator.plan_hash(retry_plan)
+        self.assertNotEqual(retry_plan["plan_hash"], plan["plan_hash"])
+        retry_path = Path(self.temp.name) / "upgrade-retry.json"
+        retry_path.write_text(json.dumps(retry_plan), encoding="utf-8")
+        retry_args = type("Args", (), {"plan": retry_path, "plan_hash": retry_plan["plan_hash"],
+                                        "human_reviewed": True})()
+        retry = True
+        with mock.patch.object(operator, "git_state", return_value=retry_plan["created_from"]), \
+             mock.patch.object(operator, "build_environment", return_value=current_environment), \
+             mock.patch.object(operator, "run", side_effect=fake_run):
+            result = operator.command_apply(retry_args)
+        self.assertTrue(result["ok"])
+        self.assertEqual(json.loads(lock_path.read_text(encoding="utf-8")), new_lock)
+        self.assertTrue((self.root / new_lock["runtime"]).is_dir())
+
+    def test_failed_runtime_quarantine_does_not_overwrite_earlier_diagnostics(self):
+        runtime = self.root / ".local/pkc/runtimes" / ("b" * 40)
+        runtime.mkdir(parents=True)
+        (runtime / "marker").write_text("candidate", encoding="utf-8")
+        quarantine = self.root / ".local/pkc/failed-runtimes"
+        quarantine.mkdir(parents=True)
+        first = quarantine / f"{'b' * 40}-{'c' * 12}"
+        first.mkdir()
+        (first / "marker").write_text("earlier", encoding="utf-8")
+
+        retained = operator.quarantine_failed_runtime(self.root, runtime, "c" * 64)
+
+        self.assertEqual(retained, f".local/pkc/failed-runtimes/{'b' * 40}-{'c' * 12}-1")
+        self.assertEqual((first / "marker").read_text(encoding="utf-8"), "earlier")
+        self.assertEqual((self.root / retained / "marker").read_text(encoding="utf-8"), "candidate")
+        self.assertFalse(runtime.exists())
 
     def test_apply_requires_human_review_before_any_mutation(self):
         plan = {"schema_version": 1, "operator_contract": operator.CONTRACT, "kind": "pkc-install",

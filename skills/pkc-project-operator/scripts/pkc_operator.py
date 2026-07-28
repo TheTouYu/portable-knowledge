@@ -486,6 +486,19 @@ def create_link(root: Path, item: dict[str, str]) -> None:
         path.symlink_to(target, target_is_directory=True)
 
 
+def quarantine_failed_runtime(root: Path, runtime: Path, plan_hash_value: str) -> str:
+    quarantine_root = root / ".local" / "pkc" / "failed-runtimes"
+    quarantine_root.mkdir(parents=True, exist_ok=True)
+    base = quarantine_root / f"{runtime.name}-{plan_hash_value[:12]}"
+    destination = base
+    suffix = 1
+    while destination.exists():
+        destination = base.with_name(f"{base.name}-{suffix}")
+        suffix += 1
+    runtime.replace(destination)
+    return destination.relative_to(root).as_posix()
+
+
 def command_apply(args: argparse.Namespace) -> dict[str, Any]:
     plan = json.loads(args.plan.read_text(encoding="utf-8"))
     actual = plan_hash(plan)
@@ -565,15 +578,26 @@ def command_apply(args: argparse.Namespace) -> dict[str, Any]:
                 path.unlink(missing_ok=True)
             else:
                 path.write_bytes(content)
+        retained_runtimes = [value for value in (plan.get("rollback_runtime"),) if value]
+        quarantine_error = None
+        if runtime.exists():
+            try:
+                retained_runtimes.append(quarantine_failed_runtime(root, runtime, actual))
+            except OSError as move_error:
+                retained_runtimes.append(plan["runtime"])
+                quarantine_error = str(move_error)
         receipt_path = root / ".local" / "pkc" / "operator-receipts" / f"upgrade-{actual}.json"
         receipt = {"schema_version": 1, "kind": "pkc-upgrade-rollback", "plan_hash": actual,
                    "ok": False, "failure": str(exc), "prior_selection_restored": True,
-                   "restored_files": sorted(previous),
-                   "retained_runtimes": [value for value in (plan.get("rollback_runtime"), plan.get("runtime")) if value],
-                   "next": "inspect this receipt and both runtimes; fix the cause and create a new plan"}
+                   "restored_files": sorted(previous), "retained_runtimes": retained_runtimes,
+                   "failed_runtime_quarantined": quarantine_error is None,
+                   "quarantine_error": quarantine_error,
+                   "next": "inspect this receipt and retained runtimes; fix the cause and create a new plan for review"}
         receipt_path.parent.mkdir(parents=True, exist_ok=True)
         receipt_path.write_text(json.dumps(receipt, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
-        raise OperatorError("post-switch verification failed; prior selection restored; both runtimes preserved; "
+        retention = ("failed runtime quarantined outside the canonical target path"
+                     if quarantine_error is None else "failed runtime quarantine failed; inspect the canonical path")
+        raise OperatorError(f"post-switch verification failed; prior selection restored; {retention}; "
                             f"rollback_receipt={receipt_path}: {exc}") from exc
     return {"ok": True, "command": "apply-plan", "plan_hash": actual, "target": str(root),
             "runtime": plan["runtime"], "written": written, "links": [x["path"] for x in plan["links"]],
