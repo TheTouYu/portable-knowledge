@@ -69,33 +69,59 @@ def select_intent_route(config: dict[str, Any], *, context_id: str, intent: str)
     return scored[0][3]
 
 
-def _metadata(topic: dict[str, Any], node: dict[str, Any], registry_claims: list[dict[str, Any]]) -> str:
+FIELD_WEIGHTS = {
+    "identity": 3.0,
+    "exact_phrase": 2.5,
+    "title": 1.7,
+    "summary": 1.2,
+    "node": 0.7,
+    "claim": 0.45,
+}
+
+
+def _topic_fields(topic: dict[str, Any], node: dict[str, Any], registry_claims: list[dict[str, Any]]) -> dict[str, set[str]]:
     claims = [claim for claim in registry_claims if claim.get("topic_id") == topic.get("id") and claim.get("lifecycle", "active") == "active"]
-    compact_claims = " ".join(str(claim.get(key, "")) for claim in claims for key in ("title", "summary", "statement"))
-    return " ".join(str(value) for value in (
-        node.get("id", ""), node.get("name", ""), node.get("boundary", ""), " ".join(node.get("keywords", [])),
-        topic.get("id", ""), topic.get("title", ""), topic.get("summary", ""), " ".join(topic.get("aliases", [])),
-        " ".join(topic.get("keywords", [])), compact_claims,
-    ))
+    return {
+        "identity": _terms(" ".join(str(value) for value in (topic.get("id", ""), " ".join(topic.get("aliases", [])), " ".join(topic.get("keywords", []))))),
+        "title": _terms(str(topic.get("title", ""))),
+        "summary": _terms(str(topic.get("summary", ""))),
+        "node": _terms(" ".join(str(value) for value in (node.get("id", ""), node.get("name", ""), node.get("boundary", ""), " ".join(node.get("keywords", []))))),
+        "claim": _terms(" ".join(str(claim.get(key, "")) for claim in claims for key in ("title", "summary", "statement"))),
+    }
 
 
-def _candidate_scores(registry: dict[str, Any], intent: str) -> list[dict[str, Any]]:
+def _candidate_scores(registry: dict[str, Any], intent: str, eligible_nodes: set[str] | None = None) -> list[dict[str, Any]]:
     query_terms = _terms(intent)
     if not query_terms:
         return []
     nodes = {node.get("id"): node for node in registry.get("nodes", [])}
-    documents = [(topic, _terms(_metadata(topic, nodes.get(topic.get("node_id"), {}), registry.get("claims", [])))) for topic in registry.get("topics", [])]
-    document_frequency = {term: sum(term in terms for _, terms in documents) for term in query_terms}
+    topics = [topic for topic in registry.get("topics", []) if eligible_nodes is None or topic.get("node_id") in eligible_nodes]
+    documents = [(topic, _topic_fields(topic, nodes.get(topic.get("node_id"), {}), registry.get("claims", []))) for topic in topics]
+    document_frequency = {term: sum(any(term in terms for terms in fields.values()) for _, fields in documents) for term in query_terms}
     count = max(1, len(documents))
+    normalized_intent = _normalized(intent)
     results = []
-    for topic, terms in documents:
-        overlap = query_terms.intersection(terms)
+    for topic, fields in documents:
+        all_terms = set().union(*fields.values())
+        overlap = query_terms.intersection(all_terms)
         if not overlap:
             continue
-        raw = sum(math.log1p((count + 1) / (document_frequency[term] + 0.5)) for term in overlap)
-        confidence = min(1.0, len(overlap) / max(1, min(len(query_terms), 4)))
-        results.append({"id": topic["id"], "node_id": topic.get("node_id"), "score": round(raw, 6), "confidence": round(confidence, 6), "matched_terms": sorted(overlap)[:8]})
-    return sorted(results, key=lambda item: (-item["score"], item["id"]))
+        distinctive = {term for term in overlap if document_frequency[term] == 1}
+        shared = overlap - distinctive
+        raw = 0.0
+        for term in overlap:
+            idf = math.log1p((count + 1) / (document_frequency[term] + 0.5))
+            weight = max(FIELD_WEIGHTS[field] for field, terms in fields.items() if term in terms)
+            raw += idf * weight
+        phrases = [_normalized(str(value)) for value in (*topic.get("aliases", []), *topic.get("keywords", [])) if len(_terms(str(value))) > 1]
+        if any(phrase and phrase in normalized_intent for phrase in phrases):
+            raw += FIELD_WEIGHTS["exact_phrase"]
+        normalized_score = raw / max(1.0, sum(FIELD_WEIGHTS["identity"] for _ in query_terms))
+        confidence = min(1.0, normalized_score)
+        results.append({"id": topic["id"], "node_id": topic.get("node_id"), "raw_score": round(raw, 6),
+                        "normalized_score": round(normalized_score, 6), "score": round(raw, 6), "confidence": round(confidence, 6),
+                        "distinctive_terms": sorted(distinctive)[:8], "shared_terms": sorted(shared)[:8], "matched_terms": sorted(overlap)[:8]})
+    return sorted(results, key=lambda item: (-item["raw_score"], item["id"]))
 
 
 def _dynamic_route(config: dict[str, Any], registry: dict[str, Any], *, context_id: str, intent: str,
@@ -103,8 +129,10 @@ def _dynamic_route(config: dict[str, Any], registry: dict[str, Any], *, context_
     settings = config.get("retrieval", {}).get("dynamic", {})
     candidate_limit = min(20, max(1, int(settings.get("candidate_limit", 8))))
     confidence_threshold = min(1.0, max(0.0, float(settings.get("confidence_threshold", 0.25))))
-    margin_threshold = min(1.0, max(0.0, float(settings.get("margin_threshold", 0.08))))
-    all_candidates = _candidate_scores(registry, intent)
+    margin_threshold = max(0.0, float(settings.get("margin_threshold", 0.08)))
+    ratio_threshold = max(1.0, float(settings.get("ratio_threshold", 1.15)))
+    all_candidates = _candidate_scores(registry, intent, linked_nodes)
+    outside_candidates = _candidate_scores(registry, intent, {topic.get("node_id") for topic in registry.get("topics", [])} - linked_nodes)
     normalized = _normalized(intent)
     blocked_topics = {
         topic_id
@@ -113,21 +141,29 @@ def _dynamic_route(config: dict[str, Any], registry: dict[str, Any], *, context_
         and any(term in normalized for term in _semantic_values(config, route, "blocked_by", "blocked_by_groups"))
         for topic_id in route.get("topic_ids", [])
     }
-    candidates = [item for item in all_candidates if item["node_id"] in linked_nodes and item["id"] not in blocked_topics][:candidate_limit]
-    outside = [item for item in all_candidates if item["node_id"] not in linked_nodes]
+    candidates = [item for item in all_candidates if item["id"] not in blocked_topics][:candidate_limit]
     if not candidates:
-        failure = "out_of_context" if outside and outside[0]["confidence"] >= confidence_threshold else "coverage_gap"
+        failure = "out_of_context" if outside_candidates and outside_candidates[0]["confidence"] >= confidence_threshold else "coverage_gap"
         raise RetrievalError(f"dynamic retrieval {failure}: {intent}", "RETRIEVAL_CANDIDATE_UNKNOWN",
-                             details={"failure_type": failure, "candidate_topics": outside[:3] if failure == "out_of_context" else []})
+                             details={"failure_type": failure, "candidate_topics": outside_candidates[:3] if failure == "out_of_context" else []})
     confidence = float(candidates[0]["confidence"])
-    margin = confidence - float(candidates[1]["confidence"]) if len(candidates) > 1 else confidence
+    second_raw = float(candidates[1]["raw_score"]) if len(candidates) > 1 else 0.0
+    margin = float(candidates[0]["raw_score"]) - second_raw
+    ratio = float(candidates[0]["raw_score"]) / second_raw if second_raw > 0 else math.inf
+    for item in candidates:
+        item["score_margin"] = round(margin, 6)
+        item["score_ratio"] = round(ratio, 6) if math.isfinite(ratio) else None
     if confidence < confidence_threshold:
         raise RetrievalError(f"dynamic retrieval coverage gap: {intent}", "RETRIEVAL_CANDIDATE_UNKNOWN",
                              details={"failure_type": "coverage_gap", "candidate_topics": candidates[:3], "confidence": confidence, "margin": margin})
-    if len(candidates) > 1 and margin < margin_threshold:
+    top_topic = next(topic for topic in registry.get("topics", []) if topic.get("id") == candidates[0]["id"])
+    top_identity = _topic_fields(top_topic, {node.get("id"): node for node in registry.get("nodes", [])}.get(top_topic.get("node_id"), {}), registry.get("claims", []))["identity"]
+    has_distinctive_evidence = bool(candidates[0]["distinctive_terms"]) or len(_terms(intent).intersection(top_identity)) >= 2
+    if len(candidates) > 1 and (not has_distinctive_evidence or (margin < margin_threshold and ratio < ratio_threshold)):
         raise RetrievalError("dynamic retrieval candidates are ambiguous", "RETRIEVAL_CANDIDATE_AMBIGUOUS",
                              details={"failure_type": "ambiguous", "candidate_topics": candidates[:3],
-                                      "clarification_options": [item["id"] for item in candidates[:3]], "confidence": confidence, "margin": margin})
+                                      "clarification_options": [item["id"] for item in candidates[:3]], "confidence": confidence, "margin": margin,
+                                      "score_margin": margin, "score_ratio": ratio})
     selected = [item for item in candidates if item["confidence"] >= confidence_threshold][:effective_limit]
     route = {"id": None, "topic_ids": [item["id"] for item in selected], "escalate_to_l3": False, "verification_roles": []}
     return route, candidates, confidence, margin

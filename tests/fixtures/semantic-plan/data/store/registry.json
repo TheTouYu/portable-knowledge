@@ -1,0 +1,10 @@
+{
+  "schema_version": 1,
+  "nodes": [{"id": "software-core", "name": "Software Core", "path": "domain/topics", "boundary": "Neutral software contracts", "keywords": ["software"], "migration_status": "managed"}],
+  "topics": [
+    {"id": "topic-schema", "node_id": "software-core", "title": "Schema Contract", "path": "domain/topics/schema.md", "summary": "Neutral schema behavior", "keywords": ["schema"], "permission": "internal"},
+    {"id": "topic-runtime", "node_id": "software-core", "title": "Runtime Contract", "path": "domain/topics/runtime.md", "summary": "Neutral runtime behavior", "keywords": ["runtime"], "permission": "internal"},
+    {"id": "topic-validation", "node_id": "software-core", "title": "Validation Contract", "path": "domain/topics/validation.md", "summary": "Neutral validation behavior", "keywords": ["validation"], "permission": "internal"}
+  ],
+  "relationships": []
+}

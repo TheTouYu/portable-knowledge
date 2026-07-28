@@ -1,0 +1,539 @@
+"""Deterministic, disposable Semantic Operation Plan overlay."""
+from __future__ import annotations
+
+import argparse
+import base64
+import hashlib
+import json
+import shutil
+import subprocess
+import tempfile
+from pathlib import Path, PurePosixPath
+from typing import Any
+
+from .authority import FACT_CLASSES, validate_authority_coverage, validate_authority_ref
+from .bundle import build_bundle, canonical as bundle_bytes, digest as canonical_digest
+from .instance import Instance
+
+CORE_PLAN_VERSION = "semantic-plan-v2"
+PERMISSION_RANK = {"restricted": 0, "internal": 1, "public_redacted": 2, "public": 3}
+STDOUT_CHARACTER_BUDGET = 4096
+DEFAULT_BUDGETS = {
+    "max_candidate_bundles": 2,
+    "max_full_preflight": 1,
+    "max_tool_gap": 1,
+    "max_noop_actions": 0,
+}
+COUNTER_KEYS = (
+    "operations", "candidate_bundles", "delta_checks", "full_checks",
+    "full_preflight_checks", "post_apply_full_checks", "changed_files",
+    "semantic_amplification", "noop_actions", "tool_gap",
+)
+
+
+def _core():
+    from . import core
+    return core
+
+
+def _fail(code: str, message: str, *, path: str = ".", **details: Any) -> None:
+    core = _core()
+    finding = {"code": code, "path": path, "message": message, **details}
+    raise core.SemanticPlanError(code, message, [finding])
+
+
+def _git(root: Path, *args: str, text: bool = False) -> subprocess.CompletedProcess[Any]:
+    return subprocess.run(["git", *args], cwd=root, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+                          text=text, encoding="utf-8" if text else None, check=False)
+
+
+def _head(root: Path) -> str:
+    result = _git(root, "rev-parse", "HEAD", text=True)
+    if result.returncode:
+        _fail("PLAN_GIT_BASELINE", "semantic plan requires a committed Git baseline")
+    return result.stdout.strip()
+
+
+def _committed_bytes(root: Path, baseline: str, path: str) -> bytes | None:
+    result = _git(root, "show", f"{baseline}:{path}")
+    return result.stdout if result.returncode == 0 else None
+
+
+def _runtime_version() -> str:
+    return _core()._runtime_version()
+
+
+def _local_base(instance: Instance) -> Path:
+    return instance.projection_path / "semantic-plans"
+
+
+def _plan_path(root: Path, instance: Instance, plan_id: str) -> Path:
+    return root / _local_base(instance) / f"{plan_id}.json"
+
+
+def _artifact_rel(instance: Instance, digest: str, kind: str) -> str:
+    return (_local_base(instance) / "artifacts" / f"{digest}.{kind}.json").as_posix()
+
+
+def _canonical(value: Any) -> bytes:
+    return (json.dumps(value, ensure_ascii=False, sort_keys=True, separators=(",", ":")) + "\n").encode("utf-8")
+
+
+def _save(path: Path, plan: dict[str, Any]) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    temporary = path.with_suffix(".tmp")
+    temporary.write_bytes(_canonical(plan))
+    temporary.replace(path)
+
+
+def _write_artifact(root: Path, rel: str, value: Any) -> None:
+    path = root / rel
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_bytes(_canonical(value))
+
+
+def _load(root: Path, instance: Instance, plan_id: str) -> tuple[Path, dict[str, Any]]:
+    path = _plan_path(root, instance, plan_id)
+    try:
+        plan = json.loads(path.read_text(encoding="utf-8"))
+    except FileNotFoundError:
+        _fail("PLAN_NOT_FOUND", f"plan not found: {plan_id}")
+    if plan.get("plan_id") != plan_id:
+        _fail("PLAN_IDENTITY_MISMATCH", "plan identity does not match artifact")
+    return path, plan
+
+
+def _ensure_open(root: Path, plan: dict[str, Any]) -> None:
+    if plan.get("state") != "open":
+        _fail("PLAN_NOT_OPEN", f"plan is {plan.get('state')}")
+    if _head(root) != plan["baseline_commit"]:
+        _fail("PLAN_STALE_BASELINE", "committed baseline changed since plan init")
+
+
+def _decode_writes(plan: dict[str, Any]) -> dict[str, bytes]:
+    try:
+        return {path: base64.b64decode(value, validate=True) for path, value in plan.get("writes", {}).items()}
+    except (ValueError, TypeError) as exc:
+        _fail("PLAN_ARTIFACT_INVALID", f"invalid planned write encoding: {exc}")
+
+
+def _content_digest(plan: dict[str, Any]) -> str:
+    return canonical_digest({
+        "plan_id": plan["plan_id"],
+        "baseline_commit": plan["baseline_commit"],
+        "operations": plan.get("operations", []),
+        "writes": {key: hashlib.sha256(value).hexdigest() for key, value in sorted(_decode_writes(plan).items())},
+    })
+
+
+def _operation(plan_id: str, operation_type: str, canonical_input: dict[str, Any]) -> dict[str, Any]:
+    content = {"plan_id": plan_id, "operation_type": operation_type, "input": canonical_input, "core_version": _runtime_version()}
+    operation_digest = canonical_digest(content)
+    return {**content, "operation_id": f"op_{operation_digest[:26]}", "operation_digest": operation_digest}
+
+
+def _with_overlay(root: Path, plan: dict[str, Any]):
+    temporary = tempfile.TemporaryDirectory()
+    staging = Path(temporary.name)
+    for child in root.iterdir():
+        if child.name in {".git", ".local"}:
+            continue
+        destination = staging / child.name
+        shutil.copytree(child, destination) if child.is_dir() else shutil.copy2(child, destination)
+    for rel, value in _decode_writes(plan).items():
+        target = staging / rel
+        target.parent.mkdir(parents=True, exist_ok=True)
+        target.write_bytes(value)
+    return temporary, staging
+
+
+def _counters(plan: dict[str, Any]) -> dict[str, int]:
+    current = plan.setdefault("counters", {})
+    for key in COUNTER_KEYS:
+        current.setdefault(key, 0)
+    current["operations"] = len(plan.get("operations", []))
+    current["changed_files"] = len(plan.get("writes", {}))
+    return {key: int(current[key]) for key in COUNTER_KEYS}
+
+
+def _budget_findings(plan: dict[str, Any], anticipated: dict[str, int] | None = None) -> list[dict[str, Any]]:
+    counters = _counters(plan); anticipated = anticipated or {}
+    budgets = plan.get("budgets", DEFAULT_BUDGETS)
+    checks = {
+        "candidate_bundles": "max_candidate_bundles",
+        "full_preflight_checks": "max_full_preflight",
+        "noop_actions": "max_noop_actions",
+        "tool_gap": "max_tool_gap",
+    }
+    return [
+        {"code": "PLAN_BUDGET_EXCEEDED", "path": ".", "message": f"{counter} exceeds {budget}",
+         "counter": counter, "actual": counters[counter] + anticipated.get(counter, 0), "limit": budgets[budget]}
+        for counter, budget in checks.items()
+        if counters[counter] + anticipated.get(counter, 0) > budgets[budget]
+    ]
+
+
+def _assert_budget(plan: dict[str, Any], anticipated: dict[str, int] | None = None) -> None:
+    findings = _budget_findings(plan, anticipated)
+    if findings:
+        raise _core().SemanticPlanError("PLAN_BUDGET_EXCEEDED", "semantic plan budget exceeded", findings)
+
+
+def init_plan(root: Path, instance: Instance, args: argparse.Namespace) -> dict[str, Any]:
+    baseline = _head(root)
+    identity = {"instance_id": instance.identity["id"], "baseline_commit": baseline, "principal": instance.identities["principal"]["id"],
+                "executor": instance.identities["executor"]["id"], "workspace": instance.identities["workspace"]["id"],
+                "writer": instance.identities["writer"]["id"], "intent": args.intent.strip(), "risk": args.risk,
+                "core_version": _runtime_version()}
+    if not identity["intent"]:
+        _fail("PLAN_INPUT_INVALID", "intent is required")
+    plan_digest = canonical_digest(identity)
+    plan_id = f"pln_{plan_digest[:26]}"
+    path = _plan_path(root, instance, plan_id)
+    if path.exists():
+        _, existing = _load(root, instance, plan_id)
+        return _summary(existing, "init", artifact_path=_local_base(instance).joinpath(path.name).as_posix())
+    plan = {"schema_version": 2, "plan_id": plan_id, "plan_digest": plan_digest, **identity, "state": "open",
+            "operations": [], "writes": {}, "claims": {}, "authority_refs": [], "delta": None,
+            "finalized_bundle": None, "full_preflight_receipt": None, "post_apply_receipt": None,
+            "budgets": dict(DEFAULT_BUDGETS), "counters": {key: 0 for key in COUNTER_KEYS}}
+    _save(path, plan)
+    return _summary(plan, "init", artifact_path=_local_base(instance).joinpath(path.name).as_posix())
+
+
+def add_claim(root: Path, instance: Instance, args: argparse.Namespace) -> dict[str, Any]:
+    path, plan = _load(root, instance, args.plan_id); _ensure_open(root, plan)
+    canonical_input = {"node": args.node, "topic_id": args.topic_id, "topic_path": args.topic_path, "title": args.title.strip(),
+                       "statement": args.statement.strip(), "boundary": args.boundary.strip(), "permission": args.permission,
+                       "fact_classes": sorted(set(args.fact_class))}
+    operation = _operation(plan["plan_id"], "add_claim", canonical_input)
+    claim_id = f"clm_{canonical_digest({'plan_id': plan['plan_id'], 'baseline': plan['baseline_commit'], 'operation_digest': operation['operation_digest']})[:26].upper()}"
+    if any(item["operation_id"] == operation["operation_id"] for item in plan["operations"]):
+        return _summary(plan, "add-claim", operation_id=operation["operation_id"], claim_id=claim_id, replayed=True)
+    temporary, staging = _with_overlay(root, plan)
+    try:
+        ns = argparse.Namespace(actor=plan["writer"], node=args.node, topic_id=args.topic_id, topic_path=args.topic_path,
+                                topic_title=None, topic_summary="", keywords=[], title=args.title, statement=args.statement,
+                                boundary=args.boundary, permission=args.permission, duplicate_resolution="cancel")
+        writes, details = _core().plan_new_claim(staging, ns, claim_id=claim_id, fact_classes=canonical_input["fact_classes"])
+    except _core().SemanticPlanError:
+        raise
+    except _core().KnowledgeError as exc:
+        message = str(exc)
+        code = "PLAN_DUPLICATE" if "duplicate or highly similar" in message else ("PLAN_PERMISSION_EXPANSION" if "permission must equal" in message else "PLAN_TOPIC_INVALID")
+        _fail(code, message)
+    finally:
+        temporary.cleanup()
+    operation["claim_id"] = claim_id
+    plan["operations"].append(operation); plan["claims"][claim_id] = {**canonical_input, "claim_id": claim_id}
+    plan["writes"].update({rel: base64.b64encode(value).decode("ascii") for rel, value in writes.items()})
+    plan["delta"] = None
+    plan["counters"]["semantic_amplification"] += int(details.get("amplification", {}).get("knowledge_markdown_character_change", 0))
+    _counters(plan); _save(path, plan)
+    return _summary(plan, "add-claim", operation_id=operation["operation_id"], claim_id=claim_id, replayed=False)
+
+
+def add_authority_ref(root: Path, instance: Instance, args: argparse.Namespace) -> dict[str, Any]:
+    path, plan = _load(root, instance, args.plan_id); _ensure_open(root, plan)
+    claim = plan["claims"].get(args.claim_id)
+    if not claim:
+        _fail("PLAN_CLAIM_MISSING", f"planned claim not found: {args.claim_id}")
+    pure = PurePosixPath(args.path)
+    if not args.path or pure.is_absolute() or ".." in pure.parts or "\\" in args.path or args.path.startswith(".local/"):
+        _fail("PLAN_AUTHORITY_PATH_INVALID", "authority path must be portable, project-relative, and non-local", path=args.path)
+    committed = _committed_bytes(root, plan["baseline_commit"], args.path)
+    if committed is None:
+        _fail("PLAN_AUTHORITY_NOT_COMMITTED", "authority path does not exist in committed baseline", path=args.path)
+    working = root / args.path
+    if not working.is_file() or working.read_bytes() != committed:
+        _fail("PLAN_AUTHORITY_WORKTREE_DIRTY", "authority path has uncommitted content", path=args.path)
+    facts = sorted(set(args.fact_class))
+    if not facts or any(value not in FACT_CLASSES for value in facts):
+        _fail("PLAN_FACT_CLASS_REQUIRED", "Authority Ref requires valid fact classes", path=args.path)
+    if not set(facts).issubset(set(claim["fact_classes"])):
+        _fail("PLAN_FACT_COVERAGE", "Authority Ref fact classes must be declared by the Claim", path=args.path)
+    if PERMISSION_RANK[claim["permission"]] > PERMISSION_RANK["internal"]:
+        _fail("PLAN_PERMISSION_EXPANSION", "semantic plan cannot expand Claim permission beyond internal", path=args.path)
+    approved_hash = hashlib.sha256(committed).hexdigest()
+    canonical_input = {"claim_id": args.claim_id, "path": args.path, "locator": args.locator, "role": args.role,
+                       "change_policy": args.change_policy, "fact_classes": facts, "approved_hash": approved_hash}
+    operation = _operation(plan["plan_id"], "add_authority_ref", canonical_input)
+    if any(item["operation_id"] == operation["operation_id"] for item in plan["operations"]):
+        return _summary(plan, "add-authority-ref", operation_id=operation["operation_id"], approved_hash=approved_hash,
+                        diagnostic_hash_match=args.diagnostic_hash in {None, approved_hash}, replayed=True)
+    ref = {"id": f"aref_{operation['operation_digest'][:26]}", "path": args.path, "locator": args.locator, "role": args.role,
+           "baseline_state": "committed_baseline", "change_policy": args.change_policy, "approved_hash": approved_hash,
+           "claim_ids": [args.claim_id], "supports_fact_classes": facts}
+    validation = validate_authority_ref(ref)
+    if not validation["ok"]:
+        raise _core().SemanticPlanError("PLAN_AUTHORITY_REF_INVALID", "invalid Authority Ref", validation["errors"])
+    refs_rel = instance.authority.get("authority_refs")
+    if not refs_rel:
+        _fail("PLAN_AUTHORITY_REFS_UNCONFIGURED", "instance has no authority_refs path")
+    current = _decode_writes(plan).get(refs_rel)
+    if current is None:
+        current = _committed_bytes(root, plan["baseline_commit"], refs_rel)
+        if current is None:
+            _fail("PLAN_AUTHORITY_REFS_UNCOMMITTED", "authority_refs registry is not committed", path=refs_rel)
+    data = json.loads(current.decode("utf-8")); data.setdefault("refs", []).append(ref); data["refs"] = sorted(data["refs"], key=lambda item: item["id"])
+    plan["writes"][refs_rel] = base64.b64encode((json.dumps(data, ensure_ascii=False, indent=2) + "\n").encode()).decode("ascii")
+    plan["authority_refs"].append(ref); plan["operations"].append(operation); plan["delta"] = None
+    _counters(plan); _save(path, plan)
+    return _summary(plan, "add-authority-ref", operation_id=operation["operation_id"], authority_ref_id=ref["id"],
+                    approved_hash=approved_hash, diagnostic_hash_match=args.diagnostic_hash in {None, approved_hash}, replayed=False)
+
+
+def _evaluation_cases(root: Path, instance: Instance) -> list[dict[str, Any]]:
+    rel = instance.raw.get("evaluation", {}).get("cases_path")
+    if not rel:
+        return []
+    value = json.loads((root / rel).read_text(encoding="utf-8"))
+    if value.get("schema_version") != 1 or not isinstance(value.get("cases"), list):
+        _fail("PLAN_EVALUATION_SCHEMA", "evaluation cases must use schema_version 1", path=rel)
+    return value["cases"]
+
+
+def _affected_cases(root: Path, instance: Instance, plan: dict[str, Any]) -> list[dict[str, Any]]:
+    touched_topics = {claim["topic_id"] for claim in plan.get("claims", {}).values()}
+    return [case for case in _evaluation_cases(root, instance) if touched_topics.intersection(case.get("topic_ids", []))]
+
+
+def _run_cases(staging: Path, cases: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    core = _core()
+    records = []
+    for case in cases:
+        try:
+            result = core.query_command(staging, case["query"], int(case.get("level", 2)), int(case.get("limit", 5)), 0, "internal")
+            returned_topics = {item.get("topic_id", item.get("id")) for item in result.get("results", [])}
+            expected = set(case.get("expected_topic_ids", case.get("topic_ids", [])))
+            passed = bool(returned_topics.intersection(expected))
+            records.append({"case_id": case["id"], "ok": passed, "returned_topic_ids": sorted(returned_topics), "expected_topic_ids": sorted(expected)})
+        except Exception as exc:  # evaluation records the deterministic failure; caller remains fail-closed
+            records.append({"case_id": case.get("id", "unknown"), "ok": False, "error": str(exc)})
+    return records
+
+
+def _validation_records(staging: Path, instance: Instance, cases: list[dict[str, Any]]) -> dict[str, Any]:
+    core = _core()
+    validation = core.validate(staging)
+    projection = core.rebuild(staging)
+    tree = core.tree_command(staging) if validation["ok"] and projection["ok"] else {"ok": False, "errors": []}
+    case_records = _run_cases(staging, cases) if validation["ok"] and projection["ok"] else []
+    refs = []
+    refs_path = instance.authority.get("authority_refs")
+    if refs_path and (staging / refs_path).is_file():
+        from .authority import observe_authority_refs
+        refs = observe_authority_refs(staging, json.loads((staging / refs_path).read_text(encoding="utf-8")).get("refs", []))
+    failed = [item["case_id"] for item in case_records if not item["ok"]]
+    ok = validation["ok"] and projection["ok"] and tree.get("ok", False) and not failed and all(item.get("effective_status", item.get("status")) in {"current", "fresh"} for item in refs)
+    return {"ok": ok, "validation": validation, "projection": projection, "tree": tree,
+            "evaluation_records": case_records, "failed_case_ids": failed, "authority_records": refs}
+
+
+def check_delta(root: Path, instance: Instance, args: argparse.Namespace) -> dict[str, Any]:
+    path, plan = _load(root, instance, args.plan_id); _ensure_open(root, plan); _assert_budget(plan)
+    temporary, staging = _with_overlay(root, plan)
+    try:
+        registry, _ = _core().load_authority(staging)
+        claims, parse_findings = _core().parse_claims(staging, registry)
+        planned_claims = [claim for claim in claims if claim["id"] in plan["claims"]]
+        findings = [{"code": item.code, "path": item.path, "message": item.message} for item in parse_findings]
+        findings.extend({**item, "path": instance.authority.get("authority_refs", "authority_ref"), "message": "missing planned Authority fact coverage"}
+                        for item in validate_authority_coverage(planned_claims, plan["authority_refs"]))
+        for ref in plan["authority_refs"]:
+            committed = _committed_bytes(root, plan["baseline_commit"], ref["path"])
+            if committed is None or hashlib.sha256(committed).hexdigest() != ref["approved_hash"]:
+                findings.append({"code": "PLAN_AUTHORITY_STALE", "path": ref["path"], "message": "committed Authority hash changed"})
+            elif not (root / ref["path"]).is_file() or (root / ref["path"]).read_bytes() != committed:
+                findings.append({"code": "PLAN_AUTHORITY_WORKTREE_DIRTY", "path": ref["path"], "message": "Authority has uncommitted content"})
+        affected = _affected_cases(staging, instance, plan)
+        if not findings:
+            projection = _core().rebuild(staging)
+            if not projection["ok"]:
+                findings.extend(projection.get("errors", []))
+        records = _run_cases(staging, affected) if not findings else []
+        failed_case_ids = [item["case_id"] for item in records if not item["ok"]]
+        findings.extend({"code": "PLAN_EVALUATION_FAILED", "path": "evaluation", "message": f"affected evaluation failed: {case_id}", "case_id": case_id}
+                        for case_id in failed_case_ids)
+        digest = _content_digest(plan)
+        artifact = _artifact_rel(instance, digest, "delta")
+        full = {"schema_version": 1, "mode": "delta", "plan_id": plan["plan_id"], "plan_digest": digest,
+                "affected_case_ids": [item["id"] for item in affected], "records": records, "findings": findings}
+        _write_artifact(root, artifact, full)
+        plan["counters"]["delta_checks"] += 1
+        delta = {"ok": not findings, "mode": "delta", "delta_digest": digest, "touched_operations": len(plan["operations"]),
+                 "touched_files": sorted(plan["writes"]), "affected_case_ids": full["affected_case_ids"],
+                 "failed_case_ids": failed_case_ids, "findings": findings, "can_finalize": not findings, "artifact_path": artifact}
+        plan["delta"] = delta; _counters(plan); _save(path, plan)
+        return _compact(plan, "knowledge-plan check", delta, summary={"can_finalize": not findings, "touched_operations": len(plan["operations"]), "touched_files": len(plan["writes"])})
+    finally:
+        temporary.cleanup()
+
+
+def _action_operation(plan: dict[str, Any], rel: str) -> str:
+    if "authority-ref" in rel.casefold():
+        return "semantic_overlay:add_authority_ref"
+    return "semantic_overlay:add_claim"
+
+
+def _assert_finalized_environment(root: Path, plan: dict[str, Any], *, allow_applied: bool = False) -> None:
+    if _head(root) != plan["baseline_commit"]:
+        _fail("PLAN_STALE_BASELINE", "committed baseline changed after finalize")
+    for ref in plan.get("authority_refs", []):
+        committed = _committed_bytes(root, plan["baseline_commit"], ref["path"])
+        if committed is None or hashlib.sha256(committed).hexdigest() != ref["approved_hash"]:
+            _fail("PLAN_AUTHORITY_STALE", "committed Authority hash changed", path=ref["path"])
+        if not (root / ref["path"]).is_file() or (root / ref["path"]).read_bytes() != committed:
+            _fail("PLAN_AUTHORITY_WORKTREE_DIRTY", "Authority has uncommitted content", path=ref["path"])
+    if not allow_applied:
+        for action in (plan.get("finalized_bundle") or {}).get("actions", []):
+            target = root / action["path"]
+            actual = hashlib.sha256(target.read_bytes()).hexdigest() if target.exists() else None
+            if actual != action["expected_hash"]:
+                _fail("PLAN_WORKTREE_DRIFT", "planned authority changed after finalize", path=action["path"])
+
+
+def finalize(root: Path, instance: Instance, args: argparse.Namespace) -> dict[str, Any]:
+    path, plan = _load(root, instance, args.plan_id)
+    if plan.get("finalized_bundle"):
+        verify_finalized_bundle_provenance(root, instance, plan["finalized_bundle"])
+        bundle = plan["finalized_bundle"]
+        return _compact(plan, "knowledge-plan finalize", {"bundle_id": bundle["bundle_id"], "content_hash": bundle["content_hash"],
+                        "changed_files": bundle["expected_changed_files"], "artifact_path": plan["full_preflight_receipt"]["artifact_path"]},
+                        summary={"finalized": True, "replayed": True, "approved": False, "applied": False})
+    _ensure_open(root, plan)
+    delta = plan.get("delta")
+    content_digest = _content_digest(plan)
+    if not delta or not delta.get("ok") or delta.get("delta_digest") != content_digest:
+        _fail("PLAN_DELTA_REQUIRED", "successful delta check for the current plan digest is required before finalize")
+    # Refuse before another candidate or full gate is produced.
+    _assert_budget(plan, {"candidate_bundles": 1, "full_preflight_checks": 1})
+    actions = []
+    for rel, after in sorted(_decode_writes(plan).items()):
+        target = root / rel
+        before = target.read_bytes() if target.exists() else b""
+        if before == after:
+            plan["counters"]["noop_actions"] += 1
+            _save(path, plan); _assert_budget(plan)
+        new_hash = hashlib.sha256(after).hexdigest(); operation_type = _action_operation(plan, rel)
+        descriptor = {"plan_id": plan["plan_id"], "operation_type": operation_type, "core_version": _runtime_version(), "path": rel, "new_hash": new_hash}
+        operation_digest = canonical_digest(descriptor)
+        provenance = {"plan_id": plan["plan_id"], "operation_id": f"op_{operation_digest[:26]}", "operation_type": operation_type,
+                      "operation_digest": operation_digest, "core_version": _runtime_version()}
+        actions.append({"operation": "replace", "path": rel, "content": after.decode("utf-8"), "provenance": provenance})
+    manifest = {"bundle_type": "claim_create", "intent": plan["intent"],
+                "semantic_diff": {"plan_digest": content_digest, "operations": len(plan["operations"]), "claims": sorted(plan["claims"]),
+                                  "authority_refs": [item["id"] for item in plan["authority_refs"]]},
+                "evidence_refs": [], "authority_refs": [item["id"] for item in plan["authority_refs"]], "permission_effect": "none",
+                "risk": plan["risk"], "actions": actions}
+    bundle = build_bundle(root, manifest, instance.identities)
+    bundle = _core().preflight_bundle(root, bundle)
+    temporary, staging = _with_overlay(root, plan)
+    try:
+        records = _validation_records(staging, instance, _evaluation_cases(staging, instance))
+    finally:
+        temporary.cleanup()
+    if not records["ok"]:
+        findings = records["validation"].get("errors", []) + records["projection"].get("errors", [])
+        findings += [{"code": "PLAN_FULL_EVALUATION_FAILED", "path": "evaluation", "message": case_id, "case_id": case_id} for case_id in records["failed_case_ids"]]
+        raise _core().SemanticPlanError("PLAN_FULL_PREFLIGHT_FAILED", "full staged preflight failed", findings)
+    plan["counters"]["full_checks"] += 1; plan["counters"]["full_preflight_checks"] += 1
+    plan["counters"]["candidate_bundles"] += 1; _counters(plan); _assert_budget(plan)
+    artifact = _artifact_rel(instance, content_digest, "full-preflight")
+    _write_artifact(root, artifact, {"schema_version": 1, "plan_id": plan["plan_id"], "plan_digest": content_digest,
+                                     "bundle": bundle, "records": records, "cost_counters": _counters(plan)})
+    bundle_path, _, _ = _core().bundle_paths(root, bundle["bundle_id"])
+    bundle_path.parent.mkdir(parents=True, exist_ok=True); bundle_path.write_bytes(bundle_bytes(bundle))
+    plan["state"] = "finalized"; plan["finalized_bundle"] = bundle; plan["finalized_plan_digest"] = content_digest
+    plan["full_preflight_receipt"] = {"ok": True, "plan_digest": content_digest, "bundle_id": bundle["bundle_id"],
+                                          "content_hash": bundle["content_hash"], "artifact_path": artifact}
+    _save(path, plan)
+    return _compact(plan, "knowledge-plan finalize", {"bundle_id": bundle["bundle_id"], "content_hash": bundle["content_hash"],
+                    "changed_files": bundle["expected_changed_files"], "artifact_path": artifact},
+                    summary={"finalized": True, "replayed": False, "approved": False, "applied": False})
+
+
+def verify_finalized_bundle_provenance(root: Path, instance: Instance, bundle: dict[str, Any], *, allow_applied: bool = False) -> dict[str, Any]:
+    actions = bundle.get("actions", [])
+    provenance = [action.get("provenance") for action in actions]
+    if not provenance or any(not isinstance(item, dict) for item in provenance):
+        _fail("BUNDLE_PROVENANCE_REQUIRED", "production Bundle actions require semantic-plan provenance")
+    plan_ids = {item.get("plan_id") for item in provenance}
+    if len(plan_ids) != 1:
+        _fail("BUNDLE_PROVENANCE_MISMATCH", "Bundle actions must originate from one semantic plan")
+    _, plan = _load(root, instance, next(iter(plan_ids)))
+    finalized = plan.get("finalized_bundle")
+    if plan.get("state") != "finalized" or not finalized or finalized.get("content_hash") != bundle.get("content_hash"):
+        _fail("BUNDLE_PROVENANCE_MISMATCH", "Bundle identity is not bound to the finalized semantic plan")
+    if plan.get("finalized_plan_digest") != _content_digest(plan):
+        _fail("PLAN_PROVENANCE_MISMATCH", "finalized plan operations or writes were modified")
+    receipt = plan.get("full_preflight_receipt")
+    if not receipt or receipt.get("plan_digest") != plan["finalized_plan_digest"] or not (root / receipt.get("artifact_path", "")).is_file():
+        _fail("PLAN_FINALIZED_ARTIFACT_MISSING", "finalized full-preflight artifact is missing or mismatched")
+    bundle_path, _, _ = _core().bundle_paths(root, bundle["bundle_id"])
+    if not bundle_path.is_file() or json.loads(bundle_path.read_text(encoding="utf-8")) != bundle:
+        _fail("BUNDLE_PROVENANCE_MISMATCH", "immutable Bundle artifact is missing or differs from finalized plan")
+    expected = {action["path"]: action.get("provenance") for action in finalized.get("actions", [])}
+    if any(expected.get(action["path"]) != action.get("provenance") for action in actions):
+        _fail("BUNDLE_PROVENANCE_MISMATCH", "Bundle action provenance differs from finalized plan content")
+    _assert_finalized_environment(root, plan, allow_applied=allow_applied)
+    return plan
+
+
+def record_post_apply_full_check(root: Path, instance: Instance, bundle: dict[str, Any]) -> dict[str, Any]:
+    path, plan = _load(root, instance, bundle["actions"][0]["provenance"]["plan_id"])
+    if plan.get("post_apply_receipt"):
+        return plan["post_apply_receipt"]
+    records = _validation_records(root, instance, _evaluation_cases(root, instance))
+    if not records["ok"]:
+        _fail("PLAN_POST_APPLY_FULL_FAILED", "post-apply full validation failed")
+    plan["counters"]["full_checks"] += 1; plan["counters"]["post_apply_full_checks"] += 1
+    artifact = _artifact_rel(instance, plan["finalized_plan_digest"], "post-apply-full")
+    receipt = {"ok": True, "plan_digest": plan["finalized_plan_digest"], "bundle_id": bundle["bundle_id"], "artifact_path": artifact}
+    _write_artifact(root, artifact, {"schema_version": 1, **receipt, "records": records, "cost_counters": _counters(plan)})
+    plan["post_apply_receipt"] = receipt; _save(path, plan)
+    return receipt
+
+
+def inspect(root: Path, instance: Instance, args: argparse.Namespace) -> dict[str, Any]:
+    _, plan = _load(root, instance, args.plan_id)
+    return _summary(plan, "inspect", delta=plan.get("delta"), finalized_bundle_id=(plan.get("finalized_bundle") or {}).get("bundle_id"),
+                    full_preflight_receipt=plan.get("full_preflight_receipt"), post_apply_receipt=plan.get("post_apply_receipt"))
+
+
+def abandon(root: Path, instance: Instance, args: argparse.Namespace) -> dict[str, Any]:
+    path, plan = _load(root, instance, args.plan_id)
+    if plan.get("finalized_bundle"):
+        _fail("PLAN_FINALIZED_IMMUTABLE", "finalized plan cannot be abandoned")
+    if plan.get("state") == "abandoned":
+        return _summary(plan, "abandon", replayed=True)
+    plan["state"] = "abandoned"; plan["abandon_reason"] = args.reason.strip(); plan["writes"] = {}; _save(path, plan)
+    return _summary(plan, "abandon", replayed=False)
+
+
+def _compact(plan: dict[str, Any], command: str, values: dict[str, Any], *, summary: dict[str, Any]) -> dict[str, Any]:
+    findings = values.get("findings", [])
+    payload = {"ok": not findings, "command": command, "plan_id": plan["plan_id"], "plan_digest": _content_digest(plan),
+               "summary": summary, "failed_case_ids": values.get("failed_case_ids", []),
+               "affected_case_ids": values.get("affected_case_ids", []), "artifact_path": values.get("artifact_path"),
+               "findings": [{key: item.get(key) for key in ("code", "path", "message", "case_id") if item.get(key) is not None} for item in findings[:12]],
+               "cost_counters": _counters(plan),
+               **{key: values[key] for key in ("bundle_id", "content_hash", "changed_files", "delta_digest", "touched_operations", "touched_files", "can_finalize") if key in values},
+               "errors": findings[:12]}
+    if len(json.dumps(payload, ensure_ascii=False, separators=(",", ":"))) > STDOUT_CHARACTER_BUDGET:
+        payload["findings"] = payload["findings"][:3]; payload["errors"] = payload["errors"][:3]
+    return payload
+
+
+def _summary(plan: dict[str, Any], action: str, **extra: Any) -> dict[str, Any]:
+    return {"ok": True, "command": f"knowledge-plan {action}", "plan_id": plan["plan_id"], "plan_digest": _content_digest(plan),
+            "state": plan["state"], "baseline_commit": plan["baseline_commit"], "operation_count": len(plan["operations"]),
+            "claim_count": len(plan["claims"]), "authority_ref_count": len(plan["authority_refs"]),
+            "touched_files": sorted(plan.get("writes", {})), "formal_authority_written": False,
+            "cost_counters": _counters(plan), **extra, "errors": []}
+
+
+def dispatch_plan_command(root: Path, args: argparse.Namespace, instance: Instance) -> dict[str, Any]:
+    commands = {"init": init_plan, "add-claim": add_claim, "add-authority-ref": add_authority_ref,
+                "check": check_delta, "finalize": finalize, "inspect": inspect, "abandon": abandon}
+    return commands[args.plan_command](root, instance, args)

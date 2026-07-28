@@ -92,6 +92,24 @@ class MemoryAuthorityContractTests(unittest.TestCase):
   with self.assertRaises(RetrievalError) as gap: build_progressive_scope(base,registry,context_id="static",intent="employee payroll vacation policy",limit=3)
   self.assertEqual(gap.exception.details["failure_type"],"coverage_gap")
 
+ def test_dynamic_retrieval_uses_raw_score_distinctive_terms_and_context_idf(self):
+  config={"memory":{"contexts":[{"id":"composite","lifecycle":"active"},{"id":"other","lifecycle":"active"}]},"relations":{"context_nodes":[{"context_id":"composite","node_id":"composite-node"},{"context_id":"other","node_id":"outside"}]},"retrieval":{"dynamic":{"candidate_limit":5,"confidence_threshold":0.2,"margin_threshold":0.2,"ratio_threshold":1.2},"intent_routes":[]}}
+  registry={"nodes":[{"id":"composite-node","name":"Composite"},{"id":"outside","name":"Outside"}],"topics":[
+   {"id":"stage3","node_id":"composite-node","title":"Stage 3 root CompositeDef impl GraphNode","aliases":["__composite_call"],"keywords":["CompositeDef","GraphNode"]},
+   {"id":"capture","node_id":"composite-node","title":"Composite node boundary","keywords":["composite","node","boundary"]},
+   {"id":"lifecycle","node_id":"composite-node","title":"Composite node lifecycle","keywords":["composite","node","lifecycle"]},
+   {"id":"outside-topic","node_id":"outside","title":"GraphNode unrelated","keywords":["GraphNode"]},
+  ]}
+  result=build_progressive_scope(config,registry,context_id="composite",intent="Stage 3 root CompositeDef impl GraphNode",limit=1)
+  self.assertEqual(result['topics'][0]['id'],'stage3')
+  candidate=result['candidate_topics'][0]
+  for field in ('raw_score','normalized_score','score_margin','score_ratio','distinctive_terms','shared_terms'):
+   self.assertIn(field,candidate)
+  self.assertIn('compositedef',candidate['distinctive_terms'])
+  with self.assertRaises(RetrievalError) as ambiguous:
+   build_progressive_scope(config,registry,context_id="composite",intent="composite node",limit=1)
+  self.assertEqual(ambiguous.exception.code,'RETRIEVAL_CANDIDATE_AMBIGUOUS')
+
  def test_explicit_route_precedes_dynamic_fallback(self):
   config={"memory":{"contexts":[{"id":"c","lifecycle":"active"}]},"relations":{"context_nodes":[{"context_id":"c","node_id":"n"}]},"retrieval":{"intent_routes":[{"id":"safe","contexts":["c"],"keywords":["exact"],"topic_ids":["t1"]}],"dynamic":{"confidence_threshold":0.01}}}
   registry={"nodes":[{"id":"n"}],"topics":[{"id":"t1","node_id":"n","title":"First"},{"id":"t2","node_id":"n","title":"exact exact exact"}]}

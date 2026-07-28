@@ -8,6 +8,8 @@ uses only the Python standard library and never invokes Git mutations.
 from __future__ import annotations
 
 import argparse
+import base64
+import binascii
 import contextlib
 import datetime as dt
 import difflib
@@ -22,13 +24,14 @@ import sys
 import tempfile
 import time
 import unicodedata
+from importlib import metadata as importlib_metadata
 from dataclasses import asdict, dataclass
 from pathlib import Path, PurePosixPath
 from typing import Any, Iterable, Iterator
 
 from .instance import Instance, InstanceError, load_instance, validate_project_memory
-from .bundle import BundleError, apply_bundle, approval, build_bundle, bundle_paths, canonical as bundle_json, capture_bundle_draft, rollback_bundle, verify_bundle
-from .authority import observe_authority_refs, validate_authority_coverage, validate_authority_ref
+from .bundle import BundleError, apply_bundle, approval, build_bundle, bundle_paths, canonical as bundle_json, capture_bundle_draft, enforce_production_provenance, lifecycle_path, lifecycle_projection, rollback_bundle, seal_preflight, verify_bundle
+from .authority import observe_authority_refs, validate_authority_conflicts, validate_authority_coverage, validate_authority_ref
 from .retrieval import RetrievalError, build_progressive_scope
 
 SCHEMA_VERSION = 1
@@ -79,6 +82,19 @@ SENSITIVE_PATTERNS = (
 
 class KnowledgeError(Exception):
     pass
+
+
+class SemanticPlanError(KnowledgeError):
+    def __init__(self, code: str, message: str, findings: list[dict[str, Any]] | None = None) -> None:
+        self.code = code
+        self.findings = findings
+        super().__init__(message)
+
+
+class StagedValidationError(KnowledgeError):
+    def __init__(self, findings: list[dict[str, Any]], phase: str = "preflight") -> None:
+        self.findings = [{**finding, "phase": phase} for finding in findings]
+        super().__init__(f"staged authority invalid ({len(findings)} findings)")
 
 
 @dataclass(frozen=True)
@@ -394,6 +410,9 @@ def validate(root: Path) -> dict[str, Any]:
                 findings.append(Finding(error["code"], refs_value or "authority_ref", error["message"]))
         for coverage in validate_authority_coverage(claims, refs):
             findings.append(Finding(coverage["code"], str(refs_value or REGISTRY_REL), f"{coverage['claim_id']}: missing {', '.join(coverage['missing_fact_classes'])}"))
+        for conflict in validate_authority_conflicts(refs):
+            findings.append(Finding(conflict["code"], str(refs_value or REGISTRY_REL),
+                                    f"{conflict['claim_id']}: conflicting explicit fact {conflict['fact_key']}"))
     except (InstanceError, OSError, json.JSONDecodeError):
         pass
     event_ids: dict[str, str] = {}
@@ -701,6 +720,27 @@ def query_command(root: Path, query: str, level: int, limit: int, cursor: int, p
             "scope_note": "Local deterministic projection only; permission and lifecycle filters were applied before pagination. A limited result is not proof of repository-wide absence.", "errors": []}
 
 
+def _semantic_markdown_cut(text: str, limit: int) -> str:
+    """Deterministically cut at semantic boundaries without emitting partial Markdown tokens."""
+    if len(text) <= limit:
+        return text.rstrip()
+    candidate = text[:limit]
+    boundaries = [candidate.rfind(marker) + len(marker) for marker in ("\n\n", "。", "！", "？", ". ", "; ", "；", "，", ", ", " ")]
+    cut = max((value for value in boundaries if value >= max(1, limit // 2)), default=limit)
+    candidate = candidate[:cut].rstrip()
+    if candidate.count("```") % 2:
+        fence = candidate.rfind("```")
+        candidate = candidate[:fence].rstrip() if fence >= limit // 3 else candidate + "\n```"
+    if candidate.count("`") % 2:
+        tick = candidate.rfind("`")
+        candidate = candidate[:tick].rstrip() if tick >= limit // 3 else candidate + "`"
+    open_link = candidate.rfind("[")
+    close_link = candidate.rfind(")")
+    if open_link > close_link:
+        candidate = candidate[:open_link].rstrip()
+    return candidate
+
+
 def _claim_summary(statement: str, limit: int = 500) -> dict[str, Any]:
     boundary_marker = "#### 适用边界"
     assertion, _, boundary = statement.partition(boundary_marker)
@@ -713,8 +753,8 @@ def _claim_summary(statement: str, limit: int = 500) -> dict[str, Any]:
     # Safety boundaries are mandatory. Trim the assertion first and report every local truncation.
     boundary_budget = min(len(boundary), max(120, limit // 2)) if boundary else 0
     assertion_budget = max(80, limit - boundary_budget - (len(boundary_marker) + 4 if boundary else 0))
-    compact_assertion = assertion[:assertion_budget].rstrip()
-    compact_boundary = boundary[:boundary_budget].rstrip()
+    compact_assertion = _semantic_markdown_cut(assertion, assertion_budget)
+    compact_boundary = _semantic_markdown_cut(boundary, boundary_budget)
     sections = []
     if len(compact_assertion) < len(assertion): sections.append("assertion")
     if len(compact_boundary) < len(boundary): sections.append("safety_boundary")
@@ -869,13 +909,28 @@ def show_claim(root: Path, claim_id: str, evidence_limit: int, cursor: int, perm
     support_counts = {kind: sum(1 for row in visible_rows if row["support_type"] == kind) for kind in sorted(SUPPORT_TYPES)}
     evidence_status = evidence_status_for(visible_rows)
     connection.close()
+    registry, _ = load_authority(root)
+    try:
+        refs_path = load_instance(root).authority.get("authority_refs")
+    except InstanceError:
+        refs_path = None
+    refs = read_json(root / refs_path).get("refs", []) if refs_path else []
+    matching_refs = [ref for ref in refs if claim_id in ref.get("claim_ids", [])]
+    observations = observe_authority_refs(root, matching_refs) if matching_refs else []
+    effective = [ref.get("effective_status", ref.get("status", "current")) for ref in observations]
+    authority_status = "not_registered" if not matching_refs else ("pending_review" if any(status != "current" for status in effective) else "current")
+    supporting_kinds = sorted({row["evidence_kind"] for row in visible_rows if row["support_type"] == "supports"})
+    authority_support = {"status": authority_status, "ref_count": len(matching_refs), "pending_review_count": sum(status != "current" for status in effective)}
+    event_evidence = {"status": "not_registered" if not visible_rows else evidence_status, "supporting_kinds": supporting_kinds}
+    support_summary = "authority_backed_no_separate_events" if authority_status == "current" and not visible_rows else ("authority_and_event_evidence" if matching_refs and visible_rows else "event_evidence_only" if visible_rows else "support_not_registered")
     limit = min(evidence_limit, 10)
     truncated = len(evidence) > limit
     page = evidence[:limit]
     used = _json_characters(page)
     return {"ok": True, "command": "show-claim", "claim": dict(claim), "evidence_total": total,
             "evidence_visibility": "visible_count_only", "source_count": source_count, "source_family_count": family_count,
-            "support_type_counts": support_counts, "evidence_status": evidence_status, "evidence": page,
+            "support_type_counts": support_counts, "authority_support": authority_support, "event_evidence": event_evidence,
+            "support_summary": support_summary, "evidence_status": evidence_status, "evidence_strength_deprecated": True, "evidence": page,
             "used_characters": used, "budget": 20_000, "truncated": truncated,
             "next_cursor": cursor + limit if truncated else None, "errors": []}
 
@@ -1127,13 +1182,18 @@ def append_jsonl_bytes(path: Path, event: dict[str, Any]) -> bytes:
     return old + (canonical_json(event) + "\n").encode("utf-8")
 
 
-def validate_planned_writes(root: Path, writes: dict[str, bytes]) -> None:
-    """Validate a complete authority overlay before transactional replacement."""
+def staged_validation_findings(root: Path, writes: dict[str, bytes]) -> list[dict[str, Any]]:
+    """Return every finding for a complete authority overlay without touching authority."""
     with tempfile.TemporaryDirectory() as temporary:
         staging = Path(temporary)
         knowledge_rel = _knowledge_rel(root)
-        shutil.copytree(root / knowledge_rel, staging / knowledge_rel)
-        shutil.copytree(root / STORE_REL, staging / STORE_REL)
+        try:
+            configured_store = Path(load_instance(root).authority["store"])
+        except InstanceError:
+            configured_store = STORE_REL
+        for source, destination in ((root / knowledge_rel, staging / knowledge_rel), (root / configured_store, staging / configured_store)):
+            if source.is_dir():
+                shutil.copytree(source, destination)
         instance_config = root / "project-intelligence.json"
         if instance_config.is_file():
             shutil.copy2(instance_config, staging / instance_config.name)
@@ -1142,9 +1202,51 @@ def validate_planned_writes(root: Path, writes: dict[str, bytes]) -> None:
             target.parent.mkdir(parents=True, exist_ok=True)
             target.write_bytes(data)
         result = validate(staging)
-        if not result["ok"]:
-            first = result["errors"][0]
-            raise KnowledgeError(f"staged authority invalid [{first['code']}] {first['path']}: {first['message']}")
+        findings = list(result["errors"])
+        if any(item["code"] == "AUTHORITY_FACT_COVERAGE" for item in findings):
+            registry, _ = load_authority(staging)
+            claims, _ = parse_claims(staging, registry)
+            instance = load_instance(staging)
+            refs_path = instance.authority.get("authority_refs")
+            refs = read_json(staging / refs_path).get("refs", []) if refs_path else []
+            coverage = {item["claim_id"]: item for item in validate_authority_coverage(claims, refs)}
+            for finding in findings:
+                if finding["code"] != "AUTHORITY_FACT_COVERAGE":
+                    continue
+                claim_id = finding["message"].split(":", 1)[0]
+                finding.update(coverage.get(claim_id, {}))
+        return findings
+
+
+def validate_planned_writes(root: Path, writes: dict[str, bytes], *, phase: str = "preflight") -> None:
+    """Validate a complete authority overlay before transactional replacement."""
+    findings = staged_validation_findings(root, writes)
+    if findings:
+        raise StagedValidationError(findings, phase)
+
+
+def _bundle_writes(root: Path, bundle: dict[str, Any]) -> dict[str, bytes]:
+    """Decode and hash-check Bundle after-images against the current baseline."""
+    writes: dict[str, bytes] = {}
+    for action in bundle["actions"]:
+        target = root / action["path"]
+        old_hash = file_hash(target) if target.exists() else None
+        if old_hash != action["expected_hash"]:
+            raise BundleError(f"authority changed: {action['path']}")
+        try:
+            content = base64.b64decode(action["content"], validate=True)
+        except (ValueError, binascii.Error) as exc:
+            raise BundleError("invalid action content") from exc
+        if hashlib.sha256(content).hexdigest() != action["new_hash"]:
+            raise BundleError("action content hash mismatch")
+        writes[action["path"]] = content
+    return writes
+
+
+def preflight_bundle(root: Path, bundle: dict[str, Any], *, phase: str = "preflight") -> dict[str, Any]:
+    writes = _bundle_writes(root, bundle)
+    validate_planned_writes(root, writes, phase=phase)
+    return seal_preflight(bundle, []) if "preflight" not in bundle else bundle
 
 
 def mutation_result(root: Path, command: str, writes: dict[str, bytes], apply: bool, details: dict[str, Any]) -> dict[str, Any]:
@@ -1204,7 +1306,18 @@ def retract_evidence_command(root: Path, args: argparse.Namespace) -> dict[str, 
                            {"event_id": event["event_id"], "target_event_id": args.event_id, "claim_id": target["claim_id"]})
 
 
+def _normal_cli_mode(args: argparse.Namespace) -> bool:
+    """Only parser-created commands carry the explicit normal/compatibility switch.
+
+    Legacy Python callers predate that switch and remain the compatibility API seam;
+    the public CLI always supplies ``False`` unless the maintainer opts in.
+    """
+    return getattr(args, "compatibility_mode", None) is False
+
+
 def revise_claim_command(root: Path, args: argparse.Namespace) -> dict[str, Any]:
+    if args.apply and _normal_cli_mode(args):
+        raise KnowledgeError("revise-claim --apply is disabled in normal production mode; use a typed semantic plan or explicit --compatibility-mode for maintainer recovery")
     ensure_actor(root, args.actor, review_required=True)
     registry, _ = load_authority(root)
     claim = next((item for item in parse_claims(root, registry)[0] if item["id"] == args.claim_id), None)
@@ -1268,7 +1381,8 @@ def claim_markdown(title: str, claim_id: str, statement: str, boundary: str) -> 
             f"#### 适用边界\n\n{boundary.strip()}\n\n<!-- CLAIM:END {claim_id} -->\n")
 
 
-def new_claim_command(root: Path, args: argparse.Namespace) -> dict[str, Any]:
+def plan_new_claim(root: Path, args: argparse.Namespace, *, claim_id: str, fact_classes: list[str] | None = None) -> tuple[dict[str, bytes], dict[str, Any]]:
+    """Pure Claim semantic rule shared by the single-item and plan interfaces."""
     ensure_actor(root, args.actor)
     registry, _ = load_authority(root)
     node = next((item for item in registry["nodes"] if item["id"] == args.node), None)
@@ -1283,6 +1397,8 @@ def new_claim_command(root: Path, args: argparse.Namespace) -> dict[str, Any]:
         raise KnowledgeError(f"invalid topic path: {error or 'must be Markdown'}")
     if topic and (topic["node_id"] != args.node or topic["path"] != topic_path):
         raise KnowledgeError("topic identity conflicts with registry")
+    if topic and args.permission != topic.get("permission", "internal"):
+        raise KnowledgeError("claim permission must equal its existing Topic permission")
     claims, findings = parse_claims(root, registry)
     if findings:
         raise KnowledgeError("existing claim authority is invalid")
@@ -1294,7 +1410,11 @@ def new_claim_command(root: Path, args: argparse.Namespace) -> dict[str, Any]:
             raise KnowledgeError(f"claim is duplicate or highly similar to {claim['id']}; use add-evidence or revise workflow")
     if not topic and args.duplicate_resolution != "create_distinct_with_boundary":
         raise KnowledgeError("new topic/claim requires --duplicate-resolution create_distinct_with_boundary")
-    claim_id = new_id("claim")
+    if fact_classes is not None:
+        from .authority import FACT_CLASSES
+        if not fact_classes or any(value not in FACT_CLASSES for value in fact_classes):
+            raise SemanticPlanError("PLAN_FACT_CLASS_REQUIRED", "add-claim requires valid fact classes")
+        registry.setdefault("claim_metadata", {})[claim_id] = {"fact_classes": sorted(set(fact_classes))}
     block = claim_markdown(args.title, claim_id, args.statement, args.boundary)
     target = root / topic_path
     if topic:
@@ -1309,9 +1429,15 @@ def new_claim_command(root: Path, args: argparse.Namespace) -> dict[str, Any]:
     node["migration_status"] = "pilot"
     writes = {REGISTRY_REL.as_posix(): (json.dumps(registry, ensure_ascii=False, indent=2) + "\n").encode("utf-8"),
               topic_path: new_text.encode("utf-8")}
-    return mutation_result(root, "new-claim", writes, args.apply,
-                           {"claim_id": claim_id, "node_id": args.node, "topic_id": args.topic_id,
-                            "amplification": ingestion_amplification(1, 0, 0, 1, len(block))})
+    return writes, {"claim_id": claim_id, "node_id": args.node, "topic_id": args.topic_id,
+                    "amplification": ingestion_amplification(1, 0, 0, 1, len(block))}
+
+
+def new_claim_command(root: Path, args: argparse.Namespace) -> dict[str, Any]:
+    writes, details = plan_new_claim(root, args, claim_id=new_id("claim"))
+    if args.apply and _normal_cli_mode(args):
+        raise KnowledgeError("new-claim --apply is disabled in normal production mode; use knowledge-plan or explicit --compatibility-mode for maintainer recovery")
+    return mutation_result(root, "new-claim", writes, args.apply, details)
 
 
 def add_evidence_command(root: Path, args: argparse.Namespace) -> dict[str, Any]:
@@ -1361,12 +1487,15 @@ def _load_bundle(root: Path, bundle_id: str) -> dict[str, Any]:
 
 def capture_command(root: Path, args: argparse.Namespace, instance: Instance) -> dict[str, Any]:
     request = read_json(Path(args.manifest))
-    return capture_bundle_draft(root, request, instance.identities)
+    return capture_bundle_draft(root, request, instance.identities, lambda bundle: preflight_bundle(root, bundle),
+                                compatibility_mode=args.compatibility_mode)
 
 
 def bundle_create_command(root: Path, args: argparse.Namespace, instance: Instance) -> dict[str, Any]:
     manifest = read_json(root / args.manifest)
-    bundle = build_bundle(root, manifest, instance.identities)
+    bundle = preflight_bundle(root, build_bundle(root, manifest, instance.identities, compatibility_mode=True))
+    if not args.compatibility_mode:
+        enforce_production_provenance(bundle)
     path, _, _ = bundle_paths(root, bundle["bundle_id"])
     writes = {relpath(root, path): bundle_json(bundle)}
     if not args.apply:
@@ -1377,6 +1506,12 @@ def bundle_create_command(root: Path, args: argparse.Namespace, instance: Instan
 
 def bundle_approve_command(root: Path, args: argparse.Namespace, instance: Instance) -> dict[str, Any]:
     bundle = _load_bundle(root, args.bundle_id)
+    if args.content_hash != bundle["content_hash"]:
+        raise BundleError("exact content hash is required for approval")
+    if any(action.get("provenance") for action in bundle.get("actions", [])):
+        from .semantic_plan import verify_finalized_bundle_provenance
+        verify_finalized_bundle_provenance(root, instance, bundle)
+    preflight_bundle(root, bundle)
     value = approval(bundle, instance.identities["principal"]["id"])
     _, path, _ = bundle_paths(root, args.bundle_id)
     writes = {relpath(root, path): bundle_json(value)}
@@ -1386,8 +1521,15 @@ def bundle_approve_command(root: Path, args: argparse.Namespace, instance: Insta
     return {"ok": True, "command": "bundle-approve", "bundle_id": args.bundle_id, "applied": True, "dry_run": False, "changed_files": changed, "errors": []}
 
 
-def bundle_apply_command(root: Path, args: argparse.Namespace) -> dict[str, Any]:
+def bundle_apply_command(root: Path, args: argparse.Namespace, instance: Instance) -> dict[str, Any]:
     bundle = _load_bundle(root, args.bundle_id)
+    if args.content_hash != bundle["content_hash"]:
+        raise BundleError("exact content hash is required for apply")
+    semantic_plan = None
+    if any(action.get("provenance") for action in bundle.get("actions", [])):
+        from .semantic_plan import verify_finalized_bundle_provenance
+        semantic_plan = verify_finalized_bundle_provenance(root, instance, bundle)
+    preflight_bundle(root, bundle, phase="apply")
     _, approval_path, receipt_path = bundle_paths(root, args.bundle_id)
     approved = read_json(approval_path)
     if not args.apply:
@@ -1396,25 +1538,68 @@ def bundle_apply_command(root: Path, args: argparse.Namespace) -> dict[str, Any]
     receipt = {"schema_version": 1, "bundle_id": args.bundle_id, "content_hash": bundle["content_hash"], "changed_files": bundle["expected_changed_files"]}
     def replace_with_receipt(target_root: Path, command: str, writes: dict[str, bytes]) -> list[str]:
         complete = {**writes, receipt_rel: bundle_json(receipt)}
-        return transactional_replace(target_root, command, complete, lambda _: validate_planned_writes(target_root, writes))
+        return transactional_replace(target_root, command, complete, lambda _: validate_planned_writes(target_root, writes, phase="apply"))
     changed = apply_bundle(root, bundle, approved, replace_with_receipt)
     validation, projection = validate(root), rebuild(root)
-    return {"ok": validation["ok"] and projection["ok"], "command": "bundle-apply", "bundle_id": args.bundle_id, "applied": True, "dry_run": False, "changed_files": changed, "validation": validation, "projection": projection, "git_status": git_status(root), "errors": validation["errors"] + projection.get("errors", [])}
+    post_apply_receipt = None
+    if semantic_plan is not None and validation["ok"] and projection["ok"]:
+        from .semantic_plan import record_post_apply_full_check
+        post_apply_receipt = record_post_apply_full_check(root, instance, bundle)
+    return {"ok": validation["ok"] and projection["ok"], "command": "bundle-apply", "bundle_id": args.bundle_id, "applied": True, "dry_run": False, "changed_files": changed, "validation": validation, "projection": projection, "post_apply_full_receipt": post_apply_receipt, "git_status": git_status(root), "errors": validation["errors"] + projection.get("errors", [])}
 
 
-def bundle_inspect_command(root: Path, bundle_id: str | None) -> dict[str, Any]:
+def _lifecycle_events(root: Path, bundle_id: str) -> list[dict[str, Any]]:
+    path = lifecycle_path(root, bundle_id)
+    if not path.is_file():
+        return []
+    events = []
+    for line_number, line in enumerate(path.read_text(encoding="utf-8").splitlines(), 1):
+        try:
+            event = json.loads(line)
+        except json.JSONDecodeError as exc:
+            raise BundleError(f"invalid lifecycle event {path}:{line_number}: {exc}") from exc
+        if not isinstance(event, dict):
+            raise BundleError(f"invalid lifecycle event {path}:{line_number}")
+        events.append(event)
+    return events
+
+
+def bundle_inspect_command(root: Path, bundle_id: str | None, state: str | None = None) -> dict[str, Any]:
     directory = root / "data/knowledge/bundles"
-    ids = [bundle_id] if bundle_id else sorted(path.stem for path in directory.glob("bnd_*.json") if ".approval" not in path.name and ".applied" not in path.name)
+    ids = [bundle_id] if bundle_id else sorted(path.stem for path in directory.glob("bnd_*.json") if not any(marker in path.name for marker in (".approval", ".applied", ".lifecycle")))
     items = []
     for value in ids:
         bundle_path, approval_path, receipt_path = bundle_paths(root, value)
         bundle = read_json(bundle_path); verify_bundle(bundle)
-        items.append({"bundle_id": value, "content_hash": bundle["content_hash"], "approved": approval_path.is_file(), "applied": receipt_path.is_file(), "expected_changed_files": bundle["expected_changed_files"]})
+        projected = lifecycle_projection(bundle, approved=approval_path.is_file(), applied=receipt_path.is_file(), events=_lifecycle_events(root, value))
+        item = {"bundle_id": value, "content_hash": bundle["content_hash"], "approved": approval_path.is_file(), "applied": receipt_path.is_file(),
+                "expected_changed_files": bundle["expected_changed_files"], **projected}
+        if state is None or item["state"] == state:
+            items.append(item)
     return {"ok": True, "command": "bundle-inspect", "count": len(items), "bundles": items, "errors": []}
 
 
-def bundle_recover_command(root: Path, bundle_id: str) -> dict[str, Any]:
+def bundle_supersede_command(root: Path, args: argparse.Namespace) -> dict[str, Any]:
+    old, new = _load_bundle(root, args.bundle_id), _load_bundle(root, args.by)
+    if old["bundle_id"] == new["bundle_id"]:
+        raise BundleError("a Bundle cannot supersede itself")
+    if not args.reason.strip():
+        raise BundleError("supersede reason is required")
+    event = {"schema_version": 1, "event_type": "bundle_superseded", "bundle_id": old["bundle_id"],
+             "content_hash": old["content_hash"], "superseded_by": new["bundle_id"], "superseding_content_hash": new["content_hash"], "reason": args.reason.strip()}
+    path = lifecycle_path(root, old["bundle_id"])
+    writes = {relpath(root, path): append_jsonl_bytes(path, event)}
+    if not args.apply:
+        return {"ok": True, "command": "bundle-supersede", "applied": False, "dry_run": True, "bundle_id": old["bundle_id"], "superseded_by": new["bundle_id"], "changed_files": sorted(writes), "errors": []}
+    changed = transactional_replace(root, "bundle-supersede", writes)
+    return {"ok": True, "command": "bundle-supersede", "applied": True, "dry_run": False, "bundle_id": old["bundle_id"], "superseded_by": new["bundle_id"], "changed_files": changed, "errors": []}
+
+
+def bundle_recover_command(root: Path, bundle_id: str, instance: Instance) -> dict[str, Any]:
     bundle = _load_bundle(root, bundle_id)
+    if any(action.get("provenance") for action in bundle.get("actions", [])):
+        from .semantic_plan import verify_finalized_bundle_provenance
+        verify_finalized_bundle_provenance(root, instance, bundle, allow_applied=True)
     _, _, receipt = bundle_paths(root, bundle_id)
     if not all((root / a["path"]).is_file() and file_hash(root / a["path"]) == a["new_hash"] for a in bundle["actions"]):
         raise BundleError("authority does not match applied bundle")
@@ -1422,8 +1607,11 @@ def bundle_recover_command(root: Path, bundle_id: str) -> dict[str, Any]:
     return {**projection, "command": "bundle-recover", "bundle_id": bundle_id, "receipt": receipt.is_file(), "git_status": git_status(root)}
 
 
-def bundle_rollback_command(root: Path, args: argparse.Namespace) -> dict[str, Any]:
+def bundle_rollback_command(root: Path, args: argparse.Namespace, instance: Instance) -> dict[str, Any]:
     bundle = _load_bundle(root, args.bundle_id)
+    if any(action.get("provenance") for action in bundle.get("actions", [])):
+        from .semantic_plan import verify_finalized_bundle_provenance
+        verify_finalized_bundle_provenance(root, instance, bundle, allow_applied=True)
     if not args.apply:
         return {"ok": True, "command": "bundle-rollback", "bundle_id": args.bundle_id, "applied": False, "dry_run": True, "changed_files": bundle["expected_changed_files"], "errors": []}
     changed = rollback_bundle(root, bundle, transactional_replace)
@@ -1530,12 +1718,32 @@ def output(payload: dict[str, Any], fmt: str) -> None:
         print(claim.get("statement", ""))
         print(f"Governance confirmation: {claim.get('confirmation')}")
         print(f"Conflict: {claim.get('conflict')}")
-        print(f"Evidence strength: {payload.get('evidence_status')}")
+        authority = payload.get("authority_support", {})
+        events = payload.get("event_evidence", {})
+        print(f"Authority support: {authority.get('status', 'not_registered')} ({authority.get('ref_count', 0)} refs)")
+        print(f"Event evidence: {events.get('status', payload.get('evidence_status'))}")
+        print(f"Evidence strength (deprecated): {payload.get('evidence_status')}")
         print(f"Evidence: {len(payload.get('evidence', []))}/{payload.get('evidence_total', 0)}")
     else:
         print(f"OK: {payload.get('command')}")
         if "count" in payload: print(f"count: {payload['count']}")
         if payload.get("next_step"): print(f"Next step: {payload['next_step']}")
+
+
+def _runtime_version() -> str:
+    try:
+        return importlib_metadata.version("portable-knowledge")
+    except importlib_metadata.PackageNotFoundError:
+        from . import __version__
+        return __version__
+
+
+def capabilities_command() -> dict[str, Any]:
+    return {"ok": True, "command": "capabilities", "runtime_version": _runtime_version(), "core_version": _runtime_version(),
+            "capabilities": {"semantic_plan": True, "provenance": True, "delta_validation": True,
+                             "authority_ref": True, "lifecycle": True, "supersede": True,
+                             "migration_plan": True, "routes": False, "evaluation_cases": False,
+                             "manifest_compatibility_mode": True}, "errors": []}
 
 
 def parser_build() -> argparse.ArgumentParser:
@@ -1549,6 +1757,7 @@ def parser_build() -> argparse.ArgumentParser:
         child.add_argument("--format", choices=("json", "text"), default="json")
         return child
 
+    command("capabilities")
     command("validate")
     merge = command("validate-merge")
     merge.add_argument("--base", required=True)
@@ -1605,6 +1814,7 @@ def parser_build() -> argparse.ArgumentParser:
     claim.add_argument("--boundary", required=True)
     claim.add_argument("--permission", choices=tuple(PERMISSIONS), default="internal")
     claim.add_argument("--duplicate-resolution", choices=("add_evidence", "revise_existing", "create_distinct_with_boundary", "cancel"), default="cancel")
+    claim.add_argument("--compatibility-mode", action="store_true", help="explicit maintainer recovery boundary; normal production apply is disabled")
     evidence = mutation("add-evidence")
     evidence.add_argument("--claim-id", required=True)
     evidence.add_argument("--source-id", required=True)
@@ -1631,6 +1841,7 @@ def parser_build() -> argparse.ArgumentParser:
     revise.add_argument("--boundary", required=True)
     revise.add_argument("--semantic-declaration", choices=("clarify", "correct", "narrow", "expand"), required=True)
     revise.add_argument("--reason", required=True)
+    revise.add_argument("--compatibility-mode", action="store_true", help="explicit maintainer recovery boundary; normal production apply is disabled")
     supersede = mutation("supersede-claim")
     supersede.add_argument("claim_id")
     supersede.add_argument("--replacement-claim-id", required=True)
@@ -1652,14 +1863,24 @@ def parser_build() -> argparse.ArgumentParser:
     permission_change.add_argument("--reason", required=True)
     capture = command("capture")
     capture.add_argument("--manifest", required=True)
+    capture.add_argument("--compatibility-mode", action="store_true")
     bundle_create = mutation("bundle-create")
     bundle_create.add_argument("--manifest", required=True)
+    bundle_create.add_argument("--compatibility-mode", action="store_true", help="explicit maintainer/fixture compatibility boundary; never for normal production intake")
     bundle_approve = mutation("bundle-approve")
     bundle_approve.add_argument("bundle_id")
+    bundle_approve.add_argument("--content-hash", required=True, help="exact immutable Bundle content hash shown for approval")
     bundle_apply = mutation("bundle-apply")
     bundle_apply.add_argument("bundle_id")
+    bundle_apply.add_argument("--content-hash", required=True, help="exact approved immutable Bundle content hash")
     bundle_inspect = command("bundle-inspect")
     bundle_inspect.add_argument("bundle_id", nargs="?")
+    bundle_status = command("bundle-status")
+    bundle_status.add_argument("--state", choices=("draft", "approved", "applied", "failed", "abandoned", "superseded", "rolled_back"))
+    bundle_supersede = mutation("bundle-supersede")
+    bundle_supersede.add_argument("bundle_id")
+    bundle_supersede.add_argument("--by", required=True)
+    bundle_supersede.add_argument("--reason", required=True)
     bundle_recover = command("bundle-recover")
     bundle_recover.add_argument("bundle_id")
     bundle_rollback = mutation("bundle-rollback")
@@ -1673,6 +1894,34 @@ def parser_build() -> argparse.ArgumentParser:
     abandon.add_argument("operation_id")
     identity = command("new-id")
     identity.add_argument("kind", choices=tuple(ID_RE))
+
+    plan = sub.add_parser("knowledge-plan")
+    plan_sub = plan.add_subparsers(dest="plan_command", required=True)
+    def plan_command(name: str) -> argparse.ArgumentParser:
+        child = plan_sub.add_parser(name)
+        child.add_argument("--format", choices=("json", "text"), default="json")
+        return child
+    plan_init = plan_command("init")
+    plan_init.add_argument("--intent", required=True)
+    plan_init.add_argument("--risk", choices=("low", "medium", "high"), required=True)
+    plan_claim = plan_command("add-claim")
+    plan_claim.add_argument("plan_id")
+    plan_claim.add_argument("--node", required=True); plan_claim.add_argument("--topic-id", required=True)
+    plan_claim.add_argument("--topic-path"); plan_claim.add_argument("--title", required=True)
+    plan_claim.add_argument("--statement", required=True); plan_claim.add_argument("--boundary", required=True)
+    plan_claim.add_argument("--permission", choices=tuple(PERMISSIONS), default="internal")
+    plan_claim.add_argument("--fact-class", action="append", default=[])
+    plan_ref = plan_command("add-authority-ref")
+    plan_ref.add_argument("plan_id"); plan_ref.add_argument("--claim-id", required=True)
+    plan_ref.add_argument("--path", required=True); plan_ref.add_argument("--locator", required=True)
+    plan_ref.add_argument("--role", required=True); plan_ref.add_argument("--change-policy", required=True)
+    plan_ref.add_argument("--fact-class", action="append", default=[])
+    plan_ref.add_argument("--diagnostic-hash")
+    plan_check = plan_command("check"); plan_check.add_argument("plan_id"); plan_check.add_argument("--mode", choices=("delta",), required=True)
+    plan_finalize = plan_command("finalize"); plan_finalize.add_argument("plan_id")
+    plan_inspect = plan_command("inspect"); plan_inspect.add_argument("plan_id")
+    plan_abandon = plan_command("abandon"); plan_abandon.add_argument("plan_id")
+    plan_abandon.add_argument("--reason", required=True)
     return parser
 
 
@@ -1716,7 +1965,8 @@ def main(argv: list[str] | None = None) -> int:
             payload = {"ok": False, "command": args.command, "errors": memory["errors"]}
             output(payload, args.format)
             return 1
-        if args.command == "validate": payload = validate(root)
+        if args.command == "capabilities": payload = capabilities_command()
+        elif args.command == "validate": payload = validate(root)
         elif args.command == "validate-merge": payload = validate_merge_command(root, args.base)
         elif args.command == "rebuild": payload = rebuild(root)
         elif args.command == "tree": payload = tree_command(root)
@@ -1737,22 +1987,28 @@ def main(argv: list[str] | None = None) -> int:
         elif args.command == "capture": payload = capture_command(root, args, instance)
         elif args.command == "bundle-create": payload = bundle_create_command(root, args, instance)
         elif args.command == "bundle-approve": payload = bundle_approve_command(root, args, instance)
-        elif args.command == "bundle-apply": payload = bundle_apply_command(root, args)
+        elif args.command == "bundle-apply": payload = bundle_apply_command(root, args, instance)
         elif args.command == "bundle-inspect": payload = bundle_inspect_command(root, args.bundle_id)
-        elif args.command == "bundle-recover": payload = bundle_recover_command(root, args.bundle_id)
-        elif args.command == "bundle-rollback": payload = bundle_rollback_command(root, args)
+        elif args.command == "bundle-status": payload = {**bundle_inspect_command(root, None, args.state), "command": "bundle-status"}
+        elif args.command == "bundle-supersede": payload = bundle_supersede_command(root, args)
+        elif args.command == "bundle-recover": payload = bundle_recover_command(root, args.bundle_id, instance)
+        elif args.command == "bundle-rollback": payload = bundle_rollback_command(root, args, instance)
         elif args.command == "inspect-transaction": payload = inspect_transactions(root)
         elif args.command == "recover": payload = recover_transaction(root, args.operation_id)
         elif args.command == "rollback": payload = rollback_transaction(root, args.operation_id)
         elif args.command == "abandon": payload = abandon_transaction(root, args.operation_id)
         elif args.command == "new-id": payload = {"ok": True, "command": "new-id", "kind": args.kind, "id": new_id(args.kind), "errors": []}
+        elif args.command == "knowledge-plan":
+            from .semantic_plan import dispatch_plan_command
+            payload = dispatch_plan_command(root, args, instance)
         else: raise KnowledgeError(f"unknown command: {args.command}")
     except (KnowledgeError, RetrievalError, BundleError, OSError, sqlite3.Error) as exc:
         error = {"code": getattr(exc, "code", "KNOWLEDGE_ERROR"), "path": ".", "message": str(exc)}
         if isinstance(exc, RetrievalError):
             error.update(exc.details)
+        errors = exc.findings if isinstance(exc, (StagedValidationError, SemanticPlanError)) and exc.findings is not None else [error]
         payload = {"ok": False, "command": args.command, "read_only": args.command in {"progressive-query", "query-context", "capture"},
-                   "operation_authorized": False, "errors": [error]}
+                   "operation_authorized": False, "errors": errors}
     if args.command in {"recover", "rollback", "abandon"}:
         payload["git_status"] = git_status(root)
     output(payload, args.format)

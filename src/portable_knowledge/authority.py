@@ -38,6 +38,25 @@ def validate_authority_ref(ref:dict[str,Any])->dict[str,Any]:
  if not isinstance(fact_classes,list) or any(value not in FACT_CLASSES for value in fact_classes): fail('AUTHORITY_REF_FACT_CLASS','invalid supports_fact_classes')
  return {'ok':not errors,'command':'validate-authority-ref','errors':errors}
 
+def validate_authority_conflicts(refs:list[dict[str,Any]])->list[dict[str,Any]]:
+ """Compare only explicit canonical facts across implementation and contract refs."""
+ values:dict[tuple[str,str],dict[str,set[str]]]={}
+ for ref in refs:
+  if ref.get('baseline_state') in {'working_tree_observation'} or ref.get('status') in {'stale','pending_review','invalidated'}: continue
+  if ref.get('role') not in {'current_implementation','documented_contract'}: continue
+  for claim_id in ref.get('claim_ids',[]):
+   for fact in ref.get('facts',[]):
+    if not isinstance(fact,dict) or not isinstance(fact.get('key'),str) or not isinstance(fact.get('value'),(str,int,float,bool)): continue
+    values.setdefault((claim_id,fact['key']),{}).setdefault(ref['role'],set()).add(str(fact['value']))
+ findings=[]
+ for (claim_id,key),roles in sorted(values.items()):
+  implementation=roles.get('current_implementation',set()); contract=roles.get('documented_contract',set())
+  if implementation and contract and implementation!=contract:
+   findings.append({'code':'AUTHORITY_CONFLICT','claim_id':claim_id,'fact_key':key,
+                    'current_implementation_values':sorted(implementation),'documented_contract_values':sorted(contract)})
+ return findings
+
+
 def validate_authority_coverage(claims:list[dict[str,Any]],refs:list[dict[str,Any]])->list[dict[str,Any]]:
  """Require each declared Claim fact class to be supported by a linked reference."""
  findings=[]
