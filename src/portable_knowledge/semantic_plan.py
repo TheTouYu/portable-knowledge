@@ -203,8 +203,12 @@ def init_plan(root: Path, instance: Instance, args: argparse.Namespace) -> dict[
 
 def add_claim(root: Path, instance: Instance, args: argparse.Namespace) -> dict[str, Any]:
     path, plan = _load(root, instance, args.plan_id); _ensure_open(root, plan)
-    canonical_input = {"node": args.node, "topic_id": args.topic_id, "topic_path": args.topic_path, "title": args.title.strip(),
-                       "statement": args.statement.strip(), "boundary": args.boundary.strip(), "permission": args.permission,
+    canonical_input = {"node": args.node, "node_name": args.node_name, "node_path": args.node_path,
+                       "node_boundary": args.node_boundary, "node_keywords": sorted(set(args.node_keywords)),
+                       "topic_id": args.topic_id, "topic_path": args.topic_path, "topic_title": args.topic_title,
+                       "topic_summary": args.topic_summary, "topic_keywords": sorted(set(args.topic_keywords)),
+                       "title": args.title.strip(), "statement": args.statement.strip(), "boundary": args.boundary.strip(),
+                       "permission": args.permission, "duplicate_resolution": args.duplicate_resolution,
                        "fact_classes": sorted(set(args.fact_class))}
     operation = _operation(plan["plan_id"], "add_claim", canonical_input)
     claim_id = f"clm_{canonical_digest({'plan_id': plan['plan_id'], 'baseline': plan['baseline_commit'], 'operation_digest': operation['operation_digest']})[:26].upper()}"
@@ -212,9 +216,12 @@ def add_claim(root: Path, instance: Instance, args: argparse.Namespace) -> dict[
         return _summary(plan, "add-claim", operation_id=operation["operation_id"], claim_id=claim_id, replayed=True)
     temporary, staging = _with_overlay(root, plan)
     try:
-        ns = argparse.Namespace(actor=plan["writer"], node=args.node, topic_id=args.topic_id, topic_path=args.topic_path,
-                                topic_title=None, topic_summary="", keywords=[], title=args.title, statement=args.statement,
-                                boundary=args.boundary, permission=args.permission, duplicate_resolution="cancel")
+        ns = argparse.Namespace(actor=plan["writer"], node=args.node, node_name=args.node_name,
+                                node_path=args.node_path, node_boundary=args.node_boundary, node_keywords=args.node_keywords,
+                                topic_id=args.topic_id, topic_path=args.topic_path, topic_title=args.topic_title,
+                                topic_summary=args.topic_summary, keywords=args.topic_keywords, title=args.title,
+                                statement=args.statement, boundary=args.boundary, permission=args.permission,
+                                duplicate_resolution=args.duplicate_resolution)
         writes, details = _core().plan_new_claim(staging, ns, claim_id=claim_id, fact_classes=canonical_input["fact_classes"])
     except _core().SemanticPlanError:
         raise
@@ -331,6 +338,8 @@ def _validation_records(staging: Path, instance: Instance, cases: list[dict[str,
 
 
 def check_delta(root: Path, instance: Instance, args: argparse.Namespace) -> dict[str, Any]:
+    if args.mode != "delta":
+        _fail("PLAN_CHECK_MODE_INVALID", f"unsupported knowledge-plan check mode: {args.mode}")
     path, plan = _load(root, instance, args.plan_id); _ensure_open(root, plan); _assert_budget(plan)
     temporary, staging = _with_overlay(root, plan)
     try:

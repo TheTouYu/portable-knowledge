@@ -14,7 +14,7 @@ Use the configured deterministic CLI named by the loaded PKC Skill. This fixture
 The public high-level plan interface uses these stable argument shapes; root and `knowledge-plan` help are sufficient capability confirmation, and per-command nested help is unnecessary for this fixture:
 
 - initialize: named options `--intent <text>` and `--risk <low|medium|high>`; use the risk specified by the task, or `medium` when the neutral-fixture task omits one;
-- Claim operation: positional plan ID plus named options `--node`, `--topic-id`, `--title`, `--statement`, `--boundary`, optional `--permission`, and repeatable `--fact-class`;
+- Claim operation: positional plan ID plus named options `--node`, `--topic-id`, `--title`, `--statement`, `--boundary`, optional `--permission`, and repeatable `--fact-class`; creating a Topic additionally requires `--topic-path`, complete Topic metadata, and `--duplicate-resolution create_distinct_with_boundary`; atomically creating its Node also requires complete Node name/path/boundary metadata;
 - Authority Reference operation: positional plan ID plus named options `--claim-id`, `--path`, `--locator`, `--role`, `--change-policy`, and repeatable `--fact-class`; allowed roles for this fixture are exactly `documented_contract` and `current_implementation`. `documented_contract` is a role and may also be its supporting fact class; do not substitute a fact-class label such as `fact_class` for `--role`.
 - affected-scope check: positional plan ID plus named option `--mode delta`;
 - finalize: positional plan ID;

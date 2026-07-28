@@ -1382,19 +1382,44 @@ def claim_markdown(title: str, claim_id: str, statement: str, boundary: str) -> 
 
 
 def plan_new_claim(root: Path, args: argparse.Namespace, *, claim_id: str, fact_classes: list[str] | None = None) -> tuple[dict[str, bytes], dict[str, Any]]:
-    """Pure Claim semantic rule shared by the single-item and plan interfaces."""
+    """Pure Claim and enclosing-structure rule shared by single-item and plan interfaces."""
     ensure_actor(root, args.actor)
     registry, _ = load_authority(root)
     node = next((item for item in registry["nodes"] if item["id"] == args.node), None)
-    if not node:
-        raise KnowledgeError(f"node not found: {args.node}")
     topic = next((item for item in registry.get("topics", []) if item["id"] == args.topic_id), None)
+    node_name = getattr(args, "node_name", None)
+    node_path = getattr(args, "node_path", None)
+    node_boundary = getattr(args, "node_boundary", None)
+    node_keywords = list(getattr(args, "node_keywords", None) or [])
+    supplied_node_metadata = any(value is not None for value in (node_name, node_path, node_boundary)) or bool(node_keywords)
+    if node and supplied_node_metadata:
+        raise KnowledgeError("node metadata is only valid when atomically creating a new node")
+    if not node:
+        if topic:
+            raise KnowledgeError("cannot create a node around an existing topic")
+        if not all(isinstance(value, str) and value.strip() for value in (node_name, node_path, node_boundary)):
+            raise KnowledgeError("new node requires --node-name, --node-path, and --node-boundary")
+        if args.duplicate_resolution != "create_distinct_with_boundary":
+            raise KnowledgeError("new node/topic/claim requires --duplicate-resolution create_distinct_with_boundary")
+        error = _portable_relative_path(node_path, _knowledge_rel(root).as_posix())
+        if error:
+            raise KnowledgeError(f"invalid node path: {error}")
+        if any(item.get("path") == node_path for item in registry["nodes"]):
+            raise KnowledgeError("node path conflicts with registry")
+        node = {"id": args.node, "name": node_name.strip(), "path": node_path, "boundary": node_boundary.strip(),
+                "keywords": sorted(set(node_keywords)), "migration_status": "pilot"}
+        registry["nodes"].append(node)
     topic_path = args.topic_path or (topic and topic["path"])
     if not topic_path:
         raise KnowledgeError("topic-path is required for a new topic")
     error = _portable_relative_path(topic_path, _knowledge_rel(root).as_posix())
     if error or not topic_path.endswith(".md"):
         raise KnowledgeError(f"invalid topic path: {error or 'must be Markdown'}")
+    if not topic and not topic_path.startswith(node["path"].rstrip("/") + "/"):
+        raise KnowledgeError("new topic path must remain under its node path")
+    supplied_topic_metadata = args.topic_title is not None or bool(args.topic_summary) or bool(args.keywords)
+    if topic and supplied_topic_metadata:
+        raise KnowledgeError("topic metadata is only valid when creating a new topic")
     if topic and (topic["node_id"] != args.node or topic["path"] != topic_path):
         raise KnowledgeError("topic identity conflicts with registry")
     if topic and args.permission != topic.get("permission", "internal"):
@@ -1422,7 +1447,7 @@ def plan_new_claim(root: Path, args: argparse.Namespace, *, claim_id: str, fact_
         new_text = text.rstrip() + "\n\n" + block
     else:
         topic = {"id": args.topic_id, "node_id": args.node, "title": args.topic_title or args.title,
-                 "path": topic_path, "summary": args.topic_summary, "keywords": args.keywords,
+                 "path": topic_path, "summary": args.topic_summary, "keywords": sorted(set(args.keywords)),
                  "permission": args.permission}
         registry["topics"].append(topic)
         new_text = f"# {topic['title']}\n\n{topic['summary']}\n\n{block}"
@@ -1906,10 +1931,16 @@ def parser_build() -> argparse.ArgumentParser:
     plan_init.add_argument("--risk", choices=("low", "medium", "high"), required=True)
     plan_claim = plan_command("add-claim")
     plan_claim.add_argument("plan_id")
-    plan_claim.add_argument("--node", required=True); plan_claim.add_argument("--topic-id", required=True)
-    plan_claim.add_argument("--topic-path"); plan_claim.add_argument("--title", required=True)
-    plan_claim.add_argument("--statement", required=True); plan_claim.add_argument("--boundary", required=True)
+    plan_claim.add_argument("--node", required=True)
+    plan_claim.add_argument("--node-name"); plan_claim.add_argument("--node-path"); plan_claim.add_argument("--node-boundary")
+    plan_claim.add_argument("--node-keyword", dest="node_keywords", action="append", default=[])
+    plan_claim.add_argument("--topic-id", required=True); plan_claim.add_argument("--topic-path")
+    plan_claim.add_argument("--topic-title"); plan_claim.add_argument("--topic-summary", default="")
+    plan_claim.add_argument("--topic-keyword", dest="topic_keywords", action="append", default=[])
+    plan_claim.add_argument("--title", required=True); plan_claim.add_argument("--statement", required=True)
+    plan_claim.add_argument("--boundary", required=True)
     plan_claim.add_argument("--permission", choices=tuple(PERMISSIONS), default="internal")
+    plan_claim.add_argument("--duplicate-resolution", choices=("create_distinct_with_boundary", "cancel"), default="cancel")
     plan_claim.add_argument("--fact-class", action="append", default=[])
     plan_ref = plan_command("add-authority-ref")
     plan_ref.add_argument("plan_id"); plan_ref.add_argument("--claim-id", required=True)

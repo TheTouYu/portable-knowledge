@@ -44,6 +44,26 @@ pkc knowledge-plan add-claim PLAN_ID \
 
 `--topic-path` may be omitted when the Topic already exists. Repeat `--fact-class` when the Claim requires multiple controlled fact classes.
 
+To atomically create a distinct Topic with its first Claim, provide complete Topic metadata and explicitly acknowledge the distinct semantic boundary:
+
+```bash
+pkc knowledge-plan add-claim PLAN_ID \
+  --node EXISTING_NODE_ID \
+  --topic-id NEW_TOPIC_ID \
+  --topic-path knowledge/existing-node/new-topic.md \
+  --topic-title "New Topic" \
+  --topic-summary "Bounded routing summary" \
+  --topic-keyword routing \
+  --duplicate-resolution create_distinct_with_boundary \
+  --title "First Claim" \
+  --statement "One stable, atomic assertion." \
+  --boundary "When this claim applies and what it does not prove." \
+  --permission internal \
+  --fact-class documented_contract
+```
+
+To create a Node, its first Topic, and its first Claim as one governed operation, additionally provide `--node-name`, `--node-path`, and `--node-boundary`; `--node-keyword` is repeatable. A new Topic path must remain under its Node path. Node or Topic metadata supplied for an existing object is rejected rather than silently ignored. Empty Nodes and Topics are not created independently.
+
 Add an Authority Reference:
 
 ```bash

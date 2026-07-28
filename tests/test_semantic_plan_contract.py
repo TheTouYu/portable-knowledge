@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import argparse
+import base64
 import contextlib
 import hashlib
 import io
@@ -134,6 +135,93 @@ class SemanticPlanContractTests(unittest.TestCase):
             self.cli("new-claim", "--node", "software-core", "--topic-id", "topic-runtime", "--title", "Single command rule",
                      "--statement", "The old command calls the same pure function.", "--boundary", "Neutral fixture only.", "--dry-run")
         self.assertEqual(shared.call_count, 2)
+
+    def test_plan_can_create_a_distinct_topic_with_complete_metadata(self):
+        plan_id = self.init()["plan_id"]
+        added = self.cli(
+            "knowledge-plan", "add-claim", plan_id,
+            "--node", "software-core", "--topic-id", "topic-observability",
+            "--topic-path", "domain/topics/observability.md",
+            "--topic-title", "Observability Contract",
+            "--topic-summary", "Neutral diagnostic behavior",
+            "--topic-keyword", "diagnostics", "--topic-keyword", "tracing",
+            "--title", "Diagnostics remain bounded",
+            "--statement", "Diagnostics expose bounded neutral state.",
+            "--boundary", "Only the committed neutral fixture is in scope.",
+            "--duplicate-resolution", "create_distinct_with_boundary",
+            "--fact-class", "documented_contract",
+        )
+        self.assertFalse(added["replayed"])
+        inspected = self.cli("knowledge-plan", "inspect", plan_id)
+        self.assertEqual(inspected["claim_count"], 1)
+        plan = json.loads((self.root / ".local/pkc/semantic-plans" / f"{plan_id}.json").read_text(encoding="utf-8"))
+        registry = json.loads(base64.b64decode(plan["writes"]["data/store/registry.json"]))
+        topic = next(item for item in registry["topics"] if item["id"] == "topic-observability")
+        self.assertEqual(topic["title"], "Observability Contract")
+        self.assertEqual(topic["summary"], "Neutral diagnostic behavior")
+        self.assertEqual(topic["keywords"], ["diagnostics", "tracing"])
+        self.assertEqual(self.formal_authority(), self.authority_before)
+
+    def test_plan_atomically_creates_node_topic_and_first_claim(self):
+        plan_id = self.init()["plan_id"]
+        added = self.cli(
+            "knowledge-plan", "add-claim", plan_id,
+            "--node", "delivery-safety", "--node-name", "Delivery Safety",
+            "--node-path", "domain/delivery", "--node-boundary", "Safe delivery contracts",
+            "--node-keyword", "delivery", "--node-keyword", "safety",
+            "--topic-id", "topic-release-gates", "--topic-path", "domain/delivery/release-gates.md",
+            "--topic-title", "Release Gates", "--topic-summary", "Neutral release requirements",
+            "--topic-keyword", "release",
+            "--title", "Release gates fail closed",
+            "--statement", "A release stops when a required gate is incomplete.",
+            "--boundary", "This does not establish any external deployment result.",
+            "--duplicate-resolution", "create_distinct_with_boundary",
+            "--fact-class", "documented_contract",
+        )
+        self.assertTrue(added["claim_id"].startswith("clm_"))
+        plan = json.loads((self.root / ".local/pkc/semantic-plans" / f"{plan_id}.json").read_text(encoding="utf-8"))
+        registry = json.loads(base64.b64decode(plan["writes"]["data/store/registry.json"]))
+        node = next(item for item in registry["nodes"] if item["id"] == "delivery-safety")
+        self.assertEqual(node, {"id": "delivery-safety", "name": "Delivery Safety", "path": "domain/delivery",
+                               "boundary": "Safe delivery contracts", "keywords": ["delivery", "safety"],
+                               "migration_status": "pilot"})
+        topic = next(item for item in registry["topics"] if item["id"] == "topic-release-gates")
+        self.assertEqual(topic["node_id"], "delivery-safety")
+        self.assertEqual(topic["path"], "domain/delivery/release-gates.md")
+        self.add_ref(plan_id, added["claim_id"], "release-gates", "authority/validation-contract.md",
+                     "documented_contract", "documented_contract")
+        delta = self.cli("knowledge-plan", "check", plan_id, "--mode", "delta")
+        self.assertTrue(delta["can_finalize"])
+        self.assertEqual(delta["touched_operations"], 2)
+        self.assertEqual(self.formal_authority(), self.authority_before)
+
+    def test_structural_creation_rejects_implicit_or_partial_metadata(self):
+        cases = [
+            (["--node", "software-core", "--topic-id", "topic-new", "--topic-path", "domain/topics/new.md"],
+             "PLAN_TOPIC_INVALID", "duplicate-resolution"),
+            (["--node", "new-node", "--node-name", "Incomplete", "--topic-id", "topic-new",
+              "--topic-path", "domain/new/topic.md", "--duplicate-resolution", "create_distinct_with_boundary"],
+             "PLAN_TOPIC_INVALID", "node-path"),
+            (["--node", "new-node", "--node-name", "New Node", "--node-path", "domain/new",
+              "--node-boundary", "New contracts", "--topic-id", "topic-new", "--topic-path", "domain/outside/topic.md",
+              "--duplicate-resolution", "create_distinct_with_boundary"],
+             "PLAN_TOPIC_INVALID", "under its node path"),
+            (["--node", "software-core", "--node-name", "Renamed", "--topic-id", "topic-schema"],
+             "PLAN_TOPIC_INVALID", "node metadata"),
+            (["--node", "software-core", "--topic-id", "topic-schema", "--topic-title", "Renamed"],
+             "PLAN_TOPIC_INVALID", "topic metadata"),
+        ]
+        for index, (structural_args, code, message) in enumerate(cases):
+            with self.subTest(index=index):
+                plan_id = self.cli("knowledge-plan", "init", "--intent", f"Rejected structure {index}", "--risk", "medium")["plan_id"]
+                failed = self.cli(
+                    "knowledge-plan", "add-claim", plan_id, *structural_args,
+                    "--title", f"Rejected claim {index}", "--statement", f"Rejected statement {index}.",
+                    "--boundary", "Neutral fixture only.", "--fact-class", "documented_contract", expected=1,
+                )
+                self.assertEqual(failed["errors"][0]["code"], code)
+                self.assertIn(message, failed["errors"][0]["message"])
+                self.assertEqual(self.formal_authority(), self.authority_before)
 
     def test_fail_closed_matrix_and_zero_formal_authority_writes(self):
         plan_id = self.init()["plan_id"]

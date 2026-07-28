@@ -66,6 +66,10 @@ python tools/pkc.py knowledge-plan add-claim PLAN_ID \
   --node NODE --topic-id TOPIC --topic-path knowledge/topic.md \
   --title "..." --statement "..." --boundary "..." \
   --permission internal --fact-class runtime_behavior
+# For a new Topic, also provide its title/summary/keywords and explicitly use:
+#   --duplicate-resolution create_distinct_with_boundary
+# For a new Node + first Topic + first Claim, additionally provide complete:
+#   --node-name ... --node-path knowledge/node --node-boundary ... [--node-keyword ...]
 python tools/pkc.py knowledge-plan add-authority-ref PLAN_ID \
   --claim-id CLAIM_ID --path src/module.py --locator "function:name" \
   --role current_implementation --change-policy invalidate_on_change \
