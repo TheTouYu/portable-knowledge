@@ -18,6 +18,9 @@ class RepositoryContractTests(unittest.TestCase):
             "INSTALL.md",
             "docs/QUICKSTART.md",
             "docs/SEMANTIC-CHANGES.md",
+            "skills/pkc-project-operator/SKILL.md",
+            "skills/pkc-project-operator/references/MODES.md",
+            "skills/pkc-project-operator/scripts/pkc_operator.py",
         ):
             self.assertTrue((ROOT / relative).is_file(), relative)
         readme = (ROOT / "README.md").read_text(encoding="utf-8")
@@ -46,7 +49,7 @@ class RepositoryContractTests(unittest.TestCase):
             re.compile(r"/home/[A-Za-z0-9_.-]+/"),
             re.compile(r"[A-Z]:\\Users\\", re.IGNORECASE),
         )
-        public_roots = [ROOT / name for name in ("src", "schemas", "domain-packs", "docs", "examples")]
+        public_roots = [ROOT / name for name in ("src", "schemas", "domain-packs", "docs", "examples", "skills")]
         paths = [ROOT / name for name in ("README.md", "AGENTS.md", "INSTALL.md", "pyproject.toml")]
         paths.extend(path for base in public_roots for path in base.rglob("*") if path.is_file())
         for path in paths:

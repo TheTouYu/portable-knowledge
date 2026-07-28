@@ -4,6 +4,8 @@ Portable Knowledge Core is a deterministic, local-first knowledge authority, val
 
 PKC is designed for humans and AI agents that need bounded retrieval and auditable semantic changes without hidden conversation context.
 
+For easy cross-project installation and ongoing operation, this repository also ships the global [`pkc-project-operator`](skills/pkc-project-operator/SKILL.md) Skill. It covers technical installation, first use, query, intake, capture, Project Memory, maintenance, diagnosis, upgrade, exact-hash review/apply, and safe removal while delegating deterministic semantics to PKC Core.
+
 ## Start here
 
 ### For an AI model
@@ -64,6 +66,18 @@ See [`INSTALL.md`](INSTALL.md) for production installation and Windows instructi
 - Fact-free Domain Packs for existing personal-brand and software projects
 
 Run `pkc capabilities` to inspect the installed runtime's machine-readable capability set.
+
+## Install the global Operator Skill
+
+From a clean checkout of this repository:
+
+```bash
+python3 skills/pkc-project-operator/scripts/pkc_operator.py install-global --source .
+```
+
+This creates managed discovery projections in `~/.agents/skills/` and `~/.pi/agent/skills/` and records their source commit. Restart or rescan your Agent harness, then invoke `pkc-project-operator` naturally—for example, “给这个项目安装知识树” or “检查并维护这个项目的知识系统”. The Operator always plans tracked/runtime changes first and requires a real human review before applying them.
+
+Operator contract `0.1` is an early real-project testing release. Linux/Pi is the first tested target; other platform/Agent claims remain explicitly limited until real-environment validation.
 
 ## Authority and generated state
 
