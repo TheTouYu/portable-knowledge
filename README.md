@@ -6,6 +6,8 @@ PKC is designed for humans and AI agents that need bounded retrieval and auditab
 
 For easy cross-project installation and ongoing operation, this repository also ships the global [`pkc-project-operator`](skills/pkc-project-operator/SKILL.md) Skill. It covers technical installation, first use, query, intake, capture, Project Memory, maintenance, diagnosis, upgrade, exact-hash review/apply, and safe removal while delegating deterministic semantics to PKC Core.
 
+The repository also includes [`isolated-model-evaluator`](skills/isolated-model-evaluator/SKILL.md), which launches a fresh Pi model context with only explicitly selected Skills and records traces, correctness signals, tool errors, workspace changes, usage, latency, and cost for repeatable model-facing workflow evaluation.
+
 ## Start here
 
 ### For an AI model
@@ -69,6 +71,20 @@ See [`INSTALL.md`](INSTALL.md) for production installation and Windows instructi
 - Fact-free Domain Packs for existing personal-brand and software projects
 
 Run `pkc capabilities` to inspect the installed runtime's machine-readable capability set.
+
+## Evaluate with a fresh model context
+
+Use the repository-local evaluator to test whether a model can operate PKC without hidden conversation context:
+
+```bash
+python3 skills/isolated-model-evaluator/scripts/evaluate.py \
+  --skill skills/pkc-project-operator \
+  --task-file /tmp/pkc-eval-task.md \
+  --assert-no-changes \
+  --output-dir /tmp/pkc-isolated-eval
+```
+
+The evaluator defaults to the cost-effective `aijws / gpt-5.6-luna / medium` profile. Keep provider, model, thinking level, task, fixture, and tools fixed when comparing iterations. Raw traces and reports belong outside Git by default. Process success alone is not semantic correctness; define and inspect task-specific acceptance criteria. See the [Skill contract](skills/isolated-model-evaluator/SKILL.md) and [report contract](skills/isolated-model-evaluator/references/report-contract.md).
 
 ## Install the global Operator Skill
 

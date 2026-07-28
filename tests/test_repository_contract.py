@@ -21,10 +21,16 @@ class RepositoryContractTests(unittest.TestCase):
             "skills/pkc-project-operator/SKILL.md",
             "skills/pkc-project-operator/references/MODES.md",
             "skills/pkc-project-operator/scripts/pkc_operator.py",
+            "skills/isolated-model-evaluator/SKILL.md",
+            "skills/isolated-model-evaluator/references/report-contract.md",
+            "skills/isolated-model-evaluator/scripts/evaluate.py",
         ):
             self.assertTrue((ROOT / relative).is_file(), relative)
         readme = (ROOT / "README.md").read_text(encoding="utf-8")
-        for relative in ("AGENTS.md", "INSTALL.md", "docs/QUICKSTART.md", "docs/SEMANTIC-CHANGES.md"):
+        for relative in (
+            "AGENTS.md", "INSTALL.md", "docs/QUICKSTART.md", "docs/SEMANTIC-CHANGES.md",
+            "skills/isolated-model-evaluator/SKILL.md",
+        ):
             self.assertIn(relative, readme)
         repository_url = "https://github.com/TheTouYu/portable-knowledge"
         self.assertIn(repository_url, readme)

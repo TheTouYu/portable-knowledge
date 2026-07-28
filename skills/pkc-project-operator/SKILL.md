@@ -23,7 +23,7 @@ risk: L0 | L1 | L2 | L3 | L4
 project_state: unconfigured | configured | degraded | unknown
 ```
 
-Then run the smallest required inspection. Ordinary mechanical edits that do not involve project intelligence do not trigger this Skill.
+Then run the smallest required inspection. Declare this block before the first project tool call. Ordinary mechanical edits that do not involve project intelligence do not trigger this Skill.
 
 ## Human Review Gate
 
@@ -86,6 +86,15 @@ project operating/current/decision entries
 → Knowledge L1/L2
 → L3/show-claim only for exact boundaries
 ```
+
+In a configured project, use a fixed bounded startup—do not run `find`, `rg --files`, or directory scans to discover entries:
+
+1. read root `AGENTS.md` and `project-intelligence.json` directly;
+2. read exactly the actual paths listed by `memory.roles` (one role may map to multiple paths), once each;
+3. read the configured project Adapter only when the task triggers it;
+4. use the project wrapper for validate and retrieval.
+
+Never guess conventional paths such as `memory/OPERATING.md`, `memory/CURRENT.md`, or `memory/DECISIONS.md`. Do not read generic README, navigation, source, output, or historical files unless a bounded result explicitly requires one. For a direct business query, stop retrieval when L1 routes to the relevant Topic and L2 supplies enough Claims and boundaries. Use `show-claim` only when exact Authority/evidence status is needed; do not issue adjacent exploratory queries unless the result is insufficient, and explain that expansion.
 
 Use `python tools/pkc.py ...`, never a global/system `pkc`. A bounded miss is not repository-wide absence. Ordinary mechanical work defaults to no query.
 
