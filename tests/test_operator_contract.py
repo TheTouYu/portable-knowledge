@@ -89,6 +89,59 @@ class OperatorContractTests(unittest.TestCase):
         self.assertEqual(json.loads(authority.read_text(encoding="utf-8"))["nodes"][0]["id"], "real")
         self.assertFalse((self.root / "tools").exists())
 
+    def test_plan_upgrade_is_lock_only_and_records_rollback_and_provenance(self):
+        old_commit = "a" * 40
+        new_commit = "b" * 40
+        runtime = self.root / ".local/pkc/runtimes" / old_commit
+        runtime.mkdir(parents=True)
+        (self.root / "project-intelligence.json").write_text('{"schema_version":1}', encoding="utf-8")
+        lock = {"schema_version": 1, "version": "0.2.0rc4", "source_commit": old_commit,
+                "runtime": f".local/pkc/runtimes/{old_commit}"}
+        (self.root / "tools").mkdir()
+        (self.root / "tools/pkc-lock.json").write_text(json.dumps(lock), encoding="utf-8")
+        subprocess.run(["git", "add", "."], cwd=self.root, check=True)
+        subprocess.run(["git", "commit", "-q", "-m", "configured"], cwd=self.root, check=True)
+        wheel = Path(self.temp.name) / "portable_knowledge-0.2.0rc5-py3-none-any.whl"
+        wheel.write_bytes(b"wheel")
+        provenance = {"wheel": str(wheel), "sha256": operator.digest_file(wheel), "version": "0.2.0rc5",
+                      "source_commit": new_commit, "python": "/usr/bin/python", "abi": "test",
+                      "source_worktree_dirty": ["?? local.txt"]}
+        args = type("Args", (), {"target": self.root, "source_repository": str(ROOT),
+                                  "source_commit": new_commit, "output": Path(self.temp.name) / "upgrade.json",
+                                  "representative_query": ["question"], "project_check": ["true"]})()
+        with mock.patch.object(operator, "ensure_wheel_provenance", return_value=provenance):
+            result = operator.command_plan_upgrade(args)
+        plan = json.loads(args.output.read_text(encoding="utf-8"))
+        self.assertEqual(plan["kind"], "pkc-upgrade")
+        self.assertEqual([item["path"] for item in plan["writes"]], ["tools/pkc-lock.json"])
+        self.assertEqual(plan["rollback_runtime"], lock["runtime"])
+        self.assertEqual(plan["source"]["wheel_sha256"], provenance["sha256"])
+        self.assertEqual(result["plan_hash"], plan["plan_hash"])
+        self.assertEqual(json.loads((self.root / "tools/pkc-lock.json").read_text()), lock)
+
+    def test_exact_commit_builder_reports_dirty_source_and_build_environment(self):
+        environment = {"python": "/python", "python_version": "3.14", "abi": "abi", "uv": "/uv",
+                       "pip_available": False, "venv_available": True, "builder": "uv"}
+        with mock.patch.object(operator, "_source_commit", return_value=("c" * 40, [" M local.py"])), \
+             mock.patch.object(operator, "build_environment", return_value=environment), \
+             mock.patch.object(operator, "CACHE", Path(self.temp.name) / "cache"), \
+             mock.patch.object(operator, "run") as run:
+            checkout = Path(self.temp.name) / "checkout"
+            def fake_run(command, **kwargs):
+                if command[:2] == ["git", "clone"]:
+                    target = Path(command[-1]); target.mkdir(parents=True)
+                if "--out-dir" in command:
+                    output = Path(command[command.index("--out-dir") + 1]); output.mkdir()
+                    (output / "portable_knowledge-0.2.0rc5-py3-none-any.whl").write_bytes(b"wheel")
+                stdout = "1234567890\n" if "--format=%ct" in command else ""
+                return subprocess.CompletedProcess(command, 0, stdout=stdout, stderr="")
+            run.side_effect = fake_run
+            result = operator.ensure_wheel_provenance(str(ROOT), "c" * 40)
+        self.assertEqual(result["source_worktree_dirty"], [" M local.py"])
+        self.assertEqual(result["abi"], "abi")
+        self.assertEqual(result["distribution"], "portable-knowledge")
+        self.assertEqual(len(result["sha256"]), 64)
+
     def test_apply_requires_human_review_before_any_mutation(self):
         plan = {"schema_version": 1, "operator_contract": operator.CONTRACT, "kind": "pkc-install",
                 "target_root": str(self.root), "created_from": operator.git_state(self.root),
@@ -142,6 +195,14 @@ class OperatorContractTests(unittest.TestCase):
         self.assertIn("retire-authority-ref PLAN_ID --authority-ref-id ID", text)
         self.assertIn("Execute mutations of one plan serially", text)
         self.assertIn("may not contain PKC's maintainer-only `docs/SEMANTIC-CHANGES.md`", text)
+        self.assertIn("plan-upgrade", text)
+        self.assertIn("install/adopt are not upgrade substitutes", text)
+        self.assertIn("Do not add isolated evaluation to routine Claim creation", text)
+
+    def test_documented_operator_commands_exist(self):
+        choices = operator.parser()._subparsers._group_actions[0].choices
+        for command in ("plan-install", "plan-adopt", "plan-upgrade", "apply-plan"):
+            self.assertIn(command, choices)
 
 
 if __name__ == "__main__":

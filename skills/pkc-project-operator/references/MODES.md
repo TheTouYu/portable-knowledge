@@ -58,6 +58,24 @@ python tools/pkc.py query "question" --level 2
 
 It resolves the project root, reads `tools/pkc-lock.json`, verifies runtime location/version, removes source-checkout `PYTHONPATH`, and forwards arguments. It never downloads, upgrades, or falls back to a system runtime.
 
+## Exact upgrade flow
+
+Install initializes an unconfigured project; adopt locks an existing unlocked instance; upgrade changes an already locked project's exact runtime selection. They are not substitutes.
+
+```bash
+python scripts/pkc_operator.py plan-upgrade \
+  --target /path/to/project \
+  --source-repository /path/or/url/to/portable-knowledge \
+  --source-commit EXACT_40_CHARACTER_COMMIT \
+  --representative-query "bounded project question" \
+  --project-check "project test command" \
+  --output /tmp/pkc-upgrade-plan.json
+python scripts/pkc_operator.py apply-plan \
+  --plan /tmp/pkc-upgrade-plan.json --plan-hash EXACT_HASH --human-reviewed
+```
+
+Planning may build/cache a wheel from a clean export of the exact commit but does not change the target. Its payload identifies current/target commit and version, source dirtiness, interpreter/ABI/builder, wheel and SHA-256, lock before/after hashes, parallel and rollback runtimes, checks, exclusions, and plan hash. Apply fails on drift, installs non-editably, verifies module origin and project checks, restores the prior lock selection after post-switch failure, and preserves both runtimes. Runtime/config review remains separate from knowledge Bundle and Git review.
+
 ## Exact semantic change flow
 
 ```bash

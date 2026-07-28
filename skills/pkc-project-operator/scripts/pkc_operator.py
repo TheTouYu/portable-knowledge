@@ -11,6 +11,7 @@ import shutil
 import subprocess
 import sys
 import tempfile
+import sysconfig
 from pathlib import Path, PurePosixPath
 from typing import Any
 
@@ -23,8 +24,9 @@ class OperatorError(Exception):
     pass
 
 
-def run(command: list[str], *, cwd: Path | None = None, check: bool = True) -> subprocess.CompletedProcess[str]:
-    result = subprocess.run(command, cwd=cwd, text=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+def run(command: list[str], *, cwd: Path | None = None, check: bool = True,
+        env: dict[str, str] | None = None) -> subprocess.CompletedProcess[str]:
+    result = subprocess.run(command, cwd=cwd, text=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE, env=env)
     if check and result.returncode:
         raise OperatorError(f"command failed ({result.returncode}): {' '.join(command)}\n{result.stderr.strip()}")
     return result
@@ -80,40 +82,79 @@ def resolve_commit(remote: str, ref: str) -> str:
     return commits.pop()
 
 
-def ensure_wheel(remote: str, commit: str) -> tuple[Path, str, str]:
-    wheel_dir = CACHE / "wheels" / commit
+def _source_commit(repository: str, commit: str) -> tuple[str, list[str]]:
+    source = Path(repository).expanduser()
+    if source.exists():
+        root = git_root(source)
+        resolved = run(["git", "-C", str(root), "rev-parse", f"{commit}^{{commit}}"]).stdout.strip()
+        dirty = run(["git", "-C", str(root), "status", "--porcelain=v1"]).stdout.splitlines()
+        return resolved, dirty
+    if not re.fullmatch(r"[0-9a-fA-F]{40}", commit):
+        raise OperatorError("remote source commit must be an exact 40-character Git object ID")
+    return commit.lower(), []
+
+
+def build_environment() -> dict[str, Any]:
+    python = Path(sys.executable).resolve()
+    uv = shutil.which("uv")
+    pip = run([str(python), "-m", "pip", "--version"], check=False)
+    venv = run([str(python), "-m", "venv", "--help"], check=False)
+    return {"python": str(python), "python_version": sys.version.split()[0],
+            "abi": sysconfig.get_config_var("SOABI") or "unknown", "uv": uv,
+            "pip_available": pip.returncode == 0, "venv_available": venv.returncode == 0,
+            "builder": "uv" if uv else "unavailable"}
+
+
+def ensure_wheel_provenance(repository: str, commit: str) -> dict[str, Any]:
+    commit, source_dirty = _source_commit(repository, commit)
+    environment = build_environment()
+    if environment["builder"] == "unavailable":
+        raise OperatorError("no usable wheel builder: install uv outside the project runtime; "
+                            f"python={environment['python']} pip_available={environment['pip_available']}")
+    identity = digest_bytes(canonical({"repository": str(repository), "commit": commit,
+                                       "abi": environment["abi"], "builder": environment["builder"]}).encode())[:16]
+    wheel_dir = CACHE / "wheels" / commit / identity
     metadata_path = wheel_dir / "metadata.json"
     if metadata_path.is_file():
         metadata = json.loads(metadata_path.read_text(encoding="utf-8"))
         wheel = wheel_dir / metadata["filename"]
-        if wheel.is_file() and digest_file(wheel) == metadata["sha256"]:
-            return wheel, metadata["sha256"], metadata["version"]
+        if (wheel.is_file() and digest_file(wheel) == metadata.get("sha256")
+                and metadata.get("source_commit") == commit):
+            return {**metadata, "wheel": str(wheel), "source_worktree_dirty": source_dirty,
+                    "build_environment": environment, "cache_reused": True}
     wheel_dir.mkdir(parents=True, exist_ok=True)
     with tempfile.TemporaryDirectory(prefix="pkc-build-") as directory:
         checkout = Path(directory) / "source"
-        run(["git", "clone", "--quiet", "--no-checkout", remote, str(checkout)])
+        run(["git", "clone", "--quiet", "--no-checkout", repository, str(checkout)])
         run(["git", "-C", str(checkout), "checkout", "--quiet", "--detach", commit])
         if run(["git", "-C", str(checkout), "status", "--porcelain"]).stdout.strip():
-            raise OperatorError("build checkout is not clean")
+            raise OperatorError("exact-commit build export is not clean")
         output = Path(directory) / "dist"
-        uv = shutil.which("uv")
-        if not uv:
-            raise OperatorError("uv is required to build a locked wheel from a remote commit")
-        run([uv, "build", "--wheel", "--out-dir", str(output)], cwd=checkout)
+        timestamp = run(["git", "-C", str(checkout), "show", "-s", "--format=%ct", commit]).stdout.strip()
+        env = os.environ.copy(); env["SOURCE_DATE_EPOCH"] = timestamp
+        run([environment["uv"], "build", "--wheel", "--out-dir", str(output)], cwd=checkout, env=env)
         wheels = list(output.glob("*.whl"))
         if len(wheels) != 1:
             raise OperatorError("expected exactly one wheel")
-        wheel = wheels[0]
-        target = wheel_dir / wheel.name
-        shutil.copy2(wheel, target)
+        target = wheel_dir / wheels[0].name
+        shutil.copy2(wheels[0], target)
         sha = digest_file(target)
-        match = re.match(r"portable_knowledge-([^-]+)-", target.name)
+        match = re.fullmatch(r"portable_knowledge-([^-]+)-.+\.whl", target.name)
         if not sha or not match:
-            raise OperatorError("cannot identify built wheel")
-        version = match.group(1)
-        metadata_path.write_text(json.dumps({"filename": target.name, "sha256": sha, "version": version,
-                                             "source_repository": remote, "source_commit": commit}, indent=2) + "\n", encoding="utf-8")
-        return target, sha, version
+            raise OperatorError("built wheel name or distribution is invalid")
+        metadata = {"filename": target.name, "sha256": sha, "version": match.group(1),
+                    "distribution": "portable-knowledge", "source_repository": str(repository),
+                    "source_commit": commit, "python": environment["python"],
+                    "python_version": environment["python_version"], "abi": environment["abi"],
+                    "builder": environment["builder"]}
+        metadata_path.write_text(json.dumps(metadata, indent=2) + "\n", encoding="utf-8")
+        return {**metadata, "wheel": str(target), "source_worktree_dirty": source_dirty,
+                "build_environment": environment, "cache_reused": False}
+
+
+def ensure_wheel(remote: str, commit: str) -> tuple[Path, str, str]:
+    provenance = ensure_wheel_provenance(remote, commit)
+    return Path(provenance["wheel"]), provenance["sha256"], provenance["version"]
 
 
 def inspect_target(target: Path) -> dict[str, Any]:
@@ -288,6 +329,51 @@ def command_plan_adopt(args: argparse.Namespace) -> dict[str, Any]:
             "next": "show this plan to a human; apply only after review", "errors": []}
 
 
+def command_plan_upgrade(args: argparse.Namespace) -> dict[str, Any]:
+    root = git_root(args.target.resolve())
+    existing = inspect_target(root)
+    if existing["project_state"] != "configured":
+        raise OperatorError("plan-upgrade requires a configured project with a lock and canonical runtime")
+    current = existing["lock"]
+    provenance = ensure_wheel_provenance(args.source_repository, args.source_commit)
+    commit = provenance["source_commit"]
+    if commit == current.get("source_commit"):
+        raise OperatorError("target source commit is already selected")
+    wheel = Path(provenance["wheel"])
+    new_lock = {"schema_version": 1, "operator_contract": CONTRACT, "version": provenance["version"],
+                "release_channel": "remote-commit", "source_repository": str(args.source_repository),
+                "source_ref": commit, "source_commit": commit, "wheel_sha256": provenance["sha256"],
+                "wheel_cache": str(wheel), "runtime": f".local/pkc/runtimes/{commit}",
+                "python_requirement": ">=3.11"}
+    write = text_write(root, "tools/pkc-lock.json", json.dumps(new_lock, ensure_ascii=False, indent=2) + "\n")
+    state = git_state(root)
+    verification = ["capabilities", "module-origin", "validate", "rebuild", "validate"]
+    config = json.loads((root / "project-intelligence.json").read_text(encoding="utf-8"))
+    if (config.get("evaluation") or {}).get("cases_path"):
+        verification.append("knowledge-check")
+    plan = {"schema_version": 1, "operator_contract": CONTRACT, "kind": "pkc-upgrade",
+            "target_root": str(root), "created_from": {"head": state["head"], "status": state["status"]},
+            "current": {"version": current.get("version"), "source_commit": current.get("source_commit"),
+                        "runtime": current.get("runtime"), "lock_sha256": digest_file(root / "tools/pkc-lock.json")},
+            "source": {"repository": str(args.source_repository), "commit": commit,
+                       "version": provenance["version"], "wheel": str(wheel),
+                       "wheel_sha256": provenance["sha256"], "provenance": provenance},
+            "runtime": new_lock["runtime"], "rollback_runtime": current.get("runtime"),
+            "writes": [write], "links": [], "verification": verification,
+            "representative_queries": args.representative_query, "project_checks": args.project_check,
+            "excluded": ["formal knowledge authority", "Git commit/push", "old runtime deletion"],
+            "human_reviewed": False}
+    plan["plan_hash"] = plan_hash(plan)
+    args.output.parent.mkdir(parents=True, exist_ok=True)
+    args.output.write_text(json.dumps(plan, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
+    return {"ok": True, "command": "plan-upgrade", "plan_file": str(args.output),
+            "plan_hash": plan["plan_hash"], "current": plan["current"], "target": plan["source"],
+            "runtime": plan["runtime"], "rollback_runtime": plan["rollback_runtime"],
+            "writes": [{k: write[k] for k in ("path", "action", "expected_sha256", "new_sha256")}],
+            "verification": verification, "target_worktree_dirty": state["status"],
+            "next": "show this exact plan hash to a human; apply only after review", "errors": []}
+
+
 def create_link(root: Path, item: dict[str, str]) -> None:
     path = root / item["path"]
     target = item["target"]
@@ -319,13 +405,27 @@ def command_apply(args: argparse.Namespace) -> dict[str, Any]:
     wheel = Path(plan["source"]["wheel"])
     if digest_file(wheel) != plan["source"]["wheel_sha256"]:
         raise OperatorError("cached wheel hash mismatch")
+    if plan.get("kind") == "pkc-upgrade":
+        planned = plan["source"].get("provenance", {}).get("build_environment", {})
+        current = build_environment()
+        for key in ("python", "python_version", "abi", "builder"):
+            if planned.get(key) != current.get(key):
+                raise OperatorError(f"upgrade environment drift: {key}; create a new plan")
     runtime = root / plan["runtime"]
     if runtime.exists():
         raise OperatorError("planned runtime already exists")
     run([sys.executable, "-m", "venv", str(runtime)])
     python = runtime / ("Scripts/python.exe" if os.name == "nt" else "bin/python")
-    run([str(python), "-m", "pip", "install", "--no-deps", str(wheel)])
+    pip_check = run([str(python), "-m", "pip", "--version"], check=False)
+    if pip_check.returncode == 0:
+        run([str(python), "-m", "pip", "install", "--no-deps", str(wheel)])
+    elif shutil.which("uv"):
+        run([shutil.which("uv"), "pip", "install", "--python", str(python), "--no-deps", str(wheel)])
+    else:
+        raise OperatorError("new runtime has no pip and uv is unavailable; canonical selection was not changed")
     written: list[str] = []
+    previous = {item["path"]: (root / item["path"]).read_bytes() if (root / item["path"]).is_file() else None
+                for item in plan["writes"]}
     try:
         for item in plan["writes"]:
             path = root / item["path"]
@@ -339,9 +439,29 @@ def command_apply(args: argparse.Namespace) -> dict[str, Any]:
         for command in (["capabilities"], ["validate"], ["rebuild"], ["validate"]):
             result = run([*wrapper, *command], cwd=root)
             results.append(json.loads(result.stdout))
-    except Exception:
-        # Preserve evidence; do not guess rollback over pre-existing files. Runtime is disposable.
-        raise
+        if "knowledge-check" in plan.get("verification", []):
+            result = run([*wrapper, "knowledge-check", "--format", "json"], cwd=root)
+            results.append(json.loads(result.stdout))
+        origin = run([str(python), "-c", "import portable_knowledge; print(portable_knowledge.__file__)"], cwd=root).stdout.strip()
+        if not Path(origin).resolve().is_relative_to(runtime.resolve()):
+            raise OperatorError(f"module origin escaped target runtime: {origin}")
+        for query in plan.get("representative_queries", []):
+            result = run([*wrapper, "query", query, "--level", "2", "--format", "json"], cwd=root)
+            results.append(json.loads(result.stdout))
+        for check_command in plan.get("project_checks", []):
+            result = subprocess.run(check_command, cwd=root, shell=True, text=True,
+                                    stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+            if result.returncode:
+                raise OperatorError(f"reviewed project check failed ({result.returncode}): {check_command}\n{result.stderr.strip()}")
+            results.append({"command": "project-check", "value": check_command, "ok": True})
+    except Exception as exc:
+        for rel, content in previous.items():
+            path = root / rel
+            if content is None:
+                path.unlink(missing_ok=True)
+            else:
+                path.write_bytes(content)
+        raise OperatorError(f"post-switch verification failed; prior selection restored; both runtimes preserved: {exc}") from exc
     return {"ok": True, "command": "apply-plan", "plan_hash": actual, "target": str(root),
             "runtime": plan["runtime"], "written": written, "links": [x["path"] for x in plan["links"]],
             "verification": results, "git_status": git_state(root)["status"],
@@ -424,6 +544,11 @@ def parser() -> argparse.ArgumentParser:
     plan.add_argument("--remote", default=DEFAULT_REMOTE); plan.add_argument("--ref", default="main"); plan.add_argument("--project-id")
     adopt = sub.add_parser("plan-adopt"); adopt.add_argument("--target", type=Path, required=True); adopt.add_argument("--output", type=Path, required=True)
     adopt.add_argument("--remote", default=DEFAULT_REMOTE); adopt.add_argument("--ref", default="main")
+    upgrade = sub.add_parser("plan-upgrade"); upgrade.add_argument("--target", type=Path, required=True)
+    upgrade.add_argument("--source-repository", required=True); upgrade.add_argument("--source-commit", required=True)
+    upgrade.add_argument("--output", type=Path, required=True)
+    upgrade.add_argument("--representative-query", action="append", default=[])
+    upgrade.add_argument("--project-check", action="append", default=[])
     apply = sub.add_parser("apply-plan"); apply.add_argument("--plan", type=Path, required=True); apply.add_argument("--plan-hash", required=True); apply.add_argument("--human-reviewed", action="store_true")
     global_install = sub.add_parser("install-global"); global_install.add_argument("--source", type=Path, default=Path(__file__).resolve().parents[3]); global_install.add_argument("--skill-root", type=Path, action="append")
     return p
@@ -435,6 +560,7 @@ def main(argv: list[str] | None = None) -> int:
         if args.command == "inspect": payload = inspect_target(args.target)
         elif args.command == "plan-install": payload = command_plan(args)
         elif args.command == "plan-adopt": payload = command_plan_adopt(args)
+        elif args.command == "plan-upgrade": payload = command_plan_upgrade(args)
         elif args.command == "apply-plan": payload = command_apply(args)
         elif args.command == "status": payload = command_status(args)
         elif args.command == "doctor": payload = command_status(args, True)

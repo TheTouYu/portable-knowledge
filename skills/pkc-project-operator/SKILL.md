@@ -43,13 +43,16 @@ A prior installation, material, or Git approval never authorizes a later knowled
 python scripts/pkc_operator.py inspect --target /path/to/project
 python scripts/pkc_operator.py plan-install --target /path/to/project --output /tmp/pkc-install-plan.json
 python scripts/pkc_operator.py plan-adopt --target /path/to/project --output /tmp/pkc-adopt-plan.json
+python scripts/pkc_operator.py plan-upgrade --target /path/to/project \
+  --source-repository /path/or/url/to/portable-knowledge --source-commit EXACT_COMMIT \
+  --output /tmp/pkc-upgrade-plan.json
 python scripts/pkc_operator.py apply-plan --plan /tmp/pkc-install-plan.json --plan-hash EXACT_HASH --human-reviewed
 python scripts/pkc_operator.py status --target /path/to/project
 python scripts/pkc_operator.py doctor --target /path/to/project
 python scripts/pkc_operator.py check-update --target /path/to/project
 ```
 
-`plan-install` may fetch the public remote, resolve `main` to an exact commit, and build/cache a wheel outside the target project. `plan-adopt` does the same for an existing instance that already has `project-intelligence.json` and authority but no project lock; it may plan only the lock, canonical wrapper, and parallel runtime while preserving the existing instance, Memory, Adapter, authority, and history. Neither planning command may change the target project. Present the complete summary and `plan_hash`; only then may `apply-plan` run. Environment or file drift must fail closed and require a new plan.
+`plan-install` initializes an unconfigured project. `plan-adopt` adds a lock and wrapper to an existing unlocked instance while preserving its Memory, Adapter, authority, and history. `plan-upgrade` is the only upgrade planner for an already locked project; install/adopt are not upgrade substitutes. It exports the requested exact commit, records build environment and wheel provenance, proposes a parallel runtime and lock-only switch, names the rollback runtime and post-switch checks, and reports dirty source bytes without including them. Planning may cache a wheel outside the target but may not change the target project. Present the complete summary and `plan_hash`; only then may `apply-plan` run. Environment, wheel, target-file, Git-state, or plan drift must fail closed and require a new plan.
 
 Default remote:
 
@@ -144,7 +147,7 @@ Never guess business facts or overwrite unrecognized work.
 
 ## Upgrade
 
-`check-update` may fetch and compare remote `main` read-only. Upgrade must resolve an exact new commit, build/hash a wheel, create a parallel runtime, show compatibility and project file plan, obtain review, switch the lock, and run validate/rebuild/representative queries/tests. Preserve the old runtime for rollback. When signed/tagged Release wheels exist, prefer them; until then record `remote-commit`. Never auto-track latest.
+`check-update` may fetch and compare remote `main` read-only. For a selected commit run `plan-upgrade` with `--source-repository`, the full `--source-commit`, and `--output`; optionally repeat `--representative-query` and `--project-check`. Review current/target versions and commits, interpreter/ABI, wheel SHA-256/cache, exact lock diff, parallel runtime, rollback runtime, source-worktree dirtiness, checks, and `plan_hash`. L2 apply installs non-editably, switches only reviewed files, verifies module origin/capabilities/validate/rebuild/validate and configured checks, and restores the prior selection on failure while retaining both runtimes. Preserve the old runtime for rollback. When signed/tagged Release wheels exist, prefer them; until then record `remote-commit`. Never auto-track latest.
 
 ## Uninstall
 
@@ -156,6 +159,12 @@ Disambiguate:
 4. `archive-or-delete-authority`: separate destructive L4 operation with inventory/export option and explicit review.
 
 Plain “uninstall PKC” defaults to proposing only runtime/projection removal. Never delete tracked knowledge or history by default.
+
+## Isolated usability evaluation
+
+Use `isolated-model-evaluator` when a Skill/Operator contract, CLI command, permission/refusal/lifecycle default, project Adapter/Context, or model-facing documentation changes, or when before/after usability is an acceptance criterion. Keep task, fixture, provider/model/thinking, tools, and external oracle fixed; run read-only checks with `--assert-no-changes`; inspect the trace for the first error, guessed commands, unnecessary reads, final answer, and workspace changes.
+
+Do not add isolated evaluation to routine Claim creation, Authority refresh, real-map validation, or an already documented Bundle application merely because those operations occurred. Project semantic/runtime/external evidence and fresh-model usability evidence are separate layers. Evaluation never approves/applies authority or authorizes Git mutation.
 
 ## Task end
 
