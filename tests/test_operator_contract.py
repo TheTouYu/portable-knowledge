@@ -8,6 +8,7 @@ import subprocess
 import tempfile
 import unittest
 from pathlib import Path
+from unittest import mock
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -61,6 +62,32 @@ class OperatorContractTests(unittest.TestCase):
         self.assertEqual(lock["source_commit"], "a" * 40)
         self.assertEqual(lock["wheel_sha256"], "b" * 64)
         self.assertEqual(links[0]["path"], ".agents/skills/existing-project-knowledge-adapter")
+
+    def test_plan_adopt_preserves_existing_instance_and_authority(self):
+        config = {"schema_version": 1, "instance": {"id": "existing-project"},
+                  "pkc": {"version": "0.2.0rc1"},
+                  "authority": {"registry": "data/knowledge/registry.json"}}
+        (self.root / "project-intelligence.json").write_text(json.dumps(config), encoding="utf-8")
+        authority = self.root / "data/knowledge/registry.json"
+        authority.parent.mkdir(parents=True)
+        authority.write_text('{"schema_version": 1, "nodes": [{"id": "real"}]}\n', encoding="utf-8")
+        subprocess.run(["git", "add", "."], cwd=self.root, check=True)
+        subprocess.run(["git", "commit", "-q", "-m", "existing PKC instance"], cwd=self.root, check=True)
+        wheel = Path(self.temp.name) / "portable_knowledge-0.2.0rc1-py3-none-any.whl"
+        wheel.write_bytes(b"wheel")
+        args = type("Args", (), {"target": self.root, "output": Path(self.temp.name) / "adopt.json",
+                                  "remote": operator.DEFAULT_REMOTE, "ref": "main"})()
+        with mock.patch.object(operator, "resolve_commit", return_value="a" * 40), \
+             mock.patch.object(operator, "ensure_wheel", return_value=(wheel, "b" * 64, "0.2.0rc1")):
+            result = operator.command_plan_adopt(args)
+        plan = json.loads(args.output.read_text(encoding="utf-8"))
+        self.assertEqual(result["plan_hash"], plan["plan_hash"])
+        self.assertEqual(plan["kind"], "pkc-adopt")
+        self.assertEqual({item["path"] for item in plan["writes"]}, {"tools/pkc-lock.json", "tools/pkc.py"})
+        self.assertIn("project-intelligence.json", plan["preserved"])
+        self.assertIn("configured authority and knowledge assets", plan["preserved"])
+        self.assertEqual(json.loads(authority.read_text(encoding="utf-8"))["nodes"][0]["id"], "real")
+        self.assertFalse((self.root / "tools").exists())
 
     def test_apply_requires_human_review_before_any_mutation(self):
         plan = {"schema_version": 1, "operator_contract": operator.CONTRACT, "kind": "pkc-install",

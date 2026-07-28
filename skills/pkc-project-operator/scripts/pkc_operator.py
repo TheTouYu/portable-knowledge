@@ -206,11 +206,33 @@ Read `project-intelligence.json`, then configured operating/current/decision rol
     return writes, links
 
 
+def adoption_assets(root: Path, commit: str, remote: str, wheel: Path, sha: str, version: str) -> list[dict[str, Any]]:
+    runtime_rel = f".local/pkc/runtimes/{commit}"
+    lock = {"schema_version": 1, "operator_contract": CONTRACT, "version": version, "release_channel": "remote-commit",
+            "source_repository": remote, "source_ref": "main", "source_commit": commit, "wheel_sha256": sha,
+            "wheel_cache": str(wheel), "runtime": runtime_rel, "python_requirement": ">=3.11"}
+    wrapper = '''#!/usr/bin/env python3
+from __future__ import annotations
+import json, os, subprocess, sys
+from pathlib import Path
+root = Path(__file__).resolve().parents[1]
+lock = json.loads((root / "tools/pkc-lock.json").read_text(encoding="utf-8"))
+runtime = root / lock["runtime"]
+exe = runtime / ("Scripts/pkc.exe" if os.name == "nt" else "bin/pkc")
+if not exe.is_file():
+    raise SystemExit("locked PKC runtime is missing; invoke global pkc-project-operator doctor")
+env = os.environ.copy(); env.pop("PYTHONPATH", None)
+raise SystemExit(subprocess.run([str(exe), "--root", str(root), *sys.argv[1:]], env=env).returncode)
+'''
+    return [text_write(root, "tools/pkc-lock.json", json.dumps(lock, ensure_ascii=False, indent=2) + "\n"),
+            text_write(root, "tools/pkc.py", wrapper)]
+
+
 def command_plan(args: argparse.Namespace) -> dict[str, Any]:
     root = git_root(args.target.resolve())
     existing = inspect_target(root)
     if existing["project_state"] != "unconfigured":
-        raise OperatorError("target already has partial/full PKC configuration; use doctor or upgrade")
+        raise OperatorError("target already has partial/full PKC configuration; use plan-adopt for an existing unlocked instance, otherwise use doctor or upgrade")
     commit = resolve_commit(args.remote, args.ref)
     wheel, sha, version = ensure_wheel(args.remote, commit)
     project_id = safe_id(args.project_id or root.name)
@@ -232,6 +254,38 @@ def command_plan(args: argparse.Namespace) -> dict[str, Any]:
             "target": str(root), "source": plan["source"], "runtime": plan["runtime"],
             "writes": [{k: x[k] for k in ("path", "action", "expected_sha256", "new_sha256")} for x in writes],
             "links": links, "excluded": plan["excluded"], "next": "show this plan to a human; apply only after review", "errors": []}
+
+
+def command_plan_adopt(args: argparse.Namespace) -> dict[str, Any]:
+    root = git_root(args.target.resolve())
+    existing = inspect_target(root)
+    if not existing["instance_config"] or existing["lock"] is not None:
+        raise OperatorError("plan-adopt requires exactly one existing project-intelligence.json and no project lock")
+    for rel in ("tools/pkc-lock.json", "tools/pkc.py"):
+        if (root / rel).exists():
+            raise OperatorError(f"adoption path already exists: {rel}")
+    commit = resolve_commit(args.remote, args.ref)
+    wheel, sha, version = ensure_wheel(args.remote, commit)
+    writes = adoption_assets(root, commit, args.remote, wheel, sha, version)
+    state = git_state(root)
+    plan = {"schema_version": 1, "operator_contract": CONTRACT, "kind": "pkc-adopt", "target_root": str(root),
+            "created_from": {"head": state["head"], "status": state["status"]},
+            "source": {"repository": args.remote, "ref": args.ref, "commit": commit, "version": version,
+                       "wheel": str(wheel), "wheel_sha256": sha},
+            "runtime": f".local/pkc/runtimes/{commit}", "writes": writes, "links": [],
+            "preserved": ["project-intelligence.json", "configured Project Memory and Adapter",
+                          "configured authority and knowledge assets", "historical JSONL and Bundles"],
+            "excluded": ["existing project files except declared writes", "Git commit/push",
+                         "business Claims/Topics/Nodes", "authority apply", "legacy adapter removal"],
+            "verification": ["capabilities", "validate", "rebuild", "validate"], "human_reviewed": False}
+    plan["plan_hash"] = plan_hash(plan)
+    args.output.parent.mkdir(parents=True, exist_ok=True)
+    args.output.write_text(json.dumps(plan, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
+    return {"ok": True, "command": "plan-adopt", "plan_file": str(args.output), "plan_hash": plan["plan_hash"],
+            "target": str(root), "source": plan["source"], "runtime": plan["runtime"],
+            "writes": [{k: x[k] for k in ("path", "action", "expected_sha256", "new_sha256")} for x in writes],
+            "preserved": plan["preserved"], "excluded": plan["excluded"],
+            "next": "show this plan to a human; apply only after review", "errors": []}
 
 
 def create_link(root: Path, item: dict[str, str]) -> None:
@@ -368,6 +422,8 @@ def parser() -> argparse.ArgumentParser:
         if name == "check-update": child.add_argument("--ref", default="main")
     plan = sub.add_parser("plan-install"); plan.add_argument("--target", type=Path, required=True); plan.add_argument("--output", type=Path, required=True)
     plan.add_argument("--remote", default=DEFAULT_REMOTE); plan.add_argument("--ref", default="main"); plan.add_argument("--project-id")
+    adopt = sub.add_parser("plan-adopt"); adopt.add_argument("--target", type=Path, required=True); adopt.add_argument("--output", type=Path, required=True)
+    adopt.add_argument("--remote", default=DEFAULT_REMOTE); adopt.add_argument("--ref", default="main")
     apply = sub.add_parser("apply-plan"); apply.add_argument("--plan", type=Path, required=True); apply.add_argument("--plan-hash", required=True); apply.add_argument("--human-reviewed", action="store_true")
     global_install = sub.add_parser("install-global"); global_install.add_argument("--source", type=Path, default=Path(__file__).resolve().parents[3]); global_install.add_argument("--skill-root", type=Path, action="append")
     return p
@@ -378,6 +434,7 @@ def main(argv: list[str] | None = None) -> int:
     try:
         if args.command == "inspect": payload = inspect_target(args.target)
         elif args.command == "plan-install": payload = command_plan(args)
+        elif args.command == "plan-adopt": payload = command_plan_adopt(args)
         elif args.command == "apply-plan": payload = command_apply(args)
         elif args.command == "status": payload = command_status(args)
         elif args.command == "doctor": payload = command_status(args, True)

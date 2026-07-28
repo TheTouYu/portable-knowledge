@@ -41,7 +41,7 @@ skills/<project-id>-knowledge-adapter/SKILL.md
 .agents/skills/<project-id>-knowledge-adapter
 ```
 
-Existing files are preserved unless their exact prior hash and replacement are present in the reviewed plan. The first implementation does not automatically edit an existing root `AGENTS.md`; it reports the trigger snippet for human placement. This avoids silently changing a project's highest-precedence operating contract.
+Existing files are preserved unless their exact prior hash and replacement are present in the reviewed plan. For a degraded existing instance with `project-intelligence.json` but no lock, `plan-adopt` may plan only `tools/pkc-lock.json`, `tools/pkc.py`, and the parallel ignored runtime; it preserves configured Memory, Adapter, authority, knowledge, JSONL history, and Bundles. The first implementation does not automatically edit an existing root `AGENTS.md`; it reports the trigger snippet for human placement. This avoids silently changing a project's highest-precedence operating contract.
 
 The neutral initial authority is empty. Do not copy the example Claim into a real project.
 

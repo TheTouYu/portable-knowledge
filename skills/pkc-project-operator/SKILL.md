@@ -42,13 +42,14 @@ A prior installation, material, or Git approval never authorizes a later knowled
 ```bash
 python scripts/pkc_operator.py inspect --target /path/to/project
 python scripts/pkc_operator.py plan-install --target /path/to/project --output /tmp/pkc-install-plan.json
+python scripts/pkc_operator.py plan-adopt --target /path/to/project --output /tmp/pkc-adopt-plan.json
 python scripts/pkc_operator.py apply-plan --plan /tmp/pkc-install-plan.json --plan-hash EXACT_HASH --human-reviewed
 python scripts/pkc_operator.py status --target /path/to/project
 python scripts/pkc_operator.py doctor --target /path/to/project
 python scripts/pkc_operator.py check-update --target /path/to/project
 ```
 
-`plan-install` may fetch the public remote, resolve `main` to an exact commit, and build/cache a wheel outside the target project. It must not change the target project. Present its complete summary and `plan_hash`; only then may `apply-plan` run. Environment or file drift must fail closed and require a new plan.
+`plan-install` may fetch the public remote, resolve `main` to an exact commit, and build/cache a wheel outside the target project. `plan-adopt` does the same for an existing instance that already has `project-intelligence.json` and authority but no project lock; it may plan only the lock, canonical wrapper, and parallel runtime while preserving the existing instance, Memory, Adapter, authority, and history. Neither planning command may change the target project. Present the complete summary and `plan_hash`; only then may `apply-plan` run. Environment or file drift must fail closed and require a new plan.
 
 Default remote:
 
