@@ -30,6 +30,8 @@ Discover commands with:
 pkc --help
 pkc capabilities
 pkc knowledge-plan --help
+pkc knowledge-check --help
+pkc knowledge-search --help
 ```
 
 Do not guess unsupported forms such as `pkc --version`, `pkc semantic-plan`, or `pkc query --text ...`.

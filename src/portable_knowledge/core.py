@@ -33,6 +33,8 @@ from .instance import Instance, InstanceError, load_instance, validate_project_m
 from .bundle import BundleError, apply_bundle, approval, build_bundle, bundle_paths, canonical as bundle_json, capture_bundle_draft, enforce_production_provenance, lifecycle_path, lifecycle_projection, rollback_bundle, seal_preflight, verify_bundle
 from .authority import observe_authority_refs, validate_authority_conflicts, validate_authority_coverage, validate_authority_ref
 from .retrieval import RetrievalError, build_progressive_scope
+from .experience import (ExperienceError, authorized_claims, build_vector_index, evaluate_cases,
+                         freshness_markers, search_knowledge, upstream_freshness)
 
 SCHEMA_VERSION = 1
 REGISTRY_REL = Path("data/knowledge/registry.json")
@@ -1813,6 +1815,72 @@ def validate_merge_command(root: Path, base: str) -> dict[str, Any]:
     return report("validate-merge", findings, base=base, counts={"base_claims": len(baseline), "current_claims": len(current_claims)})
 
 
+def knowledge_search_command(root: Path, instance: Instance, query: str, terms: list[str], permission: str,
+                             limit: int, semantic: bool) -> dict[str, Any]:
+    def lexical(term: str) -> dict[str, Any]:
+        return query_command(root, term, 2, 12, 0, permission)
+    def detail(claim_id: str) -> dict[str, Any]:
+        return show_claim(root, claim_id, 1, 0, permission)
+    return search_knowledge(root, instance, query, terms, permission, limit, semantic, lexical, detail)
+
+
+def knowledge_index_command(root: Path, instance: Instance, permission: str) -> dict[str, Any]:
+    registry, _ = load_authority(root)
+    claims, _ = parse_claims(root, registry)
+    return build_vector_index(root, instance, claims, permission)
+
+
+def knowledge_check_command(root: Path, instance: Instance, semantic: bool) -> dict[str, Any]:
+    started = time.monotonic()
+    failures: list[str] = []
+    warnings: list[str] = []
+    environment_failure = False
+    validation = validate(root)
+    counts = validation.get("counts", {"nodes": 0, "topics": 0, "claims": 0})
+    failures.extend(f"{item.get('path')}: {item.get('message')}" for item in validation.get("errors", []))
+    memory = validate_project_memory(instance)
+    failures.extend(f"{item.get('path')}: {item.get('message')}" for item in memory.get("errors", []))
+    try:
+        tree = tree_command(root)
+        if len(tree.get("nodes", [])) != counts.get("nodes") or sum(len(node.get("topics", [])) for node in tree.get("nodes", [])) != counts.get("topics"):
+            failures.append("tree counts disagree with validate")
+    except (KnowledgeError, OSError) as exc:
+        failures.append(f"tree unavailable: {exc}"); environment_failure = True
+    experience = instance.raw.get("experience", {})
+    failures.extend(freshness_markers(root, experience, counts))
+    upstream_warnings, upstream_failures = upstream_freshness(root, experience.get("upstream_locks", []))
+    warnings.extend(upstream_warnings); failures.extend(upstream_failures)
+    refs_path = instance.authority.get("authority_refs")
+    observations = observe_authority_refs(root, read_json(root / refs_path).get("refs", [])) if refs_path else []
+    authority_current = sum(item.get("effective_status") == "current" for item in observations)
+    authority_pending = len(observations) - authority_current
+    for item in observations:
+        status = item.get("effective_status")
+        if status != "current":
+            warnings.append(f"Authority {status}: {item.get('path')} ({item.get('id', 'unidentified')}); review linked Claims, do not auto-rewrite")
+    evaluation: dict[str, Any] = {"passed": 0, "total": 0, "rows": []}
+    try:
+        evaluation = evaluate_cases(root, instance, semantic,
+            lambda query, terms, permission, limit, use_semantic: knowledge_search_command(root, instance, query, terms, permission, limit, use_semantic))
+        failed = [row["id"] for row in evaluation["rows"] if not row["pass"]]
+        if failed: failures.append("retrieval regressions failed: " + ", ".join(failed))
+        for row in evaluation["rows"]:
+            warnings.extend(f"{row['id']}: {warning}" for warning in row["warnings"])
+    except ExperienceError as exc:
+        failures.append(f"retrieval evaluation unavailable: {exc}"); environment_failure = environment_failure or exc.environment
+    warnings = list(dict.fromkeys(warnings))
+    proof = experience.get("proof_boundary", "This read-only check does not prove later external-system behavior.")
+    return {"ok": not failures, "command": "knowledge-check", "status": "PASS" if not failures else "FAIL",
+            "exit_code": 2 if environment_failure else (1 if failures else 0),
+            "runtime_version": _runtime_version(), "core_version": _runtime_version(), "counts": counts,
+            "memory_freshness": "PASS" if not any("memory/" in item or "stale marker" in item for item in failures) else "FAIL",
+            "retrieval": evaluation, "authority": {"current": authority_current, "pending_review": authority_pending},
+            "warnings": warnings, "failures": failures, "elapsed_seconds": round(time.monotonic() - started, 3),
+            "proof_boundary": proof, "read_only": True, "operation_authorized": False,
+            "scope_note": "Offline by default; does not rebuild projections, access the network unless --semantic is requested, or change authority.",
+            "errors": [{"code": "KNOWLEDGE_HEALTH", "path": ".", "message": item} for item in failures]}
+
+
 def git_status(root: Path) -> list[str]:
     result = subprocess.run(["git", "status", "--short"], cwd=root, text=True, encoding="utf-8", stdout=subprocess.PIPE, stderr=subprocess.PIPE, check=False)
     return result.stdout.splitlines() if result.returncode == 0 else []
@@ -1821,6 +1889,19 @@ def git_status(root: Path) -> list[str]:
 def output(payload: dict[str, Any], fmt: str) -> None:
     if fmt == "json":
         print(json.dumps(payload, ensure_ascii=False, indent=2))
+    elif payload.get("command") == "knowledge-check":
+        counts = payload.get("counts", {})
+        evaluation = payload.get("retrieval", {})
+        authority = payload.get("authority", {})
+        print(f"Knowledge health: {payload.get('status')}")
+        print(f"Runtime: {payload.get('runtime_version')} / Core: {payload.get('core_version')}")
+        print(f"Nodes/Topics/Claims: {counts.get('nodes', 0)}/{counts.get('topics', 0)}/{counts.get('claims', 0)}")
+        print(f"Memory freshness: {payload.get('memory_freshness')}")
+        print(f"Retrieval cases: {evaluation.get('passed', 0)}/{evaluation.get('total', 0)} (Topic@{evaluation.get('topic_top_n', 3)}, Claim@{evaluation.get('claim_top_n', 5)})")
+        print(f"Authority refs current/pending: {authority.get('current', 0)}/{authority.get('pending_review', 0)}")
+        for warning in payload.get("warnings", []): print(f"WARNING: {warning}")
+        for failure in payload.get("failures", []): print(f"BLOCKING: {failure}")
+        print(f"Evidence boundary: {payload.get('proof_boundary')}")
     elif not payload.get("ok"):
         for error in payload.get("errors", []):
             print(f"ERROR [{error.get('code', 'ERROR')}] {error.get('path', '.')}: {error.get('message', '')}")
@@ -1863,11 +1944,8 @@ def output(payload: dict[str, Any], fmt: str) -> None:
 
 
 def _runtime_version() -> str:
-    try:
-        return importlib_metadata.version("portable-knowledge")
-    except importlib_metadata.PackageNotFoundError:
-        from . import __version__
-        return __version__
+    from . import __version__
+    return __version__
 
 
 def capabilities_command() -> dict[str, Any]:
@@ -1876,8 +1954,9 @@ def capabilities_command() -> dict[str, Any]:
                              "authority_ref": True, "lifecycle": True, "supersede": True,
                              "migration_plan": True, "bundle_orchestration_plan": True,
                              "bundle_migration_plan": True, "knowledge_structure_refactor": True,
-                             "claim_revision_plan": True, "routes": False, "evaluation_cases": False,
-                             "manifest_compatibility_mode": True}, "errors": []}
+                             "claim_revision_plan": True, "routes": False, "evaluation_cases": True,
+                             "knowledge_health": True, "hybrid_retrieval": True, "vector_cache": True,
+                             "upstream_freshness": True, "manifest_compatibility_mode": True}, "errors": []}
 
 
 def parser_build() -> argparse.ArgumentParser:
@@ -1897,6 +1976,16 @@ def parser_build() -> argparse.ArgumentParser:
     merge.add_argument("--base", required=True)
     command("rebuild")
     command("tree")
+    health = command("knowledge-check")
+    health.add_argument("--semantic", action="store_true", help="try optional remote embeddings and fall back to lexical retrieval")
+    index = command("knowledge-index")
+    index.add_argument("--permission", choices=tuple(PERMISSIONS), default="internal")
+    search = command("knowledge-search")
+    search.add_argument("query")
+    search.add_argument("--term", action="append", default=[])
+    search.add_argument("--permission", choices=tuple(PERMISSIONS), default="internal")
+    search.add_argument("--semantic", action="store_true")
+    search.add_argument("--limit", type=int, default=8)
     query = command("query")
     query.add_argument("query")
     query.add_argument("--level", type=int, choices=(1, 2, 3), default=1)
@@ -2123,6 +2212,9 @@ def main(argv: list[str] | None = None) -> int:
         elif args.command == "validate-merge": payload = validate_merge_command(root, args.base)
         elif args.command == "rebuild": payload = rebuild(root)
         elif args.command == "tree": payload = tree_command(root)
+        elif args.command == "knowledge-check": payload = knowledge_check_command(root, instance, args.semantic)
+        elif args.command == "knowledge-index": payload = knowledge_index_command(root, instance, args.permission)
+        elif args.command == "knowledge-search": payload = knowledge_search_command(root, instance, args.query, args.term, args.permission, args.limit, args.semantic)
         elif args.command == "query": payload = query_command(root, args.query, args.level, args.limit, args.cursor, args.permission, args.node, args.topic)
         elif args.command in {"progressive-query", "query-context"}: payload = progressive_query_command(root, instance, args.context, args.intent, args.max_level, args.limit, args.permission, args.check_authority, args.cursor)
         elif args.command == "show-claim": payload = show_claim(root, args.claim_id, args.evidence_limit, args.cursor, args.permission)
@@ -2155,17 +2247,17 @@ def main(argv: list[str] | None = None) -> int:
             from .semantic_plan import dispatch_plan_command
             payload = dispatch_plan_command(root, args, instance)
         else: raise KnowledgeError(f"unknown command: {args.command}")
-    except (KnowledgeError, RetrievalError, BundleError, OSError, sqlite3.Error) as exc:
+    except (KnowledgeError, RetrievalError, BundleError, ExperienceError, OSError, sqlite3.Error) as exc:
         error = {"code": getattr(exc, "code", "KNOWLEDGE_ERROR"), "path": ".", "message": str(exc)}
         if isinstance(exc, RetrievalError):
             error.update(exc.details)
         errors = exc.findings if isinstance(exc, (StagedValidationError, SemanticPlanError)) and exc.findings is not None else [error]
-        payload = {"ok": False, "command": args.command, "read_only": args.command in {"progressive-query", "query-context", "capture"},
-                   "operation_authorized": False, "errors": errors}
+        payload = {"ok": False, "command": args.command, "read_only": args.command in {"progressive-query", "query-context", "capture", "knowledge-check", "knowledge-search"},
+                   "operation_authorized": False, "exit_code": 2 if isinstance(exc, ExperienceError) and exc.environment else 1, "errors": errors}
     if args.command in {"recover", "rollback", "abandon"}:
         payload["git_status"] = git_status(root)
     output(payload, args.format)
-    return 0 if payload.get("ok") else 1
+    return int(payload.get("exit_code", 0 if payload.get("ok") else 1))
 
 
 if __name__ == "__main__":

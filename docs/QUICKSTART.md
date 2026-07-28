@@ -100,7 +100,44 @@ Never read `.local` or SQLite directly. Never report a local miss as proof of gl
 
 For writes, continue with [`SEMANTIC-CHANGES.md`](SEMANTIC-CHANGES.md).
 
-## 7. Maintain existing knowledge
+## 7. Configure project knowledge experience
+
+Projects may opt into deterministic retrieval/refusal regressions and bounded freshness checks:
+
+```json
+{
+  "evaluation": {"cases_path": "data/knowledge/evaluation/retrieval-cases.json"},
+  "experience": {
+    "current_surfaces": ["AGENTS.md", "memory/CURRENT.md"],
+    "count_surfaces": ["memory/CURRENT.md"],
+    "stale_markers": ["obsolete command text"],
+    "upstream_locks": ["data/knowledge/upstream-evidence-lock.json"],
+    "proof_boundary": "State exactly which later evidence layers this check does not prove."
+  }
+}
+```
+
+Run the single offline, read-only check:
+
+```bash
+pkc knowledge-check --format text
+```
+
+It never rebuilds, modifies authority, creates a Bundle, or accesses the network. Stable outcomes are `0` pass, `1` project knowledge/regression failure, and `2` unavailable environment/configuration. Authority or upstream changes produce review warnings and never auto-rewrite Claims.
+
+Optional embeddings use only `VECTORENGINE_API_KEY`, `VECTORENGINE_BASE_URL`, and `VECTORENGINE_EMBEDDING_MODEL` from the process environment or ignored project `.env`:
+
+```bash
+pkc knowledge-index
+pkc knowledge-search "bounded question" --semantic
+pkc knowledge-check --semantic
+```
+
+The index and model+input-SHA-256 cache live below the configured `.local` projection. Missing keys, index/model/permission changes, timeout, 429, 5xx, or invalid responses produce an explicit lexical fallback during search/check. Index creation itself fails with exit code 2 when the provider is unavailable. JSON output never includes embeddings, cache entries, secrets, or full indexed Claim statements. Similarity is not evidence.
+
+Evaluation fixtures use schema version 1 with `defaults` and `cases`. Each case supplies a query, expected Topic IDs, expected Claim IDs, optional alternate search terms, and optional forbidden Claim IDs. Both snake_case Core names and the earlier camelCase fixture spelling are accepted.
+
+## 8. Maintain existing knowledge
 
 Use the operation that matches the semantic intent:
 

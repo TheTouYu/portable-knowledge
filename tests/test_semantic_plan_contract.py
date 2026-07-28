@@ -92,7 +92,9 @@ class SemanticPlanContractTests(unittest.TestCase):
         from portable_knowledge import __version__
         self.assertEqual(__version__, payload["runtime_version"])
         self.assertFalse(payload["capabilities"]["routes"])
-        self.assertFalse(payload["capabilities"]["evaluation_cases"])
+        self.assertTrue(payload["capabilities"]["evaluation_cases"])
+        for name in ("knowledge_health", "hybrid_retrieval", "vector_cache", "upstream_freshness"):
+            self.assertTrue(payload["capabilities"][name])
 
     def test_three_claims_six_refs_delta_and_single_immutable_bundle(self):
         plan_id, claims, delta = self.build_complete_plan()

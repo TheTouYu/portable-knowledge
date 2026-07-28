@@ -87,7 +87,7 @@ PY
 
 Expected for this revision:
 
-- distribution/runtime version: `0.2.0rc1`
+- distribution/runtime version: `0.2.0rc2`
 - `pkc capabilities` returns JSON with `"ok": true`
 - module path is inside `.venv` site-packages, not this repository's `src/`
 - `PYTHONPATH` does not point to a PKC source checkout
@@ -100,16 +100,16 @@ Using uv without modifying the runtime environment:
 
 ```bash
 uv build --wheel --out-dir dist
-sha256sum dist/portable_knowledge-0.2.0rc1-py3-none-any.whl
+sha256sum dist/portable_knowledge-0.2.0rc2-py3-none-any.whl
 uv venv /absolute/path/to/pkc-runtime --python 3.11
 uv pip install --python /absolute/path/to/pkc-runtime/bin/python \
-  dist/portable_knowledge-0.2.0rc1-py3-none-any.whl
+  dist/portable_knowledge-0.2.0rc2-py3-none-any.whl
 ```
 
 On Windows, calculate the hash with:
 
 ```powershell
-Get-FileHash .\dist\portable_knowledge-0.2.0rc1-py3-none-any.whl -Algorithm SHA256
+Get-FileHash .\dist\portable_knowledge-0.2.0rc2-py3-none-any.whl -Algorithm SHA256
 ```
 
 Record the wheel filename, SHA-256, PKC version, and source commit in the consuming project's installation documentation. Do not silently replace a locked wheel with a source checkout.

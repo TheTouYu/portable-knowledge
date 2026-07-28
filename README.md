@@ -60,6 +60,8 @@ See [`INSTALL.md`](INSTALL.md) for production installation and Windows instructi
 - Disposable local SQLite search projection
 - L1/L2/L3 query and claim inspection
 - Context-scoped progressive retrieval
+- One offline, read-only `knowledge-check` command with project-configured retrieval/refusal regressions and Authority/upstream freshness warnings
+- Optional `knowledge-index` and `knowledge-search --semantic` hybrid retrieval with ignored model+input-hash cache and explicit lexical fallback
 - Immutable Semantic Change Bundles
 - High-level typed `knowledge-plan` operations for creation, Claim revision, and Topic refactoring
 - Stable-ID Topic moves with atomic destination-Node creation and exact-path relocation
@@ -97,7 +99,7 @@ Do **not** commit:
 - transaction scratch state
 - caches, reports, model transcripts, or unapproved temporary plans
 
-A local search result is not proof that something does not exist across the whole repository. Permission and lifecycle filters always apply.
+A local search result is not proof that something does not exist across the whole repository. Permission, lifecycle, conflict, and Authority status filters apply before knowledge-search output. Vector similarity is a ranking signal, never evidence or confirmation.
 
 ## Development
 
@@ -110,6 +112,6 @@ If the `build` module is unavailable, create a disposable build environment or i
 
 ## Project status
 
-Current version: `0.2.0rc1` (release candidate).
+Current version: `0.2.0rc2` (release candidate).
 
 This public repository currently has **no declared open-source license**. Public source visibility does not grant redistribution or modification rights. An explicit license must be chosen before representing PKC as open-source software.

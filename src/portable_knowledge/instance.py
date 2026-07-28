@@ -101,6 +101,22 @@ def validate_project_memory(instance: Instance) -> dict[str, Any]:
     budget = memory.get("startup_budget", {})
     if not isinstance(budget.get("max_files"), int) or budget.get("max_files", 0) < 1 or len(roles) > budget.get("max_files", 0): error("STARTUP_BUDGET", CONFIG_NAME, "startup max_files is missing or exceeded")
     if not isinstance(budget.get("max_characters"), int) or budget.get("max_characters", 0) < 1: error("STARTUP_BUDGET", CONFIG_NAME, "startup max_characters is invalid")
+    evaluation = raw.get("evaluation", {})
+    cases_path = evaluation.get("cases_path")
+    if cases_path is not None:
+        if not _relative(cases_path): error("EVALUATION_PATH", CONFIG_NAME, "evaluation.cases_path must be project-relative")
+        elif not (root / cases_path).is_file(): error("EVALUATION_MISSING", cases_path, "configured evaluation cases file does not exist")
+    experience = raw.get("experience", {})
+    for key in ("current_surfaces", "count_surfaces", "upstream_locks"):
+        values = experience.get(key, [])
+        if not isinstance(values, list) or any(not _relative(value) for value in values):
+            error("EXPERIENCE_PATH", CONFIG_NAME, f"experience.{key} must contain project-relative paths")
+    markers = experience.get("stale_markers", [])
+    if not isinstance(markers, list) or any(not isinstance(value, str) or not value for value in markers):
+        error("EXPERIENCE_MARKER", CONFIG_NAME, "experience.stale_markers must contain non-empty strings")
+    proof_boundary = experience.get("proof_boundary")
+    if proof_boundary is not None and (not isinstance(proof_boundary, str) or not proof_boundary.strip()):
+        error("EXPERIENCE_BOUNDARY", CONFIG_NAME, "experience.proof_boundary must be a non-empty string")
     scope = memory.get("applies_to", {})
     configured_root = scope.get("workspace", ".")
     if configured_root != ".": error("MEMORY_SCOPE", CONFIG_NAME, "workspace must identify the instance root with '.'")
