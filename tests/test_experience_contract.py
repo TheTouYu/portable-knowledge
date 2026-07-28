@@ -10,7 +10,7 @@ from unittest import mock
 PACKAGE = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(PACKAGE / "src"))
 
-from portable_knowledge.experience import (embed_texts, evaluate_cases, freshness_markers,
+from portable_knowledge.experience import (ExperienceError, embed_texts, evaluate_cases, freshness_markers,
                                            search_knowledge, upstream_freshness)
 
 
@@ -99,6 +99,20 @@ class ExperienceContractTests(unittest.TestCase):
             result = evaluate_cases(root, instance, False, lambda *_: {"mode": "lexical", "warnings": [], "results": [
                 {"rank": 1, "id": "good", "topic_id": "t", "permission": "internal", "lifecycle": "active", "conflict": "none"}]})
             self.assertEqual((1, 1), (result["passed"], result["total"]))
+
+    def test_conflicting_case_aliases_are_rejected_with_case_and_field(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory); (root / "evaluation").mkdir()
+            (root / "evaluation/cases.json").write_text(json.dumps({
+                "schema_version": 1,
+                "cases": [{"id": "conflict", "query": "q",
+                           "expected_claim_ids": ["one"], "expectedClaimIds": ["two"]}],
+            }))
+            with self.assertRaises(ExperienceError) as caught:
+                evaluate_cases(root, _Instance(root), False, lambda *_: {"results": []})
+            self.assertEqual(caught.exception.code, "EVALUATION_SCHEMA")
+            self.assertEqual(caught.exception.case_id, "conflict")
+            self.assertEqual(caught.exception.field, "expected_claim_ids")
 
     def test_freshness_is_bounded_to_configured_surfaces_and_locks(self) -> None:
         with tempfile.TemporaryDirectory() as directory:

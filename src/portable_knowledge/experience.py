@@ -17,6 +17,8 @@ from typing import Any, Callable
 from urllib import error, request
 
 from .authority import authority_refs_from_document, observe_authority_refs
+from .evaluation_contract import (EvaluationContractError, evaluate_normalized_cases,
+                                  load_evaluation_contract)
 
 DEFAULT_BASE_URL = "https://api.vectorengine.ai/v1"
 DEFAULT_MODEL = "text-embedding-3-small"
@@ -205,7 +207,8 @@ def search_knowledge(root: Path, instance: Any, query: str, terms: list[str], pe
                      semantic: bool, lexical_query: Callable[[str], dict[str, Any]],
                      claim_detail: Callable[[str], dict[str, Any]]) -> dict[str, Any]:
     merged: dict[str, dict[str, Any]] = {}
-    for term_index, term in enumerate(terms or [query]):
+    query_terms = list(dict.fromkeys([query, *terms]))
+    for term_index, term in enumerate(query_terms):
         for rank, item in enumerate(lexical_query(term).get("results", []), 1):
             if item.get("conflict") != "none" or item.get("lifecycle") != "active":
                 continue
@@ -267,41 +270,31 @@ def search_knowledge(root: Path, instance: Any, query: str, terms: list[str], pe
             "results": results, "scope_note": "Permission, active lifecycle, conflict, and Authority status were checked before output; similarity is not evidence.", "errors": []}
 
 
+def _evaluation_error(exc: EvaluationContractError) -> ExperienceError:
+    error = ExperienceError(str(exc), environment=True)
+    error.code = "EVALUATION_SCHEMA"
+    error.path = exc.path
+    error.field = exc.field
+    error.case_id = exc.case_id
+    return error
+
+
 def load_evaluation_cases(root: Path, instance: Any) -> tuple[dict[str, Any], list[dict[str, Any]]]:
-    rel = instance.raw.get("evaluation", {}).get("cases_path")
-    if not rel or not _relative(rel):
-        raise ExperienceError("evaluation.cases_path must be a configured project-relative path", environment=True)
-    fixture = _read_json(root / rel)
-    schema = fixture.get("schema_version", fixture.get("schemaVersion"))
-    if schema != 1 or not isinstance(fixture.get("cases"), list):
-        raise ExperienceError("evaluation cases must use schema version 1", environment=True)
-    defaults = fixture.get("defaults", {})
-    return {"topic_top_n": int(defaults.get("topic_top_n", defaults.get("topicTopN", 3))),
-            "claim_top_n": int(defaults.get("claim_top_n", defaults.get("claimTopN", 5))),
-            "permission": defaults.get("permission", "internal")}, fixture["cases"]
+    """Compatibility facade returning the canonical normalized contract."""
+    try:
+        contract = load_evaluation_contract(root, instance)
+    except EvaluationContractError as exc:
+        raise _evaluation_error(exc) from exc
+    return contract["defaults"], contract["cases"]
 
 
 def evaluate_cases(root: Path, instance: Any, semantic: bool,
                    search: Callable[[str, list[str], str, int, bool], dict[str, Any]]) -> dict[str, Any]:
-    defaults, cases = load_evaluation_cases(root, instance)
-    rows = []
-    for case in cases:
-        expected_topics = case.get("expected_topic_ids", case.get("expectedTopicIds", []))
-        expected_claims = case.get("expected_claim_ids", case.get("expectedClaimIds", []))
-        forbidden = case.get("must_not_claim_ids", case.get("mustNotClaimIds", []))
-        terms = case.get("search_terms", case.get("searchTerms", []))
-        result = search(case["query"], terms, defaults["permission"], max(defaults["topic_top_n"], defaults["claim_top_n"], 8), semantic)
-        topics = [item["topic_id"] for item in result["results"][:defaults["topic_top_n"]]]
-        claims = [item["id"] for item in result["results"][:defaults["claim_top_n"]]]
-        topic_ok = bool(set(expected_topics) & set(topics)); claim_ok = bool(set(expected_claims) & set(claims))
-        forbidden_ok = not bool(set(forbidden) & set(claims))
-        filters_ok = all(item["permission"] == defaults["permission"] and item["lifecycle"] == "active" and item["conflict"] == "none" for item in result["results"])
-        ranks = [item["rank"] for item in result["results"] if item["id"] in expected_claims]
-        rows.append({"id": case["id"], "pass": topic_ok and claim_ok and forbidden_ok and filters_ok,
-                     "topic_pass": topic_ok, "claim_pass": claim_ok, "forbidden_pass": forbidden_ok, "filter_pass": filters_ok,
-                     "best_expected_claim_rank": min(ranks) if ranks else None, "mode": result["mode"], "warnings": result["warnings"]})
-    return {"passed": sum(row["pass"] for row in rows), "total": len(rows), "topic_top_n": defaults["topic_top_n"],
-            "claim_top_n": defaults["claim_top_n"], "rows": rows}
+    try:
+        contract = load_evaluation_contract(root, instance)
+    except EvaluationContractError as exc:
+        raise _evaluation_error(exc) from exc
+    return evaluate_normalized_cases(contract, contract["cases"], search, semantic=semantic, phase="project")
 
 
 def _git(repo: Path, *args: str) -> str:

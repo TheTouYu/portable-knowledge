@@ -2260,9 +2260,15 @@ def main(argv: list[str] | None = None) -> int:
             payload = dispatch_plan_command(root, args, instance)
         else: raise KnowledgeError(f"unknown command: {args.command}")
     except (KnowledgeError, RetrievalError, BundleError, ExperienceError, AuthorityRegistryError, OSError, sqlite3.Error) as exc:
-        error = {"code": getattr(exc, "code", "AUTHORITY_REFS_SCHEMA" if isinstance(exc, AuthorityRegistryError) else "KNOWLEDGE_ERROR"), "path": ".", "message": str(exc)}
+        error = {"code": getattr(exc, "code", "AUTHORITY_REFS_SCHEMA" if isinstance(exc, AuthorityRegistryError) else "KNOWLEDGE_ERROR"),
+                 "path": getattr(exc, "path", "."), "message": str(exc)}
         if isinstance(exc, RetrievalError):
             error.update(exc.details)
+        if isinstance(exc, ExperienceError):
+            error.update({key: value for key, value in {
+                "field": getattr(exc, "field", None), "case_id": getattr(exc, "case_id", None),
+                "runtime_version": _runtime_version(), "evaluator_contract_version": 1,
+            }.items() if value is not None})
         errors = exc.findings if isinstance(exc, (StagedValidationError, SemanticPlanError)) and exc.findings else [error]
         payload = {"ok": False, "command": args.command, "read_only": args.command in {"progressive-query", "query-context", "capture", "knowledge-check", "knowledge-search"},
                    "operation_authorized": False, "exit_code": 2 if isinstance(exc, ExperienceError) and exc.environment else 1, "errors": errors}

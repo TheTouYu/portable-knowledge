@@ -135,7 +135,24 @@ pkc knowledge-check --semantic
 
 The index and model+input-SHA-256 cache live below the configured `.local` projection. Missing keys, index/model/permission changes, timeout, 429, 5xx, or invalid responses produce an explicit lexical fallback during search/check. Index creation itself fails with exit code 2 when the provider is unavailable. JSON output never includes embeddings, cache entries, secrets, or full indexed Claim statements. Similarity is not evidence.
 
-Evaluation fixtures use schema version 1 with `defaults` and `cases`. Each case supplies a query, expected Topic IDs, expected Claim IDs, optional alternate search terms, and optional forbidden Claim IDs. Both snake_case Core names and the earlier camelCase fixture spelling are accepted.
+Evaluation fixtures use schema version 1 with `defaults` and `cases`. Each case supplies a query and may assert expected Topic IDs, expected Claim IDs, and forbidden Claim IDs; an omitted assertion dimension is not required. Optional alternate search terms augment rather than replace the query. Both snake_case Core names and the earlier camelCase fixture spelling are accepted; conflicting dual spellings fail with a field- and case-specific schema error.
+
+`knowledge-check`, semantic-plan delta, and staged full preflight use the same normalized deterministic evaluator, including permission, Topic@N/Claim@N, visibility filters, alternate terms, and refusal assertions. Cases may declare explicit delta scope independently from expected results:
+
+```json
+{
+  "id": "bounded-runtime",
+  "query": "runtime selection",
+  "expected_claim_ids": ["clm_example"],
+  "affected_by": {
+    "node_ids": [],
+    "topic_ids": ["topic-runtime"],
+    "claim_ids": []
+  }
+}
+```
+
+Legacy top-level case scope fields (`node_ids`, `topic_ids`, `claim_ids`) remain accepted. A case without scope metadata runs during delta conservatively because a staged Claim can change global lexical ranking. Explicitly scoped non-intersecting cases are reported as deferred to full preflight rather than silently treated as covered.
 
 ## 8. Maintain existing knowledge
 

@@ -464,6 +464,120 @@ class SemanticPlanContractTests(unittest.TestCase):
         self.assertEqual(denied["errors"][0]["code"], "PLAN_PROVENANCE_MISMATCH")
         self.assertEqual(self.formal_authority(), before)
 
+    def test_camel_case_evaluation_contract_is_shared_by_check_delta_and_finalize(self):
+        baseline_plan, _, _ = self.build_complete_plan()
+        baseline = self.cli("knowledge-plan", "finalize", baseline_plan)
+        self.cli("bundle-approve", baseline["bundle_id"], "--content-hash", baseline["content_hash"], "--apply")
+        self.cli("bundle-apply", baseline["bundle_id"], "--content-hash", baseline["content_hash"], "--apply")
+        self.cli("rebuild")
+        subprocess.run(["git", "add", "data/store", "domain/topics"], cwd=self.root, check=True)
+        subprocess.run(["git", "commit", "-qm", "governed evaluation baseline"], cwd=self.root, check=True)
+
+        fixture_path = self.root / "evaluation/cases-v1.json"
+        fixture_path.write_text(json.dumps({
+            "schemaVersion": 1,
+            "defaults": {"topicTopN": 3, "claimTopN": 5, "permission": "internal"},
+            "cases": [{
+                "id": "camel-schema",
+                "query": "Schema Contract",
+                "expectedTopicIds": ["topic-schema"],
+                "searchTerms": ["explicit versioned fields"],
+            }],
+        }), encoding="utf-8")
+        subprocess.run(["git", "add", "evaluation/cases-v1.json"], cwd=self.root, check=True)
+        subprocess.run(["git", "commit", "-qm", "camel case evaluation fixture"], cwd=self.root, check=True)
+        self.authority_before = self.formal_authority()
+        self.assertEqual(self.cli("knowledge-check")["status"], "PASS")
+
+        plan_id = self.init()["plan_id"]
+        claim = self.add_claim(plan_id, "schema", "Additional schema boundary",
+                               "Additional schema behavior remains deterministic.", ("documented_contract",))["claim_id"]
+        self.add_ref(plan_id, claim, "schema", "authority/schema-contract.md", "documented_contract", "documented_contract")
+        delta = self.cli("knowledge-plan", "check", plan_id, "--mode", "delta")
+        self.assertTrue(delta["can_finalize"])
+        self.assertEqual(delta["affected_case_ids"], ["camel-schema"])
+        artifact = json.loads((self.root / delta["artifact_path"]).read_text(encoding="utf-8"))
+        self.assertEqual(artifact["records"][0]["expected_topic_ids"], ["topic-schema"])
+        self.assertEqual(artifact["records"][0]["terms"], ["explicit versioned fields"])
+        finalized = self.cli("knowledge-plan", "finalize", plan_id)
+        self.assertTrue(finalized["summary"]["finalized"])
+        self.assertEqual(self.formal_authority(), self.authority_before)
+
+    def test_conflicting_evaluation_aliases_fail_with_structured_cli_error(self):
+        fixture_path = self.root / "evaluation/cases-v1.json"
+        fixture_path.write_text(json.dumps({
+            "schema_version": 1,
+            "schemaVersion": 2,
+            "cases": [],
+        }), encoding="utf-8")
+        plan_id = self.init()["plan_id"]
+        failed = self.cli("knowledge-plan", "check", plan_id, "--mode", "delta", expected=1)
+        error = failed["errors"][0]
+        self.assertEqual(error["code"], "PLAN_EVALUATION_SCHEMA")
+        self.assertEqual(error["path"], "evaluation/cases-v1.json")
+        self.assertIn("conflicting evaluation aliases", error["message"])
+        self.assertEqual(len(list((self.root / "data/knowledge/bundles").glob("bnd_*.json"))), 0)
+        self.assertEqual(self.formal_authority(), self.authority_before)
+
+    def test_alternate_terms_claim_and_forbidden_assertions_share_cli_semantics(self):
+        plan_id = self.init()["plan_id"]
+        expected = self.add_claim(plan_id, "schema", "Alternate vocabulary",
+                                  "Load bearing alternate token zephyrquartz identifies this contract.",
+                                  ("documented_contract",))["claim_id"]
+        forbidden = self.add_claim(plan_id, "runtime", "Tempting unrelated result",
+                                   "A different runtime statement must remain outside the bounded result.",
+                                   ("documented_contract",))["claim_id"]
+        self.add_ref(plan_id, expected, "schema", "authority/schema-contract.md", "documented_contract", "documented_contract")
+        self.add_ref(plan_id, forbidden, "runtime", "authority/runtime-contract.md", "documented_contract", "documented_contract")
+        fixture_path = self.root / "evaluation/cases-v1.json"
+        fixture_path.write_text(json.dumps({
+            "schemaVersion": 1,
+            "defaults": {"topicTopN": 3, "claimTopN": 5, "permission": "internal"},
+            "cases": [{
+                "id": "alternate-claim-refusal",
+                "query": "words absent from all claims",
+                "searchTerms": ["zephyrquartz"],
+                "expectedTopicIds": ["topic-schema"],
+                "expectedClaimIds": [expected],
+                "mustNotClaimIds": ["clm_not_returned_fixture"],
+            }],
+        }), encoding="utf-8")
+        delta = self.cli("knowledge-plan", "check", plan_id, "--mode", "delta")
+        record = json.loads((self.root / delta["artifact_path"]).read_text(encoding="utf-8"))["records"][0]
+        self.assertTrue(record["ok"])
+        self.assertIn(expected, record["returned_claim_ids"])
+        self.assertEqual(record["forbidden_claim_ids_encountered"], [])
+        finalized = self.cli("knowledge-plan", "finalize", plan_id)
+        full = json.loads((self.root / finalized["artifact_path"]).read_text(encoding="utf-8"))
+        full_record = full["records"]["evaluation_records"][0]
+        self.assertEqual(full_record["failed_assertions"], [])
+        self.assertEqual(full_record["returned_claim_ids"], record["returned_claim_ids"])
+        self.assertEqual(self.formal_authority(), self.authority_before)
+
+    def test_full_evaluation_failure_is_actionable_and_fail_closed(self):
+        plan_id, _, _ = self.build_complete_plan()
+        fixture_path = self.root / "evaluation/cases-v1.json"
+        # Finalize always evaluates the complete current fixture, even when a
+        # case was not present at delta time.
+        fixture_path.write_text(json.dumps({
+            "schema_version": 1,
+            "cases": [{
+                "id": "deliberate-regression",
+                "query": "Schema Contract",
+                "expected_claim_ids": ["clm_missing_fixture"],
+            }],
+        }), encoding="utf-8")
+        failed = self.cli("knowledge-plan", "finalize", plan_id, expected=1)
+        finding = next(item for item in failed["errors"] if item["code"] == "PLAN_FULL_EVALUATION_FAILED")
+        artifact_path = finding["artifact_path"]
+        artifact = json.loads((self.root / artifact_path).read_text(encoding="utf-8"))
+        record = artifact["records"]["evaluation_records"][0]
+        self.assertEqual(record["failed_assertions"], ["expected_claim_missing"])
+        self.assertIn("returned_claim_ids", record)
+        self.assertEqual(finding["evaluator_contract_version"], 1)
+        self.assertEqual(len(list((self.root / "data/knowledge/bundles").glob("bnd_*.json"))), 0)
+        self.assertEqual(self.formal_authority(), self.authority_before)
+
     def test_delta_affected_cases_compact_stdout_and_finalize_receipt_reuse(self):
         plan_id, _, delta = self.build_complete_plan()
         self.assertEqual(delta["affected_case_ids"], ["eval-schema-v1", "eval-runtime-v1", "eval-validation-v1"])

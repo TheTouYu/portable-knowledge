@@ -16,6 +16,8 @@ from typing import Any
 from .authority import (FACT_CLASSES, authority_refs_from_document, canonical_authority_document,
                         validate_authority_coverage, validate_authority_ref)
 from .bundle import build_bundle, canonical as bundle_bytes, digest as canonical_digest
+from .evaluation_contract import (EvaluationContractError, evaluate_normalized_cases,
+                                  load_evaluation_contract, select_delta_cases)
 from .instance import Instance
 
 CORE_PLAN_VERSION = "semantic-plan-v2"
@@ -512,47 +514,44 @@ def retire_authority_ref(root: Path, instance: Instance, args: argparse.Namespac
                     affected_claim_ids=retired.get("claim_ids", []), replayed=False)
 
 
+def _evaluation_contract(root: Path, instance: Instance) -> dict[str, Any]:
+    try:
+        return load_evaluation_contract(root, instance, required=False)
+    except EvaluationContractError as exc:
+        details = {"field": exc.field, "case_id": exc.case_id, "evaluator_contract_version": 1,
+                   "runtime_version": _runtime_version()}
+        _fail("PLAN_EVALUATION_SCHEMA", str(exc), path=exc.path, **{key: value for key, value in details.items() if value is not None})
+
+
 def _evaluation_cases(root: Path, instance: Instance) -> list[dict[str, Any]]:
-    rel = instance.raw.get("evaluation", {}).get("cases_path")
-    if not rel:
-        return []
-    value = json.loads((root / rel).read_text(encoding="utf-8"))
-    if value.get("schema_version") != 1 or not isinstance(value.get("cases"), list):
-        _fail("PLAN_EVALUATION_SCHEMA", "evaluation cases must use schema_version 1", path=rel)
-    return value["cases"]
+    return _evaluation_contract(root, instance)["cases"]
 
 
-def _affected_cases(root: Path, instance: Instance, plan: dict[str, Any]) -> list[dict[str, Any]]:
+def _affected_cases(root: Path, instance: Instance, plan: dict[str, Any]) -> tuple[dict[str, Any], list[dict[str, Any]], list[dict[str, str]]]:
+    contract = _evaluation_contract(root, instance)
     touched_topics = {claim["topic_id"] for claim in plan.get("claims", {}).values()} | set(plan.get("affected_topics", []))
     touched_nodes = set(plan.get("affected_nodes", []))
     touched_claims = set(plan.get("existing_claim_changes", []))
-    return [case for case in _evaluation_cases(root, instance)
-            if touched_topics.intersection(case.get("topic_ids", []))
-            or touched_nodes.intersection(case.get("node_ids", []))
-            or touched_claims.intersection(case.get("claim_ids", []))]
+    selected, decisions = select_delta_cases(contract, node_ids=touched_nodes, topic_ids=touched_topics, claim_ids=touched_claims)
+    return contract, selected, decisions
 
 
-def _run_cases(staging: Path, cases: list[dict[str, Any]]) -> list[dict[str, Any]]:
+def _run_cases(staging: Path, instance: Instance, contract: dict[str, Any], cases: list[dict[str, Any]], phase: str) -> list[dict[str, Any]]:
     core = _core()
-    records = []
-    for case in cases:
-        try:
-            result = core.query_command(staging, case["query"], int(case.get("level", 2)), int(case.get("limit", 5)), 0, "internal")
-            returned_topics = {item.get("topic_id", item.get("id")) for item in result.get("results", [])}
-            expected = set(case.get("expected_topic_ids", case.get("topic_ids", [])))
-            passed = bool(returned_topics.intersection(expected))
-            records.append({"case_id": case["id"], "ok": passed, "returned_topic_ids": sorted(returned_topics), "expected_topic_ids": sorted(expected)})
-        except Exception as exc:  # evaluation records the deterministic failure; caller remains fail-closed
-            records.append({"case_id": case.get("id", "unknown"), "ok": False, "error": str(exc)})
-    return records
+    evaluation = evaluate_normalized_cases(
+        contract, cases,
+        lambda query, terms, permission, limit, semantic: core.knowledge_search_command(
+            staging, instance, query, terms, permission, limit, semantic),
+        semantic=False, phase=phase)
+    return evaluation["rows"]
 
 
-def _validation_records(staging: Path, instance: Instance, cases: list[dict[str, Any]]) -> dict[str, Any]:
+def _validation_records(staging: Path, instance: Instance, contract: dict[str, Any], cases: list[dict[str, Any]], phase: str) -> dict[str, Any]:
     core = _core()
     validation = core.validate(staging)
     projection = core.rebuild(staging)
     tree = core.tree_command(staging) if validation["ok"] and projection["ok"] else {"ok": False, "errors": []}
-    case_records = _run_cases(staging, cases) if validation["ok"] and projection["ok"] else []
+    case_records = _run_cases(staging, instance, contract, cases, phase) if validation["ok"] and projection["ok"] else []
     refs = []
     refs_path = instance.authority.get("authority_refs")
     if refs_path and (staging / refs_path).is_file():
@@ -594,19 +593,22 @@ def check_delta(root: Path, instance: Instance, args: argparse.Namespace) -> dic
                 findings.append({"code": "PLAN_AUTHORITY_STALE", "path": ref["path"], "message": "committed Authority hash changed"})
             elif not (root / ref["path"]).is_file() or (root / ref["path"]).read_bytes() != committed:
                 findings.append({"code": "PLAN_AUTHORITY_WORKTREE_DIRTY", "path": ref["path"], "message": "Authority has uncommitted content"})
-        affected = _affected_cases(staging, instance, plan)
+        contract, affected, selection = _affected_cases(staging, instance, plan)
         if not findings:
             projection = _core().rebuild(staging)
             if not projection["ok"]:
                 findings.extend(projection.get("errors", []))
-        records = _run_cases(staging, affected) if not findings else []
+        records = _run_cases(staging, instance, contract, affected, "delta") if not findings else []
         failed_case_ids = [item["case_id"] for item in records if not item["ok"]]
         findings.extend({"code": "PLAN_EVALUATION_FAILED", "path": "evaluation", "message": f"affected evaluation failed: {case_id}", "case_id": case_id}
                         for case_id in failed_case_ids)
         digest = _content_digest(plan)
         artifact = _artifact_rel(instance, digest, "delta")
-        full = {"schema_version": 1, "mode": "delta", "plan_id": plan["plan_id"], "plan_digest": digest,
-                "affected_case_ids": [item["id"] for item in affected], "records": records, "findings": findings}
+        full = {"schema_version": 1, "evaluator_contract_version": contract["contract_version"], "mode": "delta",
+                "plan_id": plan["plan_id"], "plan_digest": digest,
+                "affected_case_ids": [item["id"] for item in affected],
+                "deferred_case_ids": [item["case_id"] for item in selection if item["decision"] == "deferred"],
+                "case_selection": selection, "records": records, "findings": findings}
         _write_artifact(root, artifact, full)
         plan["counters"]["delta_checks"] += 1
         delta = {"ok": not findings, "mode": "delta", "delta_digest": digest, "touched_operations": len(plan["operations"]),
@@ -702,12 +704,24 @@ def finalize(root: Path, instance: Instance, args: argparse.Namespace) -> dict[s
     bundle = _core().preflight_bundle(root, bundle)
     temporary, staging = _with_overlay(root, plan)
     try:
-        records = _validation_records(staging, instance, _evaluation_cases(staging, instance))
+        contract = _evaluation_contract(staging, instance)
+        records = _validation_records(staging, instance, contract, contract["cases"], "full_preflight")
+        records["case_selection"] = [{"case_id": case["id"], "decision": "selected", "reason": "full_preflight_all_cases"}
+                                     for case in contract["cases"]]
     finally:
         temporary.cleanup()
     if not records["ok"]:
+        failed_artifact = _artifact_rel(instance, content_digest, "full-preflight-failed")
+        _write_artifact(root, failed_artifact, {
+            "schema_version": 1, "evaluator_contract_version": contract["contract_version"],
+            "plan_id": plan["plan_id"], "plan_digest": content_digest, "ok": False,
+            "records": records, "runtime_version": _runtime_version(), "cost_counters": _counters(plan),
+        })
         findings = records["validation"].get("errors", []) + records["projection"].get("errors", [])
-        findings += [{"code": "PLAN_FULL_EVALUATION_FAILED", "path": "evaluation", "message": case_id, "case_id": case_id} for case_id in records["failed_case_ids"]]
+        findings += [{"code": "PLAN_FULL_EVALUATION_FAILED", "path": "evaluation", "message": case_id,
+                      "case_id": case_id, "artifact_path": failed_artifact,
+                      "evaluator_contract_version": contract["contract_version"], "runtime_version": _runtime_version()}
+                     for case_id in records["failed_case_ids"]]
         changed_paths = set(plan.get("writes", {}))
         for ref in records["authority_records"]:
             status = ref.get("effective_status", ref.get("status"))
@@ -771,7 +785,8 @@ def record_post_apply_full_check(root: Path, instance: Instance, bundle: dict[st
     path, plan = _load(root, instance, bundle["actions"][0]["provenance"]["plan_id"])
     if plan.get("post_apply_receipt"):
         return plan["post_apply_receipt"]
-    records = _validation_records(root, instance, _evaluation_cases(root, instance))
+    contract = _evaluation_contract(root, instance)
+    records = _validation_records(root, instance, contract, contract["cases"], "post_apply")
     if not records["ok"]:
         _fail("PLAN_POST_APPLY_FULL_FAILED", "post-apply full validation failed")
     plan["counters"]["full_checks"] += 1; plan["counters"]["post_apply_full_checks"] += 1

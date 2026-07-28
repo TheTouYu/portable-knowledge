@@ -162,7 +162,7 @@ pkc knowledge-plan finalize PLAN_ID
 pkc knowledge-plan inspect PLAN_ID
 ```
 
-Finalize performs full staged preflight and creates one immutable candidate Bundle only if all checks pass.
+Finalize performs full staged preflight and creates one immutable candidate Bundle only if all checks pass. Delta and full preflight share the configured evaluation normalizer and evaluator. Delta runs unscoped cases conservatively and may defer only explicitly scoped, non-intersecting cases; its JSON artifact records selected/deferred cases and reasons. Full preflight runs every case. Evaluation failures expose a bounded artifact path containing normalized inputs, ranked Topic/Claim results, limits, permission, forbidden hits, and failed assertion categories.
 
 ## Before approval
 
