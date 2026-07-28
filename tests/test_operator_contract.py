@@ -48,9 +48,9 @@ class OperatorContractTests(unittest.TestCase):
         self.assertNotEqual(operator.plan_hash(plan), first)
 
     def test_initial_assets_are_empty_authority_and_locked_remote_commit(self):
-        wheel = Path(self.temp.name) / "portable_knowledge-0.2.0rc4-py3-none-any.whl"
+        wheel = Path(self.temp.name) / "portable_knowledge-0.2.0rc5-py3-none-any.whl"
         wheel.write_bytes(b"wheel")
-        writes, links = operator.initial_assets(self.root, "existing-project", "a" * 40, operator.DEFAULT_REMOTE, wheel, "b" * 64, "0.2.0rc4")
+        writes, links = operator.initial_assets(self.root, "existing-project", "a" * 40, operator.DEFAULT_REMOTE, wheel, "b" * 64, "0.2.0rc5")
         by_path = {item["path"]: item["content"] for item in writes}
         registry = json.loads(by_path["data/knowledge/registry.json"])
         self.assertEqual(registry["nodes"], [])
@@ -65,7 +65,7 @@ class OperatorContractTests(unittest.TestCase):
 
     def test_plan_adopt_preserves_existing_instance_and_authority(self):
         config = {"schema_version": 1, "instance": {"id": "existing-project"},
-                  "pkc": {"version": "0.2.0rc4"},
+                  "pkc": {"version": "0.2.0rc5"},
                   "authority": {"registry": "data/knowledge/registry.json"}}
         (self.root / "project-intelligence.json").write_text(json.dumps(config), encoding="utf-8")
         authority = self.root / "data/knowledge/registry.json"
@@ -73,12 +73,12 @@ class OperatorContractTests(unittest.TestCase):
         authority.write_text('{"schema_version": 1, "nodes": [{"id": "real"}]}\n', encoding="utf-8")
         subprocess.run(["git", "add", "."], cwd=self.root, check=True)
         subprocess.run(["git", "commit", "-q", "-m", "existing PKC instance"], cwd=self.root, check=True)
-        wheel = Path(self.temp.name) / "portable_knowledge-0.2.0rc4-py3-none-any.whl"
+        wheel = Path(self.temp.name) / "portable_knowledge-0.2.0rc5-py3-none-any.whl"
         wheel.write_bytes(b"wheel")
         args = type("Args", (), {"target": self.root, "output": Path(self.temp.name) / "adopt.json",
                                   "remote": operator.DEFAULT_REMOTE, "ref": "main"})()
         with mock.patch.object(operator, "resolve_commit", return_value="a" * 40), \
-             mock.patch.object(operator, "ensure_wheel", return_value=(wheel, "b" * 64, "0.2.0rc4")):
+             mock.patch.object(operator, "ensure_wheel", return_value=(wheel, "b" * 64, "0.2.0rc5")):
             result = operator.command_plan_adopt(args)
         plan = json.loads(args.output.read_text(encoding="utf-8"))
         self.assertEqual(result["plan_hash"], plan["plan_hash"])
@@ -135,6 +135,13 @@ class OperatorContractTests(unittest.TestCase):
         self.assertIn("model may never review its own proposal", text)
         self.assertIn("Never use editable installs", text)
         self.assertIn("Never delete tracked knowledge", text)
+        self.assertIn("refresh-authority-ref PLAN_ID --authority-ref-id ID --reason REASON", text)
+        self.assertIn("does not attach a new Claim", text)
+        self.assertIn("use `add-authority-ref` with the Claim ID returned by the plan", text)
+        self.assertIn("valid for that purpose-scoped Ref to use a source path already used by another Ref", text)
+        self.assertIn("retire-authority-ref PLAN_ID --authority-ref-id ID", text)
+        self.assertIn("Execute mutations of one plan serially", text)
+        self.assertIn("may not contain PKC's maintainer-only `docs/SEMANTIC-CHANGES.md`", text)
 
 
 if __name__ == "__main__":

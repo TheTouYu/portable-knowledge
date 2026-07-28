@@ -117,7 +117,7 @@ class BundleContractTests(unittest.TestCase):
         self.assertFalse(plan['cross_phase_atomic'])
 
     def test_controlled_bundle_classes_are_independent(self):
-        for kind in ('source_evidence','claim_create','claim_revise','permission_expansion','lifecycle_change','node_boundary_change'):
+        for kind in ('source_evidence','claim_create','claim_revise','authority_maintenance','permission_expansion','lifecycle_change','node_boundary_change'):
             manifest=dict(self.manifest); manifest['bundle_type']=kind
             self.assertEqual(build_bundle(self.root,manifest,IDENTITIES)['bundle_type'],kind)
 

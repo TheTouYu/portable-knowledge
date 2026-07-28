@@ -63,6 +63,7 @@ EVENT_TYPES = {
     "proposals": {
         "proposal_created", "proposal_resolved", "claim_revised", "claim_superseded",
         "claims_merged", "claim_confirmed", "claim_permission_changed", "topic_moved",
+        "authority_ref_refreshed", "authority_ref_retired",
     },
 }
 LIFECYCLES = {"draft", "active", "superseded", "deprecated", "rejected"}
@@ -1956,7 +1957,8 @@ def capabilities_command() -> dict[str, Any]:
                              "authority_ref": True, "lifecycle": True, "supersede": True,
                              "migration_plan": True, "bundle_orchestration_plan": True,
                              "bundle_migration_plan": True, "knowledge_structure_refactor": True,
-                             "claim_revision_plan": True, "routes": False, "evaluation_cases": True,
+                             "claim_revision_plan": True, "authority_ref_refresh_plan": True,
+                             "authority_ref_retirement_plan": True, "routes": False, "evaluation_cases": True,
                              "knowledge_health": True, "hybrid_retrieval": True, "vector_cache": True,
                              "upstream_freshness": True, "manifest_compatibility_mode": True}, "errors": []}
 
@@ -2158,6 +2160,14 @@ def parser_build() -> argparse.ArgumentParser:
     plan_ref.add_argument("--role", required=True); plan_ref.add_argument("--change-policy", required=True)
     plan_ref.add_argument("--fact-class", action="append", default=[])
     plan_ref.add_argument("--diagnostic-hash")
+    plan_refresh_ref = plan_command("refresh-authority-ref")
+    plan_refresh_ref.add_argument("plan_id"); plan_refresh_ref.add_argument("--authority-ref-id", required=True)
+    plan_refresh_ref.add_argument("--reason", required=True)
+    plan_retire_ref = plan_command("retire-authority-ref")
+    plan_retire_ref.add_argument("plan_id"); plan_retire_ref.add_argument("--authority-ref-id", required=True)
+    replacement = plan_retire_ref.add_mutually_exclusive_group()
+    replacement.add_argument("--replacement-authority-ref-id"); replacement.add_argument("--replacement-claim-id")
+    plan_retire_ref.add_argument("--reason", required=True)
     plan_check = plan_command("check"); plan_check.add_argument("plan_id"); plan_check.add_argument("--mode", choices=("delta",), required=True)
     plan_finalize = plan_command("finalize"); plan_finalize.add_argument("plan_id")
     plan_inspect = plan_command("inspect"); plan_inspect.add_argument("plan_id")

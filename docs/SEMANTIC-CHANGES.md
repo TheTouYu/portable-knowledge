@@ -133,6 +133,27 @@ The path must exist in the committed baseline. Use the Claim ID returned by `add
 
 The Authority Reference registry's canonical array key is `refs`. The legacy `authority_refs` key is accepted as an input alias and normalized to `refs` on the next governed write. Registries containing both keys with different values fail closed as `AUTHORITY_REFS_SCHEMA`.
 
+Refresh an existing change-sensitive Authority Reference after its governed source changes:
+
+```bash
+pkc knowledge-plan refresh-authority-ref PLAN_ID \
+  --authority-ref-id AUTHORITY_REF_ID \
+  --reason "The committed implementation changed and the linked Claims were reviewed"
+```
+
+Refresh preserves the Ref ID, path, locator, Claim links, role, fact classes, baseline state, and change policy. The path must exist in the plan's committed baseline and the worktree bytes must exactly match that baseline. The operation fails on a no-op. Its immutable audit event and Bundle diff record the old and new approved hashes and affected Claim IDs. A refreshed Ref participates in the same atomic Bundle as Claim additions/revisions and other typed operations.
+
+Retire a Ref that no longer applies:
+
+```bash
+pkc knowledge-plan retire-authority-ref PLAN_ID \
+  --authority-ref-id OLD_AUTHORITY_REF_ID \
+  --replacement-authority-ref-id NEW_AUTHORITY_REF_ID \
+  --reason "The new contract is now the canonical Authority"
+```
+
+Use `--replacement-claim-id CLAIM_ID` instead when a replacement Claim, rather than another Ref, owns the new boundary. Exactly one replacement kind may be supplied. PKC requires an explicit reason and an existing, distinct replacement. The active registry removes the retired Ref, while an immutable `authority_ref_retired` event retains its complete before-image, affected Claim IDs, reason, and replacement link. Delta validation still enforces fact-class coverage after retirement.
+
 Check and finalize:
 
 ```bash
@@ -208,7 +229,7 @@ pkc knowledge-plan abandon PLAN_ID --reason "Explain why this plan will not cont
 
 ## Provenance and no-op checks
 
-A valid production Bundle records Core-generated provenance for each authority-changing action (`add_claim`, `add_authority_ref`, `revise_claim`, or `move_topic`). Bundle type is derived from the operation set: `claim_create`, `claim_revise`, `knowledge_structure_change`, or mixed `knowledge_refactor`. Final review should confirm:
+A valid production Bundle records Core-generated provenance for each authority-changing action (`add_claim`, `add_authority_ref`, `refresh_authority_ref`, `retire_authority_ref`, `revise_claim`, or `move_topic`). Bundle type is derived from the operation set: `claim_create`, `claim_revise`, `knowledge_structure_change`, or mixed `knowledge_refactor`. Authority-only maintenance uses the controlled `authority_maintenance` Bundle type; mixed plans retain the Claim/structure-derived envelope while typed semantic diff and action provenance identify refresh/retirement precisely. Final review should confirm:
 
 - provenance coverage is complete;
 - no unexpected action or changed file exists;

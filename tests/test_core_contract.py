@@ -16,7 +16,7 @@ class CoreContractTests(unittest.TestCase):
             root = Path(directory)
             config = {
                 "schema_version": 1, "instance": {"id": "x", "name": "X"},
-                "pkc": {"version": "0.2.0rc4", "projection_path": ".local/pkc"},
+                "pkc": {"version": "0.2.0rc5", "projection_path": ".local/pkc"},
                 "authority": {"registry": "data/registry.json", "actors": "data/actors.json", "store": "data", "knowledge": "knowledge"},
                 "identities": {key: {"id": key} for key in ("principal", "executor", "workspace", "writer")},
                 "compatibility": {"v1_actor_map": {}},

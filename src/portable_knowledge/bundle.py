@@ -7,7 +7,7 @@ import json
 from pathlib import Path, PurePosixPath
 from typing import Any, Callable
 
-BUNDLE_TYPES = {"source_evidence", "claim_create", "claim_revise", "knowledge_structure_change", "knowledge_refactor", "permission_expansion", "lifecycle_change", "node_boundary_change", "memory_change"}
+BUNDLE_TYPES = {"source_evidence", "claim_create", "claim_revise", "authority_maintenance", "knowledge_structure_change", "knowledge_refactor", "permission_expansion", "lifecycle_change", "node_boundary_change", "memory_change"}
 RISK_LEVELS = {"low", "medium", "high"}
 LIFECYCLE_EVENTS = {"bundle_failed", "bundle_abandoned", "bundle_superseded", "bundle_rolled_back"}
 

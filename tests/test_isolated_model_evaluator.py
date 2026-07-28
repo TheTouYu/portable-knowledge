@@ -86,7 +86,25 @@ class IsolatedModelEvaluatorTests(unittest.TestCase):
             self.assertEqual(command[command.index("--thinking") + 1], "medium")
             self.assertIn("--no-context-files", command)
             self.assertIn("--no-skills", command)
+            prompt = (output / "task.md").read_text(encoding="utf-8")
+            self.assertIn("Reversible plans and candidate artifacts are allowed", prompt)
+            self.assertNotIn("This evaluation is read-only", prompt)
             self.assertEqual(json.loads((output / "report.json").read_text(encoding="utf-8"))["ok"], True)
+
+    def test_assert_no_changes_adds_explicit_read_only_boundary(self):
+        with tempfile.TemporaryDirectory() as tmp, tempfile.TemporaryDirectory() as output_tmp:
+            root = Path(tmp)
+            output = Path(output_tmp)
+            trace = json.dumps({"type": "message_end", "message": {
+                "role": "assistant", "content": [{"type": "text", "text": "done"}], "usage": {}}}) + "\n"
+            completed = subprocess.CompletedProcess([], 0, stdout=trace, stderr="")
+            argv = ["evaluate.py", "--root", str(root), "--task", "verify",
+                    "--assert-no-changes", "--output-dir", str(output)]
+            with mock.patch("sys.argv", argv), mock.patch.object(
+                    evaluator.subprocess, "run", return_value=completed):
+                self.assertEqual(evaluator.main(), 0)
+            prompt = (output / "task.md").read_text(encoding="utf-8")
+            self.assertIn("This evaluation is read-only: do not change the workspace", prompt)
 
 
 if __name__ == "__main__":

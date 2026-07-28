@@ -143,6 +143,8 @@ Use the operation that matches the semantic intent:
 
 - new knowledge: `knowledge-plan add-claim`;
 - correct or clarify an existing proposition: `knowledge-plan revise-claim`;
-- change an existing Topic's ownership/path while preserving IDs and history: `knowledge-plan move-topic`.
+- change an existing Topic's ownership/path while preserving IDs and history: `knowledge-plan move-topic`;
+- re-approve an existing Ref against an exactly committed changed source while preserving its identity and links: `knowledge-plan refresh-authority-ref`;
+- remove an inapplicable Ref from the active registry while preserving a reasoned, replacement-linked audit event: `knowledge-plan retire-authority-ref`.
 
 These operations may share one plan and one immutable Bundle. Run one delta check after all operations, finalize for full staged preflight, then stop for exact-hash review. Multi-Bundle orchestration (`bundle_migration_plan`, historically the ambiguous `migration_plan`) is non-atomic across phases and is not a substitute for a structure-refactor Bundle.

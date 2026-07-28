@@ -97,7 +97,8 @@ class SemanticPlanContractTests(unittest.TestCase):
         self.assertEqual(payload["runtime_version"], core._runtime_version())
         for name in ("semantic_plan", "provenance", "delta_validation", "authority_ref", "lifecycle", "supersede",
                      "migration_plan", "bundle_orchestration_plan", "bundle_migration_plan",
-                     "knowledge_structure_refactor", "claim_revision_plan"):
+                     "knowledge_structure_refactor", "claim_revision_plan", "authority_ref_refresh_plan",
+                     "authority_ref_retirement_plan"):
             self.assertTrue(payload["capabilities"][name])
         from portable_knowledge import __version__
         self.assertEqual(__version__, payload["runtime_version"])
@@ -585,6 +586,133 @@ class SemanticPlanContractTests(unittest.TestCase):
         rolled = self.cli("bundle-rollback", finalized["bundle_id"], "--apply")
         self.assertTrue(rolled["ok"])
         self.assertEqual(self.formal_authority(), before)
+
+    def test_refresh_authority_ref_is_governed_audited_and_unblocks_stale_preflight(self):
+        initial = self.init()["plan_id"]
+        added = self.add_claim(initial, "runtime", "Refreshable runtime", "Runtime behavior follows the committed contract.",
+                               ("runtime_behavior",))
+        original = self.add_ref(initial, added["claim_id"], "runtime", "authority/runtime-contract.md",
+                                "current_implementation", "runtime_behavior")
+        self.cli("knowledge-plan", "check", initial, "--mode", "delta")
+        first = self.cli("knowledge-plan", "finalize", initial)
+        self.cli("bundle-approve", first["bundle_id"], "--content-hash", first["content_hash"], "--apply")
+        self.cli("bundle-apply", first["bundle_id"], "--content-hash", first["content_hash"], "--apply")
+        subprocess.run(["git", "add", "data/store", "domain/topics/runtime.md"], cwd=self.root, check=True)
+        subprocess.run(["git", "commit", "-qm", "governed runtime baseline"], cwd=self.root, check=True)
+
+        authority = self.root / "authority/runtime-contract.md"
+        authority.write_text(authority.read_text(encoding="utf-8") + "\nRefreshed behavior.\n", encoding="utf-8")
+        subprocess.run(["git", "add", "authority/runtime-contract.md"], cwd=self.root, check=True)
+        subprocess.run(["git", "commit", "-qm", "change runtime authority"], cwd=self.root, check=True)
+        before = self.formal_authority()
+
+        plan_id = self.cli("knowledge-plan", "init", "--intent", "Refresh changed runtime Authority", "--risk", "medium")["plan_id"]
+        refreshed = self.cli("knowledge-plan", "refresh-authority-ref", plan_id,
+                             "--authority-ref-id", original["authority_ref_id"],
+                             "--reason", "Committed implementation changed and was reviewed.")
+        self.assertEqual(refreshed["authority_ref_id"], original["authority_ref_id"])
+        self.assertNotEqual(refreshed["old_approved_hash"], refreshed["new_approved_hash"])
+        self.assertEqual(refreshed["affected_claim_ids"], [added["claim_id"]])
+        replay = self.cli("knowledge-plan", "refresh-authority-ref", plan_id,
+                          "--authority-ref-id", original["authority_ref_id"],
+                          "--reason", "Committed implementation changed and was reviewed.")
+        self.assertTrue(replay["replayed"])
+        self.assertEqual(self.formal_authority(), before)
+        self.assertTrue(self.cli("knowledge-plan", "check", plan_id, "--mode", "delta")["can_finalize"])
+        finalized = self.cli("knowledge-plan", "finalize", plan_id)
+        bundle = json.loads((self.root / "data/knowledge/bundles" / f"{finalized['bundle_id']}.json").read_text())
+        refresh_diff = bundle["semantic_diff"]["authority_refs_refreshed"]
+        self.assertEqual(refresh_diff, [{"authority_ref_id": original["authority_ref_id"],
+                                         "old_hash": refreshed["old_approved_hash"],
+                                         "new_hash": refreshed["new_approved_hash"],
+                                         "affected_claim_ids": [added["claim_id"]]}])
+        self.cli("bundle-approve", finalized["bundle_id"], "--content-hash", finalized["content_hash"], "--apply")
+        self.cli("bundle-apply", finalized["bundle_id"], "--content-hash", finalized["content_hash"], "--apply")
+        refs = json.loads((self.root / "data/store/authority-refs.json").read_text())["refs"]
+        current = next(ref for ref in refs if ref["id"] == original["authority_ref_id"])
+        self.assertEqual(current["approved_hash"], refreshed["new_approved_hash"])
+        events = [json.loads(line) for line in (self.root / "data/store/proposals/2026-07-owner-channel.jsonl").read_text().splitlines() if line]
+        event = next(item for item in events if item["event_type"] == "authority_ref_refreshed")
+        self.assertEqual((event["old_approved_hash"], event["new_approved_hash"]),
+                         (refreshed["old_approved_hash"], refreshed["new_approved_hash"]))
+
+    def test_refresh_authority_ref_rejects_missing_noop_and_dirty_sources(self):
+        missing_plan = self.init()["plan_id"]
+        missing = self.cli("knowledge-plan", "refresh-authority-ref", missing_plan,
+                           "--authority-ref-id", "aref_missing", "--reason", "Review missing Ref.", expected=1)
+        self.assertEqual(missing["errors"][0]["code"], "PLAN_AUTHORITY_REF_MISSING")
+
+        initial = self.init()["plan_id"]
+        added = self.add_claim(initial, "runtime", "Refresh guards", "Runtime guards use committed Authority.",
+                               ("runtime_behavior",))
+        original = self.add_ref(initial, added["claim_id"], "runtime-guards", "authority/runtime-contract.md",
+                                "current_implementation", "runtime_behavior")
+        self.cli("knowledge-plan", "check", initial, "--mode", "delta")
+        first = self.cli("knowledge-plan", "finalize", initial)
+        self.cli("bundle-approve", first["bundle_id"], "--content-hash", first["content_hash"], "--apply")
+        self.cli("bundle-apply", first["bundle_id"], "--content-hash", first["content_hash"], "--apply")
+        subprocess.run(["git", "add", "data/store", "domain/topics/runtime.md"], cwd=self.root, check=True)
+        subprocess.run(["git", "commit", "-qm", "refresh guard baseline"], cwd=self.root, check=True)
+
+        noop_plan = self.cli("knowledge-plan", "init", "--intent", "Reject Authority no-op", "--risk", "low")["plan_id"]
+        noop = self.cli("knowledge-plan", "refresh-authority-ref", noop_plan,
+                        "--authority-ref-id", original["authority_ref_id"], "--reason", "No source change.", expected=1)
+        self.assertEqual(noop["errors"][0]["code"], "PLAN_STRUCTURE_NOOP")
+
+        authority = self.root / "authority/runtime-contract.md"
+        authority.write_text(authority.read_text(encoding="utf-8") + "\nCommitted change.\n", encoding="utf-8")
+        subprocess.run(["git", "add", "authority/runtime-contract.md"], cwd=self.root, check=True)
+        subprocess.run(["git", "commit", "-qm", "change guarded authority"], cwd=self.root, check=True)
+        dirty_plan = self.cli("knowledge-plan", "init", "--intent", "Reject dirty Authority refresh", "--risk", "medium")["plan_id"]
+        authority.write_text(authority.read_text(encoding="utf-8") + "dirty\n", encoding="utf-8")
+        dirty = self.cli("knowledge-plan", "refresh-authority-ref", dirty_plan,
+                         "--authority-ref-id", original["authority_ref_id"], "--reason", "Review changed source.", expected=1)
+        self.assertEqual(dirty["errors"][0]["code"], "PLAN_AUTHORITY_WORKTREE_DIRTY")
+
+    def test_retire_authority_ref_requires_reason_and_replacement_and_preserves_audit(self):
+        initial = self.init()["plan_id"]
+        added = self.add_claim(initial, "schema", "Retirable schema authority", "Two contracts support this schema surface.",
+                               ("documented_contract",))
+        retiring = self.add_ref(initial, added["claim_id"], "schema-old", "authority/schema-contract.md",
+                                "documented_contract", "documented_contract")
+        replacement = self.add_ref(initial, added["claim_id"], "schema-new", "authority/validation-contract.md",
+                                   "documented_contract", "documented_contract")
+        self.cli("knowledge-plan", "check", initial, "--mode", "delta")
+        first = self.cli("knowledge-plan", "finalize", initial)
+        self.cli("bundle-approve", first["bundle_id"], "--content-hash", first["content_hash"], "--apply")
+        self.cli("bundle-apply", first["bundle_id"], "--content-hash", first["content_hash"], "--apply")
+        subprocess.run(["git", "add", "data/store", "domain/topics/schema.md"], cwd=self.root, check=True)
+        subprocess.run(["git", "commit", "-qm", "two Authority refs"], cwd=self.root, check=True)
+        before = self.formal_authority()
+
+        plan_id = self.cli("knowledge-plan", "init", "--intent", "Retire superseded Authority", "--risk", "medium")["plan_id"]
+        denied = self.cli("knowledge-plan", "retire-authority-ref", plan_id,
+                          "--authority-ref-id", retiring["authority_ref_id"], "--reason", "Superseded.", expected=1)
+        self.assertEqual(denied["errors"][0]["code"], "PLAN_AUTHORITY_REPLACEMENT_REQUIRED")
+        retired = self.cli("knowledge-plan", "retire-authority-ref", plan_id,
+                           "--authority-ref-id", retiring["authority_ref_id"],
+                           "--replacement-authority-ref-id", replacement["authority_ref_id"],
+                           "--reason", "The validation contract is now the canonical source.")
+        self.assertEqual(retired["affected_claim_ids"], [added["claim_id"]])
+        replay = self.cli("knowledge-plan", "retire-authority-ref", plan_id,
+                          "--authority-ref-id", retiring["authority_ref_id"],
+                          "--replacement-authority-ref-id", replacement["authority_ref_id"],
+                          "--reason", "The validation contract is now the canonical source.")
+        self.assertTrue(replay["replayed"])
+        self.assertEqual(self.formal_authority(), before)
+        self.cli("knowledge-plan", "check", plan_id, "--mode", "delta")
+        finalized = self.cli("knowledge-plan", "finalize", plan_id)
+        bundle = json.loads((self.root / "data/knowledge/bundles" / f"{finalized['bundle_id']}.json").read_text())
+        self.assertEqual(bundle["bundle_type"], "authority_maintenance")
+        self.assertEqual(bundle["semantic_diff"]["authority_refs_retired"][0]["replacement_authority_ref_id"],
+                         replacement["authority_ref_id"])
+        self.cli("bundle-approve", finalized["bundle_id"], "--content-hash", finalized["content_hash"], "--apply")
+        self.cli("bundle-apply", finalized["bundle_id"], "--content-hash", finalized["content_hash"], "--apply")
+        refs = json.loads((self.root / "data/store/authority-refs.json").read_text())["refs"]
+        self.assertNotIn(retiring["authority_ref_id"], {ref["id"] for ref in refs})
+        events = [json.loads(line) for line in (self.root / "data/store/proposals/2026-07-owner-channel.jsonl").read_text().splitlines() if line]
+        event = next(item for item in events if item["event_type"] == "authority_ref_retired")
+        self.assertEqual(event["replacement_authority_ref_id"], replacement["authority_ref_id"])
 
     def test_low_level_manifest_requires_explicit_compatibility_mode(self):
         manifest = {"bundle_type": "claim_create", "intent": "Low-level compatibility test", "semantic_diff": {"before": "same", "after": "same"},

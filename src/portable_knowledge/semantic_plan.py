@@ -202,7 +202,8 @@ def init_plan(root: Path, instance: Instance, args: argparse.Namespace) -> dict[
         return _summary(existing, "init", artifact_path=_local_base(instance).joinpath(path.name).as_posix())
     plan = {"schema_version": 2, "plan_id": plan_id, "plan_digest": plan_digest, **identity, "state": "open",
             "operations": [], "writes": {}, "claims": {}, "existing_claim_changes": {}, "structure_changes": [],
-            "authority_refs": [], "affected_topics": [], "affected_nodes": [], "path_operations": {}, "delta": None,
+            "authority_refs": [], "authority_ref_refreshes": [], "authority_ref_retirements": [],
+            "affected_topics": [], "affected_nodes": [], "path_operations": {}, "delta": None,
             "finalized_bundle": None, "full_preflight_receipt": None, "post_apply_receipt": None,
             "budgets": dict(DEFAULT_BUDGETS), "counters": {key: 0 for key in COUNTER_KEYS}}
     _save(path, plan)
@@ -365,6 +366,152 @@ def add_authority_ref(root: Path, instance: Instance, args: argparse.Namespace) 
                     approved_hash=approved_hash, diagnostic_hash_match=args.diagnostic_hash in {None, approved_hash}, replayed=False)
 
 
+def _authority_registry_overlay(root: Path, instance: Instance, plan: dict[str, Any]) -> tuple[str, dict[str, Any]]:
+    refs_rel = instance.authority.get("authority_refs")
+    if not refs_rel:
+        _fail("PLAN_AUTHORITY_REFS_UNCONFIGURED", "instance has no authority_refs path")
+    current = _decode_writes(plan).get(refs_rel)
+    if current is None:
+        current = _committed_bytes(root, plan["baseline_commit"], refs_rel)
+        if current is None:
+            _fail("PLAN_AUTHORITY_REFS_UNCOMMITTED", "authority_refs registry is not committed", path=refs_rel)
+    try:
+        return refs_rel, canonical_authority_document(json.loads(current.decode("utf-8")))
+    except (ValueError, UnicodeDecodeError, json.JSONDecodeError) as exc:
+        _fail("PLAN_AUTHORITY_REFS_SCHEMA", str(exc), path=refs_rel)
+
+
+def _store_authority_registry(plan: dict[str, Any], refs_rel: str, data: dict[str, Any], operation: str) -> None:
+    data["refs"] = sorted(data["refs"], key=lambda item: item["id"])
+    encoded = (json.dumps(data, ensure_ascii=False, indent=2) + "\n").encode("utf-8")
+    plan["writes"][refs_rel] = base64.b64encode(encoded).decode("ascii")
+    plan.setdefault("path_operations", {}).setdefault(refs_rel, []).append(operation)
+
+
+def _append_authority_event(root: Path, plan: dict[str, Any], event: dict[str, Any], operation: str) -> str:
+    rel = _core().shard_rel("proposals", plan["writer"], event["created_at"])
+    current = _decode_writes(plan).get(rel)
+    if current is None:
+        current = (root / rel).read_bytes() if (root / rel).is_file() else b""
+    line = _canonical(event)
+    plan["writes"][rel] = base64.b64encode(current + line).decode("ascii")
+    plan.setdefault("path_operations", {}).setdefault(rel, []).append(operation)
+    return rel
+
+
+def refresh_authority_ref(root: Path, instance: Instance, args: argparse.Namespace) -> dict[str, Any]:
+    path, plan = _load(root, instance, args.plan_id); _ensure_open(root, plan)
+    reason = args.reason.strip()
+    if not reason:
+        _fail("PLAN_INPUT_INVALID", "Authority Ref refresh reason is required")
+    replay = next((item for item in plan["operations"] if item["operation_type"] == "refresh_authority_ref"
+                   and item["input"]["authority_ref_id"] == args.authority_ref_id
+                   and item["input"]["reason"] == reason), None)
+    if replay:
+        details = next(item for item in plan.get("authority_ref_refreshes", []) if item["authority_ref_id"] == args.authority_ref_id)
+        return _summary(plan, "refresh-authority-ref", operation_id=replay["operation_id"],
+                        authority_ref_id=args.authority_ref_id, old_approved_hash=details["old_hash"],
+                        new_approved_hash=details["new_hash"], affected_claim_ids=details["affected_claim_ids"], replayed=True)
+    refs_rel, data = _authority_registry_overlay(root, instance, plan)
+    matches = [item for item in data["refs"] if item.get("id") == args.authority_ref_id]
+    if len(matches) != 1:
+        _fail("PLAN_AUTHORITY_REF_MISSING", f"Authority Ref not found or not unique: {args.authority_ref_id}", path=refs_rel)
+    old = matches[0]
+    committed = _committed_bytes(root, plan["baseline_commit"], old["path"])
+    if committed is None:
+        _fail("PLAN_AUTHORITY_NOT_COMMITTED", "Authority path does not exist in plan committed baseline", path=old["path"])
+    working = root / old["path"]
+    if not working.is_file() or working.read_bytes() != committed:
+        _fail("PLAN_AUTHORITY_WORKTREE_DIRTY", "Authority path differs from plan committed baseline", path=old["path"])
+    old_hash = old.get("approved_hash") or old.get("fragment_hash")
+    new_hash = hashlib.sha256(committed).hexdigest()
+    if old_hash == new_hash:
+        _fail("PLAN_STRUCTURE_NOOP", "Authority Ref already approves the committed baseline", path=old["path"])
+    canonical_input = {"authority_ref_id": args.authority_ref_id, "old_approved_hash": old_hash,
+                       "new_approved_hash": new_hash, "reason": reason}
+    operation = _operation(plan["plan_id"], "refresh_authority_ref", canonical_input)
+    if any(item["operation_id"] == operation["operation_id"] for item in plan["operations"]):
+        return _summary(plan, "refresh-authority-ref", operation_id=operation["operation_id"],
+                        authority_ref_id=args.authority_ref_id, old_approved_hash=old_hash,
+                        new_approved_hash=new_hash, affected_claim_ids=old.get("claim_ids", []), replayed=True)
+    refreshed = dict(old); refreshed["approved_hash"] = new_hash; refreshed.pop("fragment_hash", None)
+    data["refs"][data["refs"].index(old)] = refreshed
+    created_at = dt.datetime.now().astimezone().isoformat(timespec="seconds")
+    event = {**_core().event_identity(root, argparse.Namespace(actor=plan["writer"])),
+             "event_id": f"evt_{operation['operation_digest'][:26].upper()}", "event_type": "authority_ref_refreshed",
+             "authority_ref_id": args.authority_ref_id, "old_approved_hash": old_hash, "new_approved_hash": new_hash,
+             "affected_claim_ids": old.get("claim_ids", []), "reason": reason, "created_at": created_at}
+    _store_authority_registry(plan, refs_rel, data, "refresh_authority_ref")
+    event_path = _append_authority_event(root, plan, event, "refresh_authority_ref")
+    details = {"authority_ref_id": args.authority_ref_id, "old_hash": old_hash, "new_hash": new_hash,
+               "affected_claim_ids": old.get("claim_ids", []), "path": old["path"], "event_id": event["event_id"], "event_path": event_path}
+    operation["authority_ref_id"] = args.authority_ref_id
+    plan["operations"].append(operation); plan.setdefault("authority_ref_refreshes", []).append(details)
+    plan["delta"] = None; _counters(plan); _save(path, plan)
+    return _summary(plan, "refresh-authority-ref", operation_id=operation["operation_id"], authority_ref_id=args.authority_ref_id,
+                    old_approved_hash=old_hash, new_approved_hash=new_hash,
+                    affected_claim_ids=old.get("claim_ids", []), replayed=False)
+
+
+def retire_authority_ref(root: Path, instance: Instance, args: argparse.Namespace) -> dict[str, Any]:
+    path, plan = _load(root, instance, args.plan_id); _ensure_open(root, plan)
+    reason = args.reason.strip()
+    if not reason:
+        _fail("PLAN_INPUT_INVALID", "Authority Ref retirement reason is required")
+    replacement_ref, replacement_claim = args.replacement_authority_ref_id, args.replacement_claim_id
+    if not replacement_ref and not replacement_claim:
+        _fail("PLAN_AUTHORITY_REPLACEMENT_REQUIRED", "retirement requires a replacement Authority Ref or Claim")
+    replay = next((item for item in plan["operations"] if item["operation_type"] == "retire_authority_ref"
+                   and item["input"] == {"authority_ref_id": args.authority_ref_id,
+                                         "replacement_authority_ref_id": replacement_ref,
+                                         "replacement_claim_id": replacement_claim, "reason": reason}), None)
+    if replay:
+        details = next(item for item in plan.get("authority_ref_retirements", []) if item["authority_ref_id"] == args.authority_ref_id)
+        return _summary(plan, "retire-authority-ref", operation_id=replay["operation_id"],
+                        authority_ref_id=args.authority_ref_id, affected_claim_ids=details["affected_claim_ids"], replayed=True)
+    refs_rel, data = _authority_registry_overlay(root, instance, plan)
+    matches = [item for item in data["refs"] if item.get("id") == args.authority_ref_id]
+    if len(matches) != 1:
+        _fail("PLAN_AUTHORITY_REF_MISSING", f"Authority Ref not found or not unique: {args.authority_ref_id}", path=refs_rel)
+    retired = matches[0]
+    if replacement_ref:
+        replacement = next((item for item in data["refs"] if item.get("id") == replacement_ref), None)
+        if not replacement or replacement_ref == args.authority_ref_id:
+            _fail("PLAN_AUTHORITY_REPLACEMENT_INVALID", "replacement Authority Ref must exist and differ from the retired Ref", path=refs_rel)
+    if replacement_claim:
+        temporary, staging = _with_overlay(root, plan)
+        try:
+            registry, _ = _core().load_authority(staging)
+            claim_ids = {item["id"] for item in _core().parse_claims(staging, registry)[0]}
+        finally:
+            temporary.cleanup()
+        if replacement_claim not in claim_ids:
+            _fail("PLAN_AUTHORITY_REPLACEMENT_INVALID", "replacement Claim does not exist", path=replacement_claim)
+    canonical_input = {"authority_ref_id": args.authority_ref_id, "replacement_authority_ref_id": replacement_ref,
+                       "replacement_claim_id": replacement_claim, "reason": reason}
+    operation = _operation(plan["plan_id"], "retire_authority_ref", canonical_input)
+    if any(item["operation_id"] == operation["operation_id"] for item in plan["operations"]):
+        return _summary(plan, "retire-authority-ref", operation_id=operation["operation_id"],
+                        authority_ref_id=args.authority_ref_id, affected_claim_ids=retired.get("claim_ids", []), replayed=True)
+    data["refs"].remove(retired)
+    created_at = dt.datetime.now().astimezone().isoformat(timespec="seconds")
+    event = {**_core().event_identity(root, argparse.Namespace(actor=plan["writer"])),
+             "event_id": f"evt_{operation['operation_digest'][:26].upper()}", "event_type": "authority_ref_retired",
+             "authority_ref_id": args.authority_ref_id, "retired_ref": retired,
+             "affected_claim_ids": retired.get("claim_ids", []), "replacement_authority_ref_id": replacement_ref,
+             "replacement_claim_id": replacement_claim, "reason": reason, "created_at": created_at}
+    _store_authority_registry(plan, refs_rel, data, "retire_authority_ref")
+    event_path = _append_authority_event(root, plan, event, "retire_authority_ref")
+    details = {"authority_ref_id": args.authority_ref_id, "affected_claim_ids": retired.get("claim_ids", []),
+               "replacement_authority_ref_id": replacement_ref, "replacement_claim_id": replacement_claim,
+               "reason": reason, "event_id": event["event_id"], "event_path": event_path}
+    operation["authority_ref_id"] = args.authority_ref_id
+    plan["operations"].append(operation); plan.setdefault("authority_ref_retirements", []).append(details)
+    plan["delta"] = None; _counters(plan); _save(path, plan)
+    return _summary(plan, "retire-authority-ref", operation_id=operation["operation_id"], authority_ref_id=args.authority_ref_id,
+                    affected_claim_ids=retired.get("claim_ids", []), replayed=False)
+
+
 def _evaluation_cases(root: Path, instance: Instance) -> list[dict[str, Any]]:
     rel = instance.raw.get("evaluation", {}).get("cases_path")
     if not rel:
@@ -482,7 +629,10 @@ def _action_operation(plan: dict[str, Any], rel: str) -> str:
 def _assert_finalized_environment(root: Path, plan: dict[str, Any], *, allow_applied: bool = False) -> None:
     if _head(root) != plan["baseline_commit"]:
         _fail("PLAN_STALE_BASELINE", "committed baseline changed after finalize")
-    for ref in plan.get("authority_refs", []):
+    checked_refs = list(plan.get("authority_refs", [])) + [
+        {"path": item["path"], "approved_hash": item["new_hash"]} for item in plan.get("authority_ref_refreshes", [])
+    ]
+    for ref in checked_refs:
         committed = _committed_bytes(root, plan["baseline_commit"], ref["path"])
         if committed is None or hashlib.sha256(committed).hexdigest() != ref["approved_hash"]:
             _fail("PLAN_AUTHORITY_STALE", "committed Authority hash changed", path=ref["path"])
@@ -532,6 +682,8 @@ def finalize(root: Path, instance: Instance, args: argparse.Namespace) -> dict[s
         bundle_type = "knowledge_structure_change"
     elif "revise_claim" in operation_types:
         bundle_type = "claim_revise"
+    elif operation_types.intersection({"refresh_authority_ref", "retire_authority_ref"}) and not operation_types.intersection({"add_claim", "add_authority_ref"}):
+        bundle_type = "authority_maintenance"
     else:
         bundle_type = "claim_create"
     manifest = {"bundle_type": bundle_type, "intent": plan["intent"],
@@ -539,8 +691,12 @@ def finalize(root: Path, instance: Instance, args: argparse.Namespace) -> dict[s
                                   "claims_revised": sorted(plan.get("existing_claim_changes", {})),
                                   "structure_changes": plan.get("structure_changes", []),
                                   "affected_topics": plan.get("affected_topics", []), "affected_nodes": plan.get("affected_nodes", []),
-                                  "authority_refs_added": [item["id"] for item in plan["authority_refs"]]},
-                "evidence_refs": [], "authority_refs": [item["id"] for item in plan["authority_refs"]], "permission_effect": "none",
+                                  "authority_refs_added": [item["id"] for item in plan["authority_refs"]],
+                                  "authority_refs_refreshed": [{key: item[key] for key in ("authority_ref_id", "old_hash", "new_hash", "affected_claim_ids")} for item in plan.get("authority_ref_refreshes", [])],
+                                  "authority_refs_retired": [{key: item.get(key) for key in ("authority_ref_id", "affected_claim_ids", "replacement_authority_ref_id", "replacement_claim_id", "reason")} for item in plan.get("authority_ref_retirements", [])]},
+                "evidence_refs": [], "authority_refs": sorted(set([item["id"] for item in plan["authority_refs"]]
+                    + [item["authority_ref_id"] for item in plan.get("authority_ref_refreshes", [])]
+                    + [item["authority_ref_id"] for item in plan.get("authority_ref_retirements", [])])), "permission_effect": "none",
                 "risk": plan["risk"], "actions": actions}
     bundle = build_bundle(root, manifest, instance.identities)
     bundle = _core().preflight_bundle(root, bundle)
@@ -666,6 +822,7 @@ def _summary(plan: dict[str, Any], action: str, **extra: Any) -> dict[str, Any]:
 
 def dispatch_plan_command(root: Path, args: argparse.Namespace, instance: Instance) -> dict[str, Any]:
     commands = {"init": init_plan, "add-claim": add_claim, "revise-claim": revise_claim, "move-topic": move_topic,
-                "add-authority-ref": add_authority_ref, "check": check_delta, "finalize": finalize,
+                "add-authority-ref": add_authority_ref, "refresh-authority-ref": refresh_authority_ref,
+                "retire-authority-ref": retire_authority_ref, "check": check_delta, "finalize": finalize,
                 "inspect": inspect, "abandon": abandon}
     return commands[args.plan_command](root, instance, args)

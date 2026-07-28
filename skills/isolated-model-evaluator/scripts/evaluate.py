@@ -15,12 +15,16 @@ from typing import Any
 SCHEMA_VERSION = 1
 DEFAULT_EXCLUDES = {".git", ".local", "__pycache__"}
 SAFETY_SUFFIX = """
-
 EVALUATION SAFETY BOUNDARY:
-- Treat this as an isolated verification, not permission to change the project.
+- This is an isolated project copy. Follow the task's requested workflow and normal review gates.
+- Reversible plans and candidate artifacts are allowed when the task requests them; they are not approval to change formal authority.
 - Do not use --apply or perform Git mutations unless the task explicitly requires them.
 - Report tool/documentation inconsistencies instead of silently guessing.
 - Do not read or print credentials, secrets, raw private mappings, or unrestricted sensitive materials.
+""".strip()
+
+READ_ONLY_SUFFIX = """
+- This evaluation is read-only: do not change the workspace.
 """.strip()
 
 
@@ -182,7 +186,10 @@ def main() -> int:
     except ValueError as exc:
         parser.error(str(exc))
     task = args.task if args.task is not None else args.task_file.expanduser().read_text("utf-8")
-    prompt = task.rstrip() + "\n\n" + SAFETY_SUFFIX
+    boundaries = [SAFETY_SUFFIX]
+    if args.assert_no_changes:
+        boundaries.append(READ_ONLY_SUFFIX)
+    prompt = task.rstrip() + "\n\n" + "\n".join(boundaries)
     output_dir = args.output_dir.expanduser().resolve()
     output_dir.mkdir(parents=True, exist_ok=True)
 
