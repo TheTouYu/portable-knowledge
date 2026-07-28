@@ -1,7 +1,7 @@
 {
   "schema_version": 1,
   "instance": {"id": "minimal-existing", "name": "Minimal Existing Project"},
-  "pkc": {"version": "0.2.0rc2", "projection_path": ".local/pkc"},
+  "pkc": {"version": "0.2.0rc3", "projection_path": ".local/pkc"},
   "authority": {"registry": "data/store/registry.json", "actors": "data/store/actors.json", "store": "data/store", "knowledge": "domain"},
   "identities": {
     "principal": {"id": "owner"},

@@ -20,6 +20,7 @@ from .authority import observe_authority_refs
 
 DEFAULT_BASE_URL = "https://api.vectorengine.ai/v1"
 DEFAULT_MODEL = "text-embedding-3-small"
+VECTOR_ONLY_RELATIVE_THRESHOLD = 0.70
 ENV_NAMES = ("VECTORENGINE_API_KEY", "VECTORENGINE_BASE_URL", "VECTORENGINE_EMBEDDING_MODEL")
 PERMISSION_RANK = {"restricted": 0, "internal": 1, "public_redacted": 2, "public": 3}
 
@@ -233,8 +234,12 @@ def search_knowledge(root: Path, instance: Any, query: str, terms: list[str], pe
             query_vectors, _, _ = embed_texts(root, instance.projection_path, [query])
             indexed = {item["claim"]["id"]: item for item in index.get("objects", [])
                        if isinstance(item, dict) and isinstance(item.get("claim"), dict)}
+            semantic_scores = {claim_id: _cosine(query_vectors[0], item.get("embedding", []))
+                               for claim_id, item in indexed.items()}
+            best_semantic_score = max(semantic_scores.values(), default=0.0)
+            vector_only_floor = max(0.0, best_semantic_score) * VECTOR_ONLY_RELATIVE_THRESHOLD
             for claim_id, indexed_item in indexed.items():
-                if claim_id not in merged:
+                if claim_id not in merged and semantic_scores[claim_id] >= vector_only_floor:
                     detail = claim_detail(claim_id)
                     claim = detail["claim"]
                     if not _visible_claim(claim, permission):
@@ -244,8 +249,7 @@ def search_knowledge(root: Path, instance: Any, query: str, terms: list[str], pe
                                        "conflict": claim["conflict"], "authority_status": detail.get("authority_support", {}).get("status", "not_registered"),
                                        "rank_score": 0.0})
             for item in candidates:
-                indexed_item = indexed.get(item["id"])
-                semantic_score = _cosine(query_vectors[0], indexed_item["embedding"]) if indexed_item else 0.0
+                semantic_score = semantic_scores.get(item["id"], 0.0)
                 authority_score = 1.0 if item["authority_status"] == "current" else 0.0
                 item["semantic_score"] = semantic_score
                 item["score"] = item["rank_score"] * .40 + semantic_score * .45 + authority_score * .15

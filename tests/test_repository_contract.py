@@ -33,7 +33,7 @@ class RepositoryContractTests(unittest.TestCase):
 
     def test_example_is_complete_and_ignores_projection(self):
         config = json.loads((EXAMPLE / "project-intelligence.json").read_text(encoding="utf-8"))
-        self.assertEqual(config["pkc"]["version"], "0.2.0rc2")
+        self.assertEqual(config["pkc"]["version"], "0.2.0rc3")
         for role in config["memory"]["roles"]:
             self.assertTrue((EXAMPLE / role["path"]).is_file(), role)
         authority = config["authority"]

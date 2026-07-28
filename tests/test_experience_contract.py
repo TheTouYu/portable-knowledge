@@ -72,6 +72,23 @@ class ExperienceContractTests(unittest.TestCase):
                 result = search_knowledge(root, instance, "query", [], "internal", 8, True, lambda _: {"results": []}, detail)
             self.assertEqual("hybrid", result["mode"]); self.assertEqual(["vector_only"], [item["id"] for item in result["results"]])
 
+    def test_hybrid_rejects_weak_vector_only_noise_relative_to_best_match(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory); instance = _Instance(root)
+            (root / ".env").write_text("VECTORENGINE_API_KEY=fixture\n")
+            vector_dir = root / ".local/pkc/vector"; vector_dir.mkdir(parents=True)
+            (vector_dir / "index.json").write_text(json.dumps({"schema_version": 1, "model": "text-embedding-3-small",
+                "permission": "internal", "objects": [
+                    {"claim": {"id": "best"}, "embedding": [1.0, 0.0]},
+                    {"claim": {"id": "noise"}, "embedding": [0.6, 0.8]},
+                ]}))
+            detail = lambda claim_id: {"claim": {"id": claim_id, "node_id": "n", "topic_id": "t", "title": claim_id,
+                "statement": "hidden", "permission": "internal", "lifecycle": "active", "conflict": "none"},
+                "authority_support": {"status": "current"}}
+            with mock.patch("portable_knowledge.experience.embed_texts", return_value=([[1.0, 0.0]], 1, "text-embedding-3-small")):
+                result = search_knowledge(root, instance, "query", [], "internal", 8, True, lambda _: {"results": []}, detail)
+            self.assertEqual(["best"], [item["id"] for item in result["results"]])
+
     def test_evaluation_enforces_topic_claim_refusal_and_filters(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory); (root / "evaluation").mkdir()
