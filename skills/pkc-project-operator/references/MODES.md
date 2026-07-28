@@ -63,18 +63,18 @@ It resolves the project root, reads `tools/pkc-lock.json`, verifies runtime loca
 Install initializes an unconfigured project; adopt locks an existing unlocked instance; upgrade changes an already locked project's exact runtime selection. They are not substitutes.
 
 ```bash
-python scripts/pkc_operator.py plan-upgrade \
+python skills/pkc-project-operator/scripts/pkc_operator.py plan-upgrade \
   --target /path/to/project \
   --source-repository /path/or/url/to/portable-knowledge \
   --source-commit EXACT_40_CHARACTER_COMMIT \
   --representative-query "bounded project question" \
   --project-check "project test command" \
   --output /tmp/pkc-upgrade-plan.json
-python scripts/pkc_operator.py apply-plan \
+python skills/pkc-project-operator/scripts/pkc_operator.py apply-plan \
   --plan /tmp/pkc-upgrade-plan.json --plan-hash EXACT_HASH --human-reviewed
 ```
 
-Planning may build/cache a wheel from a clean export of the exact commit but does not change the target. Builder preflight reports `uv`, or the fallback requirements `venv` + `pip` + `build`, and fails actionably before target changes when neither backend is usable. Wheel provenance comes from inspected `dist-info/METADATA`, an isolated install's package version and capabilities, the exact source commit, and SHA-256—not the filename alone. Its payload identifies current/target commit and version, source dirtiness, interpreter/ABI/builder, wheel and SHA-256, current/target capabilities and their deterministic difference, lock before/after hashes, parallel and rollback runtimes, checks, exclusions, and plan hash. Apply fails on drift or runtime-version mismatch and installs non-editably. After a post-switch failure it restores the prior lock selection, preserves the rollback runtime, moves the failed candidate under ignored `.local/pkc/failed-runtimes/` without overwriting earlier diagnostics, and records the actual retained paths in an actionable receipt under `.local/pkc/operator-receipts/`. Releasing the canonical target path lets a newly reviewed plan rebuild from the verified wheel instead of trusting a partially verified runtime. Runtime/config review remains separate from knowledge Bundle and Git review.
+Planning may build/cache a wheel from a clean export of the exact commit but does not change the target. Builder preflight reports `uv`, or the fallback requirements `venv` + `pip` + `build`, and fails actionably before target changes when neither backend is usable. Wheel provenance comes from inspected `dist-info/METADATA`, an isolated install's package version and capabilities, the exact source commit, and SHA-256—not the filename alone. Its payload identifies current/target commit and version, source dirtiness, interpreter/ABI/builder, wheel and SHA-256, current/target capabilities and their deterministic difference, lock before/after hashes, parallel and rollback runtimes, checks, exclusions, and plan hash. Apply fails on drift or runtime-version mismatch and installs non-editably. After a post-switch failure it restores the prior lock selection, preserves the rollback runtime, moves the failed candidate under ignored `.local/pkc/failed-runtimes/` without overwriting earlier diagnostics, and records the actual retained paths in an actionable receipt under `.local/pkc/operator-receipts/`. Releasing the canonical target path lets a newly reviewed plan rebuild from the verified wheel instead of trusting a partially verified runtime. For the narrow bootstrap case where the stricter target runtime is required to refresh pre-existing invalid Authority References, add `--defer-knowledge-check-for-authority-maintenance`: planning fails unless the target advertises `authority_ref_refresh_plan`, records `knowledge-check` as deferred, and requires an immediate reviewed Authority-maintenance Bundle followed by that check. Other technical verification remains mandatory. Runtime/config review remains separate from knowledge Bundle and Git review.
 
 ## Exact semantic change flow
 

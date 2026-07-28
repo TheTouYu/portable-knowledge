@@ -130,6 +130,61 @@ class OperatorContractTests(unittest.TestCase):
         self.assertEqual(result["plan_hash"], plan["plan_hash"])
         self.assertEqual(json.loads((self.root / "tools/pkc-lock.json").read_text()), lock)
 
+    def test_plan_upgrade_can_defer_knowledge_check_for_authority_maintenance_bootstrap(self):
+        old_commit = "a" * 40
+        new_commit = "b" * 40
+        runtime = self.root / ".local/pkc/runtimes" / old_commit
+        runtime.mkdir(parents=True)
+        (self.root / "project-intelligence.json").write_text(
+            '{"schema_version":1,"evaluation":{"cases_path":"cases.json"}}', encoding="utf-8")
+        lock = {"schema_version": 1, "version": "0.2.0rc4", "source_commit": old_commit,
+                "runtime": f".local/pkc/runtimes/{old_commit}"}
+        (self.root / "tools").mkdir()
+        (self.root / "tools/pkc-lock.json").write_text(json.dumps(lock), encoding="utf-8")
+        subprocess.run(["git", "add", "."], cwd=self.root, check=True)
+        subprocess.run(["git", "commit", "-q", "-m", "configured"], cwd=self.root, check=True)
+        wheel = Path(self.temp.name) / "portable_knowledge-0.2.0rc5-py3-none-any.whl"
+        wheel.write_bytes(b"wheel")
+        provenance = {"wheel": str(wheel), "sha256": operator.digest_file(wheel), "version": "0.2.0rc5",
+                      "source_commit": new_commit, "capabilities": {"authority_ref_refresh_plan": True}}
+        args = type("Args", (), {"target": self.root, "source_repository": str(ROOT),
+                                  "source_commit": new_commit, "output": Path(self.temp.name) / "upgrade.json",
+                                  "representative_query": [], "project_check": [],
+                                  "defer_knowledge_check_for_authority_maintenance": True})()
+        with mock.patch.object(operator, "ensure_wheel_provenance", return_value=provenance), \
+             mock.patch.object(operator, "installed_capabilities", return_value={}):
+            result = operator.command_plan_upgrade(args)
+        plan = json.loads(args.output.read_text(encoding="utf-8"))
+        self.assertNotIn("knowledge-check", plan["verification"])
+        self.assertEqual(plan["deferred_checks"][0]["command"], "knowledge-check")
+        self.assertIn("Authority maintenance Bundle", plan["deferred_checks"][0]["required_after"])
+        self.assertEqual(result["deferred_checks"], plan["deferred_checks"])
+
+    def test_plan_upgrade_rejects_authority_bootstrap_without_refresh_capability(self):
+        old_commit = "a" * 40
+        runtime = self.root / ".local/pkc/runtimes" / old_commit
+        runtime.mkdir(parents=True)
+        (self.root / "project-intelligence.json").write_text(
+            '{"schema_version":1,"evaluation":{"cases_path":"cases.json"}}', encoding="utf-8")
+        (self.root / "tools").mkdir()
+        (self.root / "tools/pkc-lock.json").write_text(json.dumps({
+            "schema_version": 1, "version": "0.2.0rc4", "source_commit": old_commit,
+            "runtime": f".local/pkc/runtimes/{old_commit}"}), encoding="utf-8")
+        subprocess.run(["git", "add", "."], cwd=self.root, check=True)
+        subprocess.run(["git", "commit", "-q", "-m", "configured"], cwd=self.root, check=True)
+        wheel = Path(self.temp.name) / "portable_knowledge-0.2.0rc5-py3-none-any.whl"
+        wheel.write_bytes(b"wheel")
+        provenance = {"wheel": str(wheel), "sha256": operator.digest_file(wheel), "version": "0.2.0rc5",
+                      "source_commit": "b" * 40, "capabilities": {}}
+        args = type("Args", (), {"target": self.root, "source_repository": str(ROOT),
+                                  "source_commit": "b" * 40, "output": Path(self.temp.name) / "upgrade.json",
+                                  "representative_query": [], "project_check": [],
+                                  "defer_knowledge_check_for_authority_maintenance": True})()
+        with mock.patch.object(operator, "ensure_wheel_provenance", return_value=provenance), \
+             mock.patch.object(operator, "installed_capabilities", return_value={}):
+            with self.assertRaisesRegex(operator.OperatorError, "authority_ref_refresh_plan"):
+                operator.command_plan_upgrade(args)
+
     def test_builder_preflight_selects_python_build_when_uv_is_absent(self):
         completed = subprocess.CompletedProcess([], 0, stdout="", stderr="")
         with mock.patch.object(operator.shutil, "which", return_value=None), \

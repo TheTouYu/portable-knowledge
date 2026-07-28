@@ -447,7 +447,17 @@ def command_plan_upgrade(args: argparse.Namespace) -> dict[str, Any]:
     state = git_state(root)
     verification = ["capabilities", "module-origin", "validate", "rebuild", "validate"]
     config = json.loads((root / "project-intelligence.json").read_text(encoding="utf-8"))
-    if (config.get("evaluation") or {}).get("cases_path"):
+    has_evaluation = bool((config.get("evaluation") or {}).get("cases_path"))
+    deferred_checks: list[dict[str, str]] = []
+    if has_evaluation and getattr(args, "defer_knowledge_check_for_authority_maintenance", False):
+        if not provenance.get("capabilities", {}).get("authority_ref_refresh_plan"):
+            raise OperatorError("deferred knowledge-check requires target capability authority_ref_refresh_plan")
+        deferred_checks.append({
+            "command": "knowledge-check",
+            "reason": "target runtime is required to refresh already-invalidated Authority References",
+            "required_after": "apply a human-approved Authority maintenance Bundle, then run knowledge-check",
+        })
+    elif has_evaluation:
         verification.append("knowledge-check")
     plan = {"schema_version": 1, "operator_contract": CONTRACT, "kind": "pkc-upgrade",
             "target_root": str(root), "created_from": {"head": state["head"], "status": state["status"]},
@@ -458,6 +468,7 @@ def command_plan_upgrade(args: argparse.Namespace) -> dict[str, Any]:
                        "wheel_sha256": provenance["sha256"], "provenance": provenance},
             "runtime": new_lock["runtime"], "rollback_runtime": current.get("runtime"),
             "compatibility": compatibility, "writes": [write], "links": [], "verification": verification,
+            "deferred_checks": deferred_checks,
             "representative_queries": args.representative_query, "project_checks": args.project_check,
             "excluded": ["formal knowledge authority", "Git commit/push", "old runtime deletion"],
             "human_reviewed": False}
@@ -469,7 +480,8 @@ def command_plan_upgrade(args: argparse.Namespace) -> dict[str, Any]:
             "runtime": plan["runtime"], "rollback_runtime": plan["rollback_runtime"],
             "compatibility": compatibility,
             "writes": [{k: write[k] for k in ("path", "action", "expected_sha256", "new_sha256")}],
-            "verification": verification, "target_worktree_dirty": state["status"],
+            "verification": verification, "deferred_checks": deferred_checks,
+            "target_worktree_dirty": state["status"],
             "next": "show this exact plan hash to a human; apply only after review", "errors": []}
 
 
@@ -686,6 +698,8 @@ def parser() -> argparse.ArgumentParser:
     upgrade.add_argument("--output", type=Path, required=True)
     upgrade.add_argument("--representative-query", action="append", default=[])
     upgrade.add_argument("--project-check", action="append", default=[])
+    upgrade.add_argument("--defer-knowledge-check-for-authority-maintenance", action="store_true",
+                         help="defer configured retrieval evaluation only when the target runtime is needed to refresh invalidated Authority References")
     apply = sub.add_parser("apply-plan"); apply.add_argument("--plan", type=Path, required=True); apply.add_argument("--plan-hash", required=True); apply.add_argument("--human-reviewed", action="store_true")
     global_install = sub.add_parser("install-global"); global_install.add_argument("--source", type=Path, default=Path(__file__).resolve().parents[3]); global_install.add_argument("--skill-root", type=Path, action="append")
     return p

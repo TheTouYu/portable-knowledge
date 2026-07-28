@@ -11,7 +11,7 @@ metadata:
 
 Be the single human-facing operator for a project's Portable Project Intelligence lifecycle. Installation is one mode, not the product. Delegate deterministic knowledge semantics, validation, permissions, immutable Bundles, and transactions to the installed PKC Core; never reimplement them in this Skill or a project Adapter.
 
-Resolve all relative paths from this Skill directory. For mechanical operations use `scripts/pkc_operator.py`. Read [the mode contract](references/MODES.md) for any mode beyond a simple read-only status/query. Read the target repository's own operating rules before proposing changes.
+Resolve Skill-internal links from this Skill directory. From the PKC repository root, the canonical mechanical entry is `skills/pkc-project-operator/scripts/pkc_operator.py`; there is no repository-root `scripts/pkc_operator.py`. Read [the mode contract](references/MODES.md) for any mode beyond a simple read-only status/query. Read the target repository's own operating rules before proposing changes. For read-only contract verification, stop once the Skill, Mode reference, and the canonical command's `--help` provide the requested answer; do not inspect implementation or tests without a stated evidence gap. If tests are explicitly required, the Operator contract test is at repository-root `tests/test_operator_contract.py`, not below the Skill directory. Search only paths already established to exist.
 
 ## Start every invocation
 
@@ -40,19 +40,19 @@ A prior installation, material, or Git approval never authorizes a later knowled
 ## Canonical mechanical interface
 
 ```bash
-python scripts/pkc_operator.py inspect --target /path/to/project
-python scripts/pkc_operator.py plan-install --target /path/to/project --output /tmp/pkc-install-plan.json
-python scripts/pkc_operator.py plan-adopt --target /path/to/project --output /tmp/pkc-adopt-plan.json
-python scripts/pkc_operator.py plan-upgrade --target /path/to/project \
+python skills/pkc-project-operator/scripts/pkc_operator.py inspect --target /path/to/project
+python skills/pkc-project-operator/scripts/pkc_operator.py plan-install --target /path/to/project --output /tmp/pkc-install-plan.json
+python skills/pkc-project-operator/scripts/pkc_operator.py plan-adopt --target /path/to/project --output /tmp/pkc-adopt-plan.json
+python skills/pkc-project-operator/scripts/pkc_operator.py plan-upgrade --target /path/to/project \
   --source-repository /path/or/url/to/portable-knowledge --source-commit EXACT_COMMIT \
   --output /tmp/pkc-upgrade-plan.json
-python scripts/pkc_operator.py apply-plan --plan /tmp/pkc-install-plan.json --plan-hash EXACT_HASH --human-reviewed
-python scripts/pkc_operator.py status --target /path/to/project
-python scripts/pkc_operator.py doctor --target /path/to/project
-python scripts/pkc_operator.py check-update --target /path/to/project
+python skills/pkc-project-operator/scripts/pkc_operator.py apply-plan --plan /tmp/pkc-install-plan.json --plan-hash EXACT_HASH --human-reviewed
+python skills/pkc-project-operator/scripts/pkc_operator.py status --target /path/to/project
+python skills/pkc-project-operator/scripts/pkc_operator.py doctor --target /path/to/project
+python skills/pkc-project-operator/scripts/pkc_operator.py check-update --target /path/to/project
 ```
 
-`plan-install` initializes an unconfigured project. `plan-adopt` adds a lock and wrapper to an existing unlocked instance while preserving its Memory, Adapter, authority, and history. `plan-upgrade` is the only upgrade planner for an already locked project; install/adopt are not upgrade substitutes. It exports the requested exact commit, records build environment and wheel provenance, proposes a parallel runtime and lock-only switch, names the rollback runtime and post-switch checks, and reports dirty source bytes without including them. Planning may cache a wheel outside the target but may not change the target project. Present the complete summary and `plan_hash`; only then may `apply-plan` run. Environment, wheel, target-file, Git-state, or plan drift must fail closed and require a new plan. After a post-switch failure, apply restores the old selection and moves the failed candidate under ignored `.local/pkc/failed-runtimes/`; this preserves diagnostic bytes while releasing the canonical target path so a newly reviewed plan can rebuild safely.
+`plan-install` initializes an unconfigured project. `plan-adopt` adds a lock and wrapper to an existing unlocked instance while preserving its Memory, Adapter, authority, and history. `plan-upgrade` is the only upgrade planner for an already locked project; install/adopt are not upgrade substitutes. It exports the requested exact commit, records build environment and wheel provenance, proposes a parallel runtime and lock-only switch, names the rollback runtime and post-switch checks, and reports dirty source bytes without including them. Planning may cache a wheel outside the target but may not change the target project. Present the complete summary and `plan_hash`; only then may `apply-plan` run. Environment, wheel, target-file, Git-state, or plan drift must fail closed and require a new plan. After a post-switch failure, apply restores the old selection and moves the failed candidate under ignored `.local/pkc/failed-runtimes/`; this preserves diagnostic bytes while releasing the canonical target path so a newly reviewed plan can rebuild safely. If a stricter target runtime is itself required to refresh already-invalidated Authority References, `plan-upgrade --defer-knowledge-check-for-authority-maintenance` may defer only the configured retrieval check; the target must advertise `authority_ref_refresh_plan`, the plan must expose the deferred check and required follow-up, and a reviewed Authority-maintenance Bundle plus `knowledge-check` must immediately follow the technical switch.
 
 Default remote:
 
