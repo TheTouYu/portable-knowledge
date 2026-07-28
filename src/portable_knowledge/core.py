@@ -31,7 +31,7 @@ from typing import Any, Iterable, Iterator
 
 from .instance import Instance, InstanceError, load_instance, validate_project_memory
 from .bundle import BundleError, apply_bundle, approval, build_bundle, bundle_paths, canonical as bundle_json, capture_bundle_draft, enforce_production_provenance, lifecycle_path, lifecycle_projection, rollback_bundle, seal_preflight, verify_bundle
-from .authority import observe_authority_refs, validate_authority_conflicts, validate_authority_coverage, validate_authority_ref
+from .authority import AuthorityRegistryError, authority_refs_from_document, observe_authority_refs, validate_authority_conflicts, validate_authority_coverage, validate_authority_ref
 from .retrieval import RetrievalError, build_progressive_scope
 from .experience import (ExperienceError, authorized_claims, build_vector_index, evaluate_cases,
                          freshness_markers, search_knowledge, upstream_freshness)
@@ -406,7 +406,7 @@ def validate(root: Path) -> dict[str, Any]:
     try:
         instance_for_refs = load_instance(root)
         refs_value = instance_for_refs.authority.get("authority_refs")
-        refs = read_json(root / refs_value).get("refs", []) if refs_value else []
+        refs = authority_refs_from_document(read_json(root / refs_value)) if refs_value else []
         for ref in refs:
             for error in validate_authority_ref(ref)["errors"]:
                 findings.append(Finding(error["code"], refs_value or "authority_ref", error["message"]))
@@ -415,6 +415,8 @@ def validate(root: Path) -> dict[str, Any]:
         for conflict in validate_authority_conflicts(refs):
             findings.append(Finding(conflict["code"], str(refs_value or REGISTRY_REL),
                                     f"{conflict['claim_id']}: conflicting explicit fact {conflict['fact_key']}"))
+    except AuthorityRegistryError as exc:
+        findings.append(Finding("AUTHORITY_REFS_SCHEMA", str(locals().get("refs_value") or REGISTRY_REL), str(exc)))
     except (InstanceError, OSError, json.JSONDecodeError):
         pass
     event_ids: dict[str, str] = {}
@@ -810,7 +812,7 @@ def progressive_query_command(root: Path, instance: Instance, context_id: str, i
     refs_path_value = instance.authority.get("authority_refs")
     if refs_path_value and claim_ids:
         refs_doc = read_json(root / refs_path_value)
-        matching = [ref for ref in refs_doc.get("refs", []) if claim_ids.intersection(ref.get("claim_ids", []))]
+        matching = [ref for ref in authority_refs_from_document(refs_doc) if claim_ids.intersection(ref.get("claim_ids", []))]
         requested_roles = set(scope["route"].get("verification_roles", [])) if max_level >= 3 else set()
         if requested_roles:
             matching = [ref for ref in matching if ref.get("role") in requested_roles]
@@ -916,7 +918,7 @@ def show_claim(root: Path, claim_id: str, evidence_limit: int, cursor: int, perm
         refs_path = load_instance(root).authority.get("authority_refs")
     except InstanceError:
         refs_path = None
-    refs = read_json(root / refs_path).get("refs", []) if refs_path else []
+    refs = authority_refs_from_document(read_json(root / refs_path)) if refs_path else []
     matching_refs = [ref for ref in refs if claim_id in ref.get("claim_ids", [])]
     observations = observe_authority_refs(root, matching_refs) if matching_refs else []
     effective = [ref.get("effective_status", ref.get("status", "current")) for ref in observations]
@@ -1218,7 +1220,7 @@ def staged_validation_findings(root: Path, writes: dict[str, bytes | None]) -> l
             claims, _ = parse_claims(staging, registry)
             instance = load_instance(staging)
             refs_path = instance.authority.get("authority_refs")
-            refs = read_json(staging / refs_path).get("refs", []) if refs_path else []
+            refs = authority_refs_from_document(read_json(staging / refs_path)) if refs_path else []
             coverage = {item["claim_id"]: item for item in validate_authority_coverage(claims, refs)}
             for finding in findings:
                 if finding["code"] != "AUTHORITY_FACT_COVERAGE":
@@ -1851,7 +1853,7 @@ def knowledge_check_command(root: Path, instance: Instance, semantic: bool) -> d
     upstream_warnings, upstream_failures = upstream_freshness(root, experience.get("upstream_locks", []))
     warnings.extend(upstream_warnings); failures.extend(upstream_failures)
     refs_path = instance.authority.get("authority_refs")
-    observations = observe_authority_refs(root, read_json(root / refs_path).get("refs", [])) if refs_path else []
+    observations = observe_authority_refs(root, authority_refs_from_document(read_json(root / refs_path))) if refs_path else []
     authority_current = sum(item.get("effective_status") == "current" for item in observations)
     authority_pending = len(observations) - authority_current
     for item in observations:
@@ -2247,11 +2249,11 @@ def main(argv: list[str] | None = None) -> int:
             from .semantic_plan import dispatch_plan_command
             payload = dispatch_plan_command(root, args, instance)
         else: raise KnowledgeError(f"unknown command: {args.command}")
-    except (KnowledgeError, RetrievalError, BundleError, ExperienceError, OSError, sqlite3.Error) as exc:
-        error = {"code": getattr(exc, "code", "KNOWLEDGE_ERROR"), "path": ".", "message": str(exc)}
+    except (KnowledgeError, RetrievalError, BundleError, ExperienceError, AuthorityRegistryError, OSError, sqlite3.Error) as exc:
+        error = {"code": getattr(exc, "code", "AUTHORITY_REFS_SCHEMA" if isinstance(exc, AuthorityRegistryError) else "KNOWLEDGE_ERROR"), "path": ".", "message": str(exc)}
         if isinstance(exc, RetrievalError):
             error.update(exc.details)
-        errors = exc.findings if isinstance(exc, (StagedValidationError, SemanticPlanError)) and exc.findings is not None else [error]
+        errors = exc.findings if isinstance(exc, (StagedValidationError, SemanticPlanError)) and exc.findings else [error]
         payload = {"ok": False, "command": args.command, "read_only": args.command in {"progressive-query", "query-context", "capture", "knowledge-check", "knowledge-search"},
                    "operation_authorized": False, "exit_code": 2 if isinstance(exc, ExperienceError) and exc.environment else 1, "errors": errors}
     if args.command in {"recover", "rollback", "abandon"}:

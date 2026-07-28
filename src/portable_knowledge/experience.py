@@ -16,7 +16,7 @@ from pathlib import Path, PurePosixPath
 from typing import Any, Callable
 from urllib import error, request
 
-from .authority import observe_authority_refs
+from .authority import authority_refs_from_document, observe_authority_refs
 
 DEFAULT_BASE_URL = "https://api.vectorengine.ai/v1"
 DEFAULT_MODEL = "text-embedding-3-small"
@@ -159,7 +159,7 @@ def _visible_claim(claim: dict[str, Any], permission: str) -> bool:
 
 def authorized_claims(root: Path, instance: Any, claims: list[dict[str, Any]]) -> list[dict[str, Any]]:
     refs_path = instance.authority.get("authority_refs")
-    refs = _read_json(root / refs_path).get("refs", []) if refs_path else []
+    refs = authority_refs_from_document(_read_json(root / refs_path)) if refs_path else []
     observations = observe_authority_refs(root, refs)
     by_claim: dict[str, list[str]] = {}
     for ref in observations:

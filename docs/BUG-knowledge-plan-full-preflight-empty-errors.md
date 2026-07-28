@@ -1,6 +1,6 @@
 # Bug / requirement: `knowledge-plan finalize` loses full-preflight Authority findings
 
-Status: reported from a real consumer; fix not yet verified
+Status: fixed in `0.2.0rc4`; same-plan Authority-path overlap is explicitly rejected during delta
 
 Reported: 2026-07-28
 
@@ -268,6 +268,12 @@ The semantic-plan implementation reads and writes `refs`. If `authority_refs` is
 - Migrating additional legacy Nodes or Claims.
 - Weakening Authority freshness to make the reproduction pass.
 - Treating synthetic fixture success as proof that the real consumer is fixed.
+
+## Resolution
+
+PKC uses the safer rejection policy. A new Authority Reference remains bound to the committed before-image; if its path is also present in the current plan's prospective writes, delta returns `PLAN_AUTHORITY_STAGED_DRIFT` with the Authority Reference ID, Claim IDs, path, and `staged_by_current_plan: true`. It does not define or infer staged after-image approval.
+
+Full preflight now emits structured non-current Authority findings with reference/path/status/hash fields, and CLI serialization preserves a top-level fallback error if specialized findings are unexpectedly empty. The registry's canonical key is `refs`; `authority_refs` is a read-compatible alias normalized by the next governed semantic-plan write, while conflicting dual keys fail closed.
 
 ## Consumer recovery after a fix
 

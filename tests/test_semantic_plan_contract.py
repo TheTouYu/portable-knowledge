@@ -6,6 +6,7 @@ import contextlib
 import hashlib
 import io
 import json
+import os
 import shutil
 import subprocess
 import sys
@@ -42,6 +43,15 @@ class SemanticPlanContractTests(unittest.TestCase):
             result = core.main(["--root", str(self.root), *argv])
         payload = json.loads(stream.getvalue())
         self.assertEqual(result, expected, payload)
+        return payload
+
+    def cli_process(self, *argv: str, expected: int = 0) -> dict:
+        env = os.environ.copy()
+        env["PYTHONPATH"] = str(PACKAGE / "src")
+        completed = subprocess.run([sys.executable, "-m", "portable_knowledge.cli", "--root", str(self.root), *argv],
+                                   cwd=PACKAGE, env=env, text=True, encoding="utf-8", capture_output=True)
+        payload = json.loads(completed.stdout)
+        self.assertEqual(completed.returncode, expected, {"payload": payload, "stderr": completed.stderr})
         return payload
 
     def formal_authority(self) -> dict[str, bytes]:
@@ -226,6 +236,90 @@ class SemanticPlanContractTests(unittest.TestCase):
                 self.assertEqual(failed["errors"][0]["code"], code)
                 self.assertIn(message, failed["errors"][0]["message"])
                 self.assertEqual(self.formal_authority(), self.authority_before)
+
+    def test_cli_delta_rejects_authority_path_modified_by_same_plan(self):
+        existing = self.root / "domain/topics/existing-contract.md"
+        existing.write_text("# Existing committed contract\n", encoding="utf-8")
+        subprocess.run(["git", "add", existing.relative_to(self.root).as_posix()], cwd=self.root, check=True)
+        subprocess.run(["git", "commit", "-qm", "add existing contract"], cwd=self.root, check=True)
+        self.authority_before = self.formal_authority()
+        plan_id = self.cli_process("knowledge-plan", "init", "--intent", "Reject staged self-reference", "--risk", "medium")["plan_id"]
+        added = self.cli_process(
+            "knowledge-plan", "add-claim", plan_id, "--node", "software-core", "--topic-id", "topic-existing-contract",
+            "--topic-path", "domain/topics/existing-contract.md", "--topic-title", "Existing Contract",
+            "--topic-summary", "Neutral bounded summary", "--topic-keyword", "neutral",
+            "--duplicate-resolution", "create_distinct_with_boundary", "--title", "Bounded documented Claim",
+            "--statement", "One neutral documented assertion.", "--boundary", "Does not establish runtime behavior.",
+            "--permission", "internal", "--fact-class", "documented_contract")
+        self.cli_process("knowledge-plan", "add-authority-ref", plan_id, "--claim-id", added["claim_id"],
+                         "--path", "domain/topics/existing-contract.md", "--locator", "section:existing-contract",
+                         "--role", "documented_contract", "--change-policy", "invalidate_on_change",
+                         "--fact-class", "documented_contract")
+        delta = self.cli_process("knowledge-plan", "check", plan_id, "--mode", "delta", expected=1)
+        finding = next(item for item in delta["findings"] if item["code"] == "PLAN_AUTHORITY_STAGED_DRIFT")
+        self.assertEqual(finding["path"], "domain/topics/existing-contract.md")
+        self.assertTrue(finding["staged_by_current_plan"])
+        denied = self.cli_process("knowledge-plan", "finalize", plan_id, expected=1)
+        self.assertEqual(denied["errors"][0]["code"], "PLAN_DELTA_REQUIRED")
+        inspected = self.cli_process("knowledge-plan", "inspect", plan_id)
+        self.assertEqual((inspected["state"], inspected["cost_counters"]["candidate_bundles"]), ("open", 0))
+        self.assertEqual(self.formal_authority(), self.authority_before)
+
+    def test_cli_finalize_reports_non_current_authority_with_status_and_hashes(self):
+        refs_path = self.root / "data/store/authority-refs.json"
+        refs = json.loads(refs_path.read_text(encoding="utf-8"))
+        refs["refs"].append({"id": "aref_stale_fixture", "path": "authority/schema-contract.md", "locator": "fixture",
+                             "role": "documented_contract", "baseline_state": "committed_baseline",
+                             "change_policy": "invalidate_on_change", "approved_hash": "0" * 64,
+                             "claim_ids": [], "supports_fact_classes": []})
+        refs_path.write_text(json.dumps(refs, indent=2) + "\n", encoding="utf-8")
+        subprocess.run(["git", "add", refs_path.relative_to(self.root).as_posix()], cwd=self.root, check=True)
+        subprocess.run(["git", "commit", "-qm", "add stale authority fixture"], cwd=self.root, check=True)
+        self.authority_before = self.formal_authority()
+        plan_id = self.cli_process("knowledge-plan", "init", "--intent", "Expose Authority diagnostics", "--risk", "medium")["plan_id"]
+        added = self.cli_process("knowledge-plan", "add-claim", plan_id, "--node", "software-core", "--topic-id", "topic-schema",
+                                 "--title", "Diagnostic contract", "--statement", "Full preflight reports its failed component.",
+                                 "--boundary", "Neutral fixture only.", "--fact-class", "documented_contract")
+        self.cli_process("knowledge-plan", "add-authority-ref", plan_id, "--claim-id", added["claim_id"],
+                         "--path", "authority/schema-contract.md", "--locator", "diagnostic contract",
+                         "--role", "documented_contract", "--change-policy", "invalidate_on_change",
+                         "--fact-class", "documented_contract")
+        self.assertTrue(self.cli_process("knowledge-plan", "check", plan_id, "--mode", "delta")["can_finalize"])
+        failed = self.cli_process("knowledge-plan", "finalize", plan_id, expected=1)
+        finding = next(item for item in failed["errors"] if item["authority_ref_id"] == "aref_stale_fixture")
+        self.assertEqual(finding["code"], "PLAN_FULL_AUTHORITY_NOT_CURRENT")
+        self.assertEqual(finding["effective_status"], "invalidated")
+        self.assertEqual(finding["expected_hash"], "0" * 64)
+        self.assertEqual(len(finding["observed_hash"]), 64)
+        self.assertFalse(finding["staged_by_current_plan"])
+        inspected = self.cli_process("knowledge-plan", "inspect", plan_id)
+        self.assertEqual((inspected["state"], inspected["cost_counters"]["candidate_bundles"]), ("open", 0))
+        self.assertEqual(self.formal_authority(), self.authority_before)
+
+    def test_semantic_plan_error_with_empty_findings_uses_top_level_cli_error(self):
+        with mock.patch("portable_knowledge.semantic_plan.dispatch_plan_command",
+                        side_effect=core.SemanticPlanError("PLAN_FORCED_EMPTY", "forced empty findings", [])):
+            failed = self.cli("knowledge-plan", "init", "--intent", "Defensive serialization", "--risk", "low", expected=1)
+        self.assertEqual(failed["errors"], [{"code": "PLAN_FORCED_EMPTY", "path": ".", "message": "forced empty findings"}])
+
+    def test_authority_registry_alias_is_read_and_normalized_to_canonical_refs(self):
+        refs_path = self.root / "data/store/authority-refs.json"
+        refs_path.write_text('{"schema_version":1,"authority_refs":[]}\n', encoding="utf-8")
+        subprocess.run(["git", "add", refs_path.relative_to(self.root).as_posix()], cwd=self.root, check=True)
+        subprocess.run(["git", "commit", "-qm", "legacy Authority registry alias"], cwd=self.root, check=True)
+        plan_id = self.init()["plan_id"]
+        claim = self.add_claim(plan_id, "schema", "Alias normalization", "Legacy registry input is normalized.",
+                               ("documented_contract",))["claim_id"]
+        self.add_ref(plan_id, claim, "schema", "authority/schema-contract.md", "documented_contract", "documented_contract")
+        plan = json.loads((self.root / ".local/pkc/semantic-plans" / f"{plan_id}.json").read_text())
+        staged = json.loads(base64.b64decode(plan["writes"]["data/store/authority-refs.json"]))
+        self.assertIn("refs", staged); self.assertNotIn("authority_refs", staged)
+
+    def test_conflicting_authority_registry_keys_fail_closed(self):
+        refs_path = self.root / "data/store/authority-refs.json"
+        refs_path.write_text('{"schema_version":1,"refs":[],"authority_refs":[{"id":"conflict"}]}\n', encoding="utf-8")
+        failed = self.cli("validate", expected=1)
+        self.assertEqual(failed["errors"][0]["code"], "AUTHORITY_REFS_SCHEMA")
 
     def test_fail_closed_matrix_and_zero_formal_authority_writes(self):
         plan_id = self.init()["plan_id"]

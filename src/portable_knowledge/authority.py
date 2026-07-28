@@ -9,6 +9,28 @@ STATES={"committed_baseline","working_tree_observation","released_baseline","ext
 ROLES={"design_intent","current_implementation","documented_contract","external_environment_behavior"}
 FACT_CLASSES={"runtime_behavior","public_type_surface","cli_behavior","documented_contract","external_game_evidence","transform_defaults","writeback_behavior","evidence_scope"}
 
+
+class AuthorityRegistryError(ValueError):
+ pass
+
+
+def authority_refs_from_document(document:dict[str,Any])->list[dict[str,Any]]:
+ """Read canonical ``refs`` while accepting the legacy ``authority_refs`` alias."""
+ canonical=document.get('refs'); alias=document.get('authority_refs')
+ if canonical is not None and alias is not None and canonical!=alias:
+  raise AuthorityRegistryError("Authority Reference registry has conflicting refs and authority_refs keys")
+ refs=canonical if canonical is not None else alias if alias is not None else []
+ if not isinstance(refs,list):
+  raise AuthorityRegistryError("Authority Reference registry refs must be a list")
+ return refs
+
+
+def canonical_authority_document(document:dict[str,Any])->dict[str,Any]:
+ normalized={key:value for key,value in document.items() if key!='authority_refs'}
+ normalized['refs']=authority_refs_from_document(document)
+ return normalized
+
+
 def _safe(value:str)->bool:
  path=PurePosixPath(value); return bool(value) and '\\' not in value and not path.is_absolute() and '..' not in path.parts
 
@@ -81,15 +103,16 @@ def observe_authority_refs(root:Path,refs:list[dict[str,Any]])->list[dict[str,An
    observed=_committed_bytes(root,ref['path'])
    if observed is None and not (root/'.git').exists(): observed=path.read_bytes() if path.exists() else None
   else: observed=path.read_bytes() if path.exists() else None
+  observed_hash=hashlib.sha256(observed).hexdigest() if observed is not None else None
   if observed is None: baseline_status='invalidated' if policy=='invalidate_on_change' else 'missing'
   elif baseline=='working_tree_observation': baseline_status='working_observation'
   elif policy=='existence_only': baseline_status='current'
   elif policy=='manual_review': baseline_status='manual_review'
   else:
-   actual=hashlib.sha256(observed).hexdigest()
-   baseline_status='current' if actual==expected else ('invalidated' if policy=='invalidate_on_change' else 'stale')
+   baseline_status='current' if observed_hash==expected else ('invalidated' if policy=='invalidate_on_change' else 'stale')
   effective='pending_review' if baseline_status=='current' and working_status=='modified' else baseline_status
-  results.append({**ref,'status':effective,'baseline_status':baseline_status,'working_tree_status':working_status,'effective_status':effective})
+  results.append({**ref,'status':effective,'baseline_status':baseline_status,'working_tree_status':working_status,
+                  'effective_status':effective,'expected_hash':expected,'observed_hash':observed_hash})
  return results
 
 def queryable_claim_ids(claim_ids:set[str],observations:list[dict[str,Any]])->set[str]:

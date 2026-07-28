@@ -112,6 +112,6 @@ If the `build` module is unavailable, create a disposable build environment or i
 
 ## Project status
 
-Current version: `0.2.0rc3` (release candidate).
+Current version: `0.2.0rc4` (release candidate).
 
 This public repository currently has **no declared open-source license**. Public source visibility does not grant redistribution or modification rights. An explicit license must be chosen before representing PKC as open-source software.

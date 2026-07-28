@@ -129,7 +129,9 @@ Common change policies:
 - `invalidate_on_change`
 - `manual_review`
 
-The path must exist in the committed baseline. Use the Claim ID returned by `add-claim`; do not invent one.
+The path must exist in the committed baseline. Use the Claim ID returned by `add-claim`; do not invent one. An Authority Reference may not point to a path also modified by the same plan: delta rejects this as `PLAN_AUTHORITY_STAGED_DRIFT`. New references bind only to committed-baseline hashes; PKC does not infer a staged self-reference or silently approve an after-image.
+
+The Authority Reference registry's canonical array key is `refs`. The legacy `authority_refs` key is accepted as an input alias and normalized to `refs` on the next governed write. Registries containing both keys with different values fail closed as `AUTHORITY_REFS_SCHEMA`.
 
 Check and finalize:
 
@@ -191,6 +193,8 @@ Expected structured rejections include:
 - duplicate Claim;
 - incomplete Claim fact-class coverage;
 - Authority path absent from the committed baseline;
+- Authority path also modified by the current plan (`PLAN_AUTHORITY_STAGED_DRIFT`);
+- non-current full-preflight Authority status with reference/path/hash diagnostics;
 - stale/tampered Bundle hash;
 - missing successful full preflight;
 - missing approval;

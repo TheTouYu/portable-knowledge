@@ -13,7 +13,8 @@ import tempfile
 from pathlib import Path, PurePosixPath
 from typing import Any
 
-from .authority import FACT_CLASSES, validate_authority_coverage, validate_authority_ref
+from .authority import (FACT_CLASSES, authority_refs_from_document, canonical_authority_document,
+                        validate_authority_coverage, validate_authority_ref)
 from .bundle import build_bundle, canonical as bundle_bytes, digest as canonical_digest
 from .instance import Instance
 
@@ -351,7 +352,11 @@ def add_authority_ref(root: Path, instance: Instance, args: argparse.Namespace) 
         current = _committed_bytes(root, plan["baseline_commit"], refs_rel)
         if current is None:
             _fail("PLAN_AUTHORITY_REFS_UNCOMMITTED", "authority_refs registry is not committed", path=refs_rel)
-    data = json.loads(current.decode("utf-8")); data.setdefault("refs", []).append(ref); data["refs"] = sorted(data["refs"], key=lambda item: item["id"])
+    try:
+        data = canonical_authority_document(json.loads(current.decode("utf-8")))
+    except ValueError as exc:
+        _fail("PLAN_AUTHORITY_REFS_SCHEMA", str(exc), path=refs_rel)
+    data["refs"].append(ref); data["refs"] = sorted(data["refs"], key=lambda item: item["id"])
     plan["writes"][refs_rel] = base64.b64encode((json.dumps(data, ensure_ascii=False, indent=2) + "\n").encode()).decode("ascii")
     plan.setdefault("path_operations", {}).setdefault(refs_rel, []).append("add_authority_ref")
     plan["authority_refs"].append(ref); plan["operations"].append(operation); plan["delta"] = None
@@ -405,7 +410,7 @@ def _validation_records(staging: Path, instance: Instance, cases: list[dict[str,
     refs_path = instance.authority.get("authority_refs")
     if refs_path and (staging / refs_path).is_file():
         from .authority import observe_authority_refs
-        refs = observe_authority_refs(staging, json.loads((staging / refs_path).read_text(encoding="utf-8")).get("refs", []))
+        refs = observe_authority_refs(staging, authority_refs_from_document(json.loads((staging / refs_path).read_text(encoding="utf-8"))))
     failed = [item["case_id"] for item in case_records if not item["ok"]]
     ok = validation["ok"] and projection["ok"] and tree.get("ok", False) and not failed and all(item.get("effective_status", item.get("status")) in {"current", "fresh"} for item in refs)
     return {"ok": ok, "validation": validation, "projection": projection, "tree": tree,
@@ -424,13 +429,19 @@ def check_delta(root: Path, instance: Instance, args: argparse.Namespace) -> dic
         planned_claims = [claim for claim in claims if claim["id"] in changed_ids]
         findings = [{"code": item.code, "path": item.path, "message": item.message} for item in parse_findings]
         refs_rel = instance.authority.get("authority_refs")
-        all_refs = json.loads((staging / refs_rel).read_text(encoding="utf-8")).get("refs", []) if refs_rel else []
+        all_refs = authority_refs_from_document(json.loads((staging / refs_rel).read_text(encoding="utf-8"))) if refs_rel else []
         findings.extend({**item, "path": refs_rel or "authority_ref", "message": "missing changed Claim Authority fact coverage"}
                         for item in validate_authority_coverage(planned_claims, all_refs))
         for claim_id, change in plan.get("existing_claim_changes", {}).items():
             if change["semantic_declaration"] in {"correct", "expand"} and not any(claim_id in ref.get("claim_ids", []) for ref in all_refs):
                 findings.append({"code": "PLAN_CLAIM_AUTHORITY_INSUFFICIENT", "path": refs_rel or "authority_ref", "message": f"{claim_id} correction/expansion lacks Authority coverage"})
         for ref in plan["authority_refs"]:
+            if ref["path"] in plan.get("writes", {}):
+                findings.append({"code": "PLAN_AUTHORITY_STAGED_DRIFT", "path": ref["path"],
+                                 "message": "Authority Reference path is also modified by the current plan; committed-baseline hashes cannot authorize staged self-reference",
+                                 "authority_ref_id": ref["id"], "claim_ids": ref.get("claim_ids", []),
+                                 "staged_by_current_plan": True})
+                continue
             committed = _committed_bytes(root, plan["baseline_commit"], ref["path"])
             if committed is None or hashlib.sha256(committed).hexdigest() != ref["approved_hash"]:
                 findings.append({"code": "PLAN_AUTHORITY_STALE", "path": ref["path"], "message": "committed Authority hash changed"})
@@ -541,6 +552,21 @@ def finalize(root: Path, instance: Instance, args: argparse.Namespace) -> dict[s
     if not records["ok"]:
         findings = records["validation"].get("errors", []) + records["projection"].get("errors", [])
         findings += [{"code": "PLAN_FULL_EVALUATION_FAILED", "path": "evaluation", "message": case_id, "case_id": case_id} for case_id in records["failed_case_ids"]]
+        changed_paths = set(plan.get("writes", {}))
+        for ref in records["authority_records"]:
+            status = ref.get("effective_status", ref.get("status"))
+            if status in {"current", "fresh"}:
+                continue
+            findings.append({"code": "PLAN_AUTHORITY_STAGED_DRIFT" if ref.get("path") in changed_paths else "PLAN_FULL_AUTHORITY_NOT_CURRENT",
+                             "path": ref.get("path", "authority_ref"),
+                             "message": f"Authority Reference {ref.get('id', 'unknown')} is not current during full staged preflight: {status}",
+                             "authority_ref_id": ref.get("id"), "claim_ids": ref.get("claim_ids", []),
+                             "baseline_status": ref.get("baseline_status"), "working_tree_status": ref.get("working_tree_status"),
+                             "effective_status": status, "expected_hash": ref.get("expected_hash", ref.get("approved_hash")),
+                             "observed_hash": ref.get("observed_hash"), "staged_by_current_plan": ref.get("path") in changed_paths})
+        if not findings:
+            findings.append({"code": "PLAN_FULL_PREFLIGHT_FAILED", "path": "full_preflight",
+                             "message": "full staged preflight failed without component findings"})
         raise _core().SemanticPlanError("PLAN_FULL_PREFLIGHT_FAILED", "full staged preflight failed", findings)
     plan["counters"]["full_checks"] += 1; plan["counters"]["full_preflight_checks"] += 1
     plan["counters"]["candidate_bundles"] += 1; _counters(plan); _assert_budget(plan)
@@ -621,7 +647,7 @@ def _compact(plan: dict[str, Any], command: str, values: dict[str, Any], *, summ
     payload = {"ok": not findings, "command": command, "plan_id": plan["plan_id"], "plan_digest": _content_digest(plan),
                "summary": summary, "failed_case_ids": values.get("failed_case_ids", []),
                "affected_case_ids": values.get("affected_case_ids", []), "artifact_path": values.get("artifact_path"),
-               "findings": [{key: item.get(key) for key in ("code", "path", "message", "case_id") if item.get(key) is not None} for item in findings[:12]],
+               "findings": [{key: item.get(key) for key in ("code", "path", "message", "case_id", "authority_ref_id", "claim_ids", "staged_by_current_plan") if item.get(key) is not None} for item in findings[:12]],
                "cost_counters": _counters(plan),
                **{key: values[key] for key in ("bundle_id", "content_hash", "changed_files", "delta_digest", "touched_operations", "touched_files", "can_finalize") if key in values},
                "errors": findings[:12]}

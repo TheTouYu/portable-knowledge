@@ -185,7 +185,7 @@ Read `project-intelligence.json`, then configured operating/current/decision rol
     decisions = "# Decision Entry\n\nNo project-specific knowledge-system decisions recorded yet.\n"
     registry = {"schema_version": 1, "nodes": [], "topics": [], "relationships": []}
     actors = {"schema_version": 1, "actors": [{"id": writer, "name": "Human review channel", "status": "active", "roles": ["owner", "business_reviewer"]}]}
-    refs = {"schema_version": 1, "authority_refs": []}
+    refs = {"schema_version": 1, "refs": []}
     contents = {
         "tools/pkc-lock.json": json.dumps(lock, ensure_ascii=False, indent=2) + "\n", "tools/pkc.py": wrapper,
         "project-intelligence.json": json.dumps(config, ensure_ascii=False, indent=2) + "\n",
