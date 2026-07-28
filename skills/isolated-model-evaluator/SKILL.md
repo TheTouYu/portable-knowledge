@@ -26,9 +26,9 @@ A successful process does not by itself prove semantic correctness or improved p
 ## Safety Defaults
 
 1. Check `git status --short --branch` before evaluation and preserve all existing worktree changes.
-2. Default to read-only verification. The evaluator gives the child model only `read,bash` unless overridden.
-3. Explicitly tell the child not to modify files, use apply flags, or perform Git mutations when evaluating read behavior.
-4. Use `--assert-no-changes`; the runner fingerprints project files before and after and fails if tracked project content changes.
+2. The evaluator gives the child model only `read,bash` unless overridden. Read/query evaluations are read-only; plan/capture evaluations may create only the reversible candidate artifacts required by their task and normal review gates.
+3. For read-only behavior, use `--assert-no-changes`; it adds an explicit read-only prompt boundary and fails when the workspace fingerprint changes.
+4. For candidate-writing behavior, omit `--assert-no-changes`, use an expendable fixture, and define an external oracle for allowed candidate files and formal-Authority invariants. This is not permission to approve/apply, perform Git mutations, or change formal authority.
 5. Pi's `bash` tool is not a sandbox. Fingerprinting detects changes after the fact; it does not prevent them. Use an expendable worktree, copy, or container for untrusted or mutation tests.
 6. Never put secrets, raw sensitive materials, private mappings, or unrestricted transcripts in the task or trace.
 7. Store raw traces and reports outside the repository by default. Do not commit model traces unless explicitly required and reviewed.
@@ -37,7 +37,7 @@ A successful process does not by itself prove semantic correctness or improved p
 
 ## Standard Evaluation
 
-Write a precise task file outside the repository or pass `--task` directly. State:
+Write a precise task file outside the repository or pass `--task` directly. For realistic routing evaluations, keep the child-facing request at the real user ambiguity level and put detailed expected classification, paths, counts, permissions, and lifecycle answers in an external child-inaccessible oracle. State only the boundaries the real user would know:
 
 - the conclusion or capability being tested;
 - exact observable steps and acceptance criteria;
