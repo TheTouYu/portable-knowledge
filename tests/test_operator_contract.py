@@ -7,6 +7,7 @@ import re
 import subprocess
 import tempfile
 import unittest
+import zipfile
 from pathlib import Path
 from unittest import mock
 
@@ -105,26 +106,85 @@ class OperatorContractTests(unittest.TestCase):
         wheel.write_bytes(b"wheel")
         provenance = {"wheel": str(wheel), "sha256": operator.digest_file(wheel), "version": "0.2.0rc5",
                       "source_commit": new_commit, "python": "/usr/bin/python", "abi": "test",
-                      "source_worktree_dirty": ["?? local.txt"]}
+                      "source_worktree_dirty": ["?? local.txt"],
+                      "capabilities": {"semantic_plan": True, "claim_revision_plan": True}}
         args = type("Args", (), {"target": self.root, "source_repository": str(ROOT),
                                   "source_commit": new_commit, "output": Path(self.temp.name) / "upgrade.json",
                                   "representative_query": ["question"], "project_check": ["true"]})()
-        with mock.patch.object(operator, "ensure_wheel_provenance", return_value=provenance):
+        current_capabilities = {"semantic_plan": True, "claim_revision_plan": False,
+                                "deprecated_route": True}
+        with mock.patch.object(operator, "ensure_wheel_provenance", return_value=provenance), \
+             mock.patch.object(operator, "installed_capabilities", return_value=current_capabilities):
             result = operator.command_plan_upgrade(args)
         plan = json.loads(args.output.read_text(encoding="utf-8"))
         self.assertEqual(plan["kind"], "pkc-upgrade")
         self.assertEqual([item["path"] for item in plan["writes"]], ["tools/pkc-lock.json"])
         self.assertEqual(plan["rollback_runtime"], lock["runtime"])
         self.assertEqual(plan["source"]["wheel_sha256"], provenance["sha256"])
+        self.assertEqual(plan["compatibility"]["capability_diff"], {
+            "added": [], "removed": ["deprecated_route"],
+            "changed": {"claim_revision_plan": {"current": False, "target": True}},
+            "unchanged": ["semantic_plan"],
+        })
+        self.assertEqual(result["compatibility"], plan["compatibility"])
         self.assertEqual(result["plan_hash"], plan["plan_hash"])
         self.assertEqual(json.loads((self.root / "tools/pkc-lock.json").read_text()), lock)
 
+    def test_builder_preflight_selects_python_build_when_uv_is_absent(self):
+        completed = subprocess.CompletedProcess([], 0, stdout="", stderr="")
+        with mock.patch.object(operator.shutil, "which", return_value=None), \
+             mock.patch.object(operator, "run", return_value=completed), \
+             mock.patch.object(operator.importlib.util, "find_spec", return_value=object()):
+            environment = operator.build_environment()
+        self.assertTrue(environment["pip_available"])
+        self.assertTrue(environment["venv_available"])
+        self.assertTrue(environment["build_available"])
+        self.assertEqual(environment["builder"], "venv-pip-build")
+
+    def test_builder_preflight_fails_actionably_without_usable_backend(self):
+        environment = {"python": "/python", "python_version": "3.11", "abi": "abi", "uv": None,
+                       "pip_available": True, "venv_available": True, "build_available": False,
+                       "builder": "unavailable"}
+        with mock.patch.object(operator, "_source_commit", return_value=("c" * 40, [])), \
+             mock.patch.object(operator, "build_environment", return_value=environment):
+            with self.assertRaisesRegex(operator.OperatorError, "build_available=False"):
+                operator.ensure_wheel_provenance(str(ROOT), "c" * 40)
+
+    def test_python_build_backend_uses_clean_checkout_and_output_directory(self):
+        checkout = Path(self.temp.name) / "source"
+        output = Path(self.temp.name) / "dist"
+        environment = {"python": "/python", "builder": "venv-pip-build", "uv": None}
+        with mock.patch.object(operator, "run") as run:
+            operator.build_wheel(checkout, output, environment, {"SOURCE_DATE_EPOCH": "1"})
+        run.assert_called_once_with(
+            ["/python", "-m", "build", "--wheel", "--outdir", str(output)],
+            cwd=checkout, env={"SOURCE_DATE_EPOCH": "1"})
+
+    def test_wheel_metadata_is_read_from_bytes_not_filename(self):
+        wheel = Path(self.temp.name) / "misleading-9.9-py3-none-any.whl"
+        with zipfile.ZipFile(wheel, "w") as archive:
+            archive.writestr("portable_knowledge-0.2.0rc5.dist-info/METADATA",
+                             "Metadata-Version: 2.1\nName: portable-knowledge\nVersion: 0.2.0rc5\n")
+        self.assertEqual(operator.wheel_metadata(wheel), {
+            "distribution": "portable-knowledge", "version": "0.2.0rc5"})
+
+    def test_wheel_metadata_rejects_wrong_distribution(self):
+        wheel = Path(self.temp.name) / "portable_knowledge-0.2.0rc5-py3-none-any.whl"
+        with zipfile.ZipFile(wheel, "w") as archive:
+            archive.writestr("other-1.0.dist-info/METADATA",
+                             "Metadata-Version: 2.1\nName: other\nVersion: 1.0\n")
+        with self.assertRaisesRegex(operator.OperatorError, "distribution"):
+            operator.wheel_metadata(wheel)
+
     def test_exact_commit_builder_reports_dirty_source_and_build_environment(self):
         environment = {"python": "/python", "python_version": "3.14", "abi": "abi", "uv": "/uv",
-                       "pip_available": False, "venv_available": True, "builder": "uv"}
+                       "pip_available": False, "venv_available": True, "build_available": False,
+                       "builder": "uv"}
         with mock.patch.object(operator, "_source_commit", return_value=("c" * 40, [" M local.py"])), \
              mock.patch.object(operator, "build_environment", return_value=environment), \
              mock.patch.object(operator, "CACHE", Path(self.temp.name) / "cache"), \
+             mock.patch.object(operator, "wheel_metadata", return_value={"distribution": "portable-knowledge", "version": "0.2.0rc5"}), \
+             mock.patch.object(operator, "verify_wheel_runtime", return_value={"package_version": "0.2.0rc5", "capabilities": {"semantic_plan": True}}), \
              mock.patch.object(operator, "run") as run:
             checkout = Path(self.temp.name) / "checkout"
             def fake_run(command, **kwargs):
@@ -140,7 +200,61 @@ class OperatorContractTests(unittest.TestCase):
         self.assertEqual(result["source_worktree_dirty"], [" M local.py"])
         self.assertEqual(result["abi"], "abi")
         self.assertEqual(result["distribution"], "portable-knowledge")
+        self.assertEqual(result["package_version"], "0.2.0rc5")
+        self.assertEqual(result["capabilities"], {"semantic_plan": True})
         self.assertEqual(len(result["sha256"]), 64)
+
+    def test_failed_post_switch_check_restores_lock_and_writes_rollback_receipt(self):
+        old_commit = "a" * 40
+        new_commit = "b" * 40
+        old_lock = {"schema_version": 1, "version": "0.2.0rc4", "source_commit": old_commit,
+                    "runtime": f".local/pkc/runtimes/{old_commit}"}
+        tools = self.root / "tools"
+        tools.mkdir()
+        lock_path = tools / "pkc-lock.json"
+        lock_path.write_text(json.dumps(old_lock) + "\n", encoding="utf-8")
+        wheel = Path(self.temp.name) / "portable_knowledge-0.2.0rc5-py3-none-any.whl"
+        wheel.write_bytes(b"wheel")
+        new_lock = {**old_lock, "version": "0.2.0rc5", "source_commit": new_commit,
+                    "runtime": f".local/pkc/runtimes/{new_commit}"}
+        write = operator.text_write(self.root, "tools/pkc-lock.json", json.dumps(new_lock) + "\n")
+        plan = {"schema_version": 1, "operator_contract": operator.CONTRACT, "kind": "pkc-upgrade",
+                "target_root": str(self.root), "created_from": operator.git_state(self.root),
+                "source": {"wheel": str(wheel), "wheel_sha256": operator.digest_file(wheel),
+                           "version": "0.2.0rc5", "provenance": {"build_environment": {
+                               "python": "/python", "python_version": "3.11", "abi": "abi", "builder": "uv"}}},
+                "runtime": new_lock["runtime"], "rollback_runtime": old_lock["runtime"],
+                "writes": [write], "links": [], "verification": []}
+        plan["plan_hash"] = operator.plan_hash(plan)
+        plan_path = Path(self.temp.name) / "upgrade.json"
+        plan_path.write_text(json.dumps(plan), encoding="utf-8")
+        args = type("Args", (), {"plan": plan_path, "plan_hash": plan["plan_hash"], "human_reviewed": True})()
+        current_environment = {"python": "/python", "python_version": "3.11", "abi": "abi", "builder": "uv"}
+
+        def fake_run(command, **kwargs):
+            if command[1:3] == ["-m", "venv"]:
+                runtime = Path(command[-1]); (runtime / "bin").mkdir(parents=True)
+                (runtime / "bin/python").write_text("", encoding="utf-8")
+            if command[-2:] == ["pip", "--version"]:
+                return subprocess.CompletedProcess(command, 0, stdout="pip", stderr="")
+            if command[-1:] == ["capabilities"]:
+                return subprocess.CompletedProcess(
+                    command, 0,
+                    stdout=json.dumps({"ok": True, "runtime_version": "9.9", "capabilities": {}}), stderr="")
+            return subprocess.CompletedProcess(command, 0, stdout="{}", stderr="")
+
+        with mock.patch.object(operator, "git_state", return_value=plan["created_from"]), \
+             mock.patch.object(operator, "build_environment", return_value=current_environment), \
+             mock.patch.object(operator, "run", side_effect=fake_run):
+            with self.assertRaisesRegex(operator.OperatorError, "rollback_receipt"):
+                operator.command_apply(args)
+        self.assertEqual(json.loads(lock_path.read_text(encoding="utf-8")), old_lock)
+        receipt_path = self.root / ".local/pkc/operator-receipts" / f"upgrade-{plan['plan_hash']}.json"
+        receipt = json.loads(receipt_path.read_text(encoding="utf-8"))
+        self.assertTrue(receipt["prior_selection_restored"])
+        self.assertIn("runtime version mismatch", receipt["failure"])
+        self.assertEqual(receipt["retained_runtimes"], [old_lock["runtime"], new_lock["runtime"]])
+        self.assertIn("create a new plan", receipt["next"])
 
     def test_apply_requires_human_review_before_any_mutation(self):
         plan = {"schema_version": 1, "operator_contract": operator.CONTRACT, "kind": "pkc-install",
@@ -197,6 +311,8 @@ class OperatorContractTests(unittest.TestCase):
         self.assertIn("may not contain PKC's maintainer-only `docs/SEMANTIC-CHANGES.md`", text)
         self.assertIn("plan-upgrade", text)
         self.assertIn("install/adopt are not upgrade substitutes", text)
+        self.assertIn("current/target capability diff", text)
+        self.assertIn("rollback receipt", text)
         self.assertIn("Do not add isolated evaluation to routine Claim creation", text)
 
     def test_documented_operator_commands_exist(self):

@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import argparse
 import hashlib
+import importlib.util
 import json
 import os
 import re
@@ -12,6 +13,8 @@ import subprocess
 import sys
 import tempfile
 import sysconfig
+import zipfile
+from email.parser import Parser
 from pathlib import Path, PurePosixPath
 from typing import Any
 
@@ -99,18 +102,103 @@ def build_environment() -> dict[str, Any]:
     uv = shutil.which("uv")
     pip = run([str(python), "-m", "pip", "--version"], check=False)
     venv = run([str(python), "-m", "venv", "--help"], check=False)
+    build_available = importlib.util.find_spec("build") is not None
+    pip_available = pip.returncode == 0
+    venv_available = venv.returncode == 0
+    builder = "uv" if uv else "venv-pip-build" if pip_available and venv_available and build_available else "unavailable"
     return {"python": str(python), "python_version": sys.version.split()[0],
             "abi": sysconfig.get_config_var("SOABI") or "unknown", "uv": uv,
-            "pip_available": pip.returncode == 0, "venv_available": venv.returncode == 0,
-            "builder": "uv" if uv else "unavailable"}
+            "pip_available": pip_available, "venv_available": venv_available,
+            "build_available": build_available, "builder": builder}
+
+
+def build_wheel(checkout: Path, output: Path, environment: dict[str, Any], env: dict[str, str]) -> None:
+    if environment["builder"] == "uv":
+        command = [environment["uv"], "build", "--wheel", "--out-dir", str(output)]
+    elif environment["builder"] == "venv-pip-build":
+        command = [environment["python"], "-m", "build", "--wheel", "--outdir", str(output)]
+    else:
+        raise OperatorError("no usable wheel builder")
+    run(command, cwd=checkout, env=env)
+
+
+def wheel_metadata(wheel: Path) -> dict[str, str]:
+    """Read identity from the wheel payload rather than trusting its filename."""
+    try:
+        with zipfile.ZipFile(wheel) as archive:
+            names = [name for name in archive.namelist() if name.endswith(".dist-info/METADATA")]
+            if len(names) != 1:
+                raise OperatorError("wheel must contain exactly one dist-info/METADATA record")
+            message = Parser().parsestr(archive.read(names[0]).decode("utf-8"))
+    except (OSError, UnicodeDecodeError, zipfile.BadZipFile, KeyError) as exc:
+        raise OperatorError(f"cannot inspect wheel metadata: {exc}") from exc
+    distribution = message.get("Name", "").strip()
+    version = message.get("Version", "").strip()
+    if distribution.casefold().replace("_", "-") != "portable-knowledge":
+        raise OperatorError(f"wheel distribution is not portable-knowledge: {distribution or 'missing'}")
+    if not version:
+        raise OperatorError("wheel metadata version is missing")
+    return {"distribution": "portable-knowledge", "version": version}
+
+
+def _install_wheel(python: Path, wheel: Path, uv: str | None) -> None:
+    pip = run([str(python), "-m", "pip", "--version"], check=False)
+    if pip.returncode == 0:
+        run([str(python), "-m", "pip", "install", "--no-deps", str(wheel)])
+    elif uv:
+        run([uv, "pip", "install", "--python", str(python), "--no-deps", str(wheel)])
+    else:
+        raise OperatorError("isolated runtime has no pip and uv is unavailable")
+
+
+def verify_wheel_runtime(wheel: Path, environment: dict[str, Any]) -> dict[str, Any]:
+    """Install into an expendable environment and verify package and Core identities."""
+    with tempfile.TemporaryDirectory(prefix="pkc-wheel-verify-") as directory:
+        runtime = Path(directory) / "runtime"
+        run([environment["python"], "-m", "venv", str(runtime)])
+        python = runtime / ("Scripts/python.exe" if os.name == "nt" else "bin/python")
+        _install_wheel(python, wheel, environment.get("uv"))
+        package = run([str(python), "-c",
+                       "import importlib.metadata; print(importlib.metadata.version('portable-knowledge'))"])
+        executable = runtime / ("Scripts/pkc.exe" if os.name == "nt" else "bin/pkc")
+        capabilities = json.loads(run([str(executable), "capabilities"]).stdout)
+        if not capabilities.get("ok"):
+            raise OperatorError("built wheel capabilities check failed")
+        return {"package_version": package.stdout.strip(),
+                "capabilities": capabilities.get("capabilities", {})}
+
+
+def installed_capabilities(root: Path, lock: dict[str, Any]) -> dict[str, Any]:
+    runtime = root / lock.get("runtime", "")
+    executable = runtime / ("Scripts/pkc.exe" if os.name == "nt" else "bin/pkc")
+    if not executable.is_file():
+        raise OperatorError(f"current locked PKC executable is missing: {executable}")
+    env = os.environ.copy()
+    env.pop("PYTHONPATH", None)
+    payload = json.loads(run([str(executable), "capabilities"], cwd=root, env=env).stdout)
+    if not payload.get("ok"):
+        raise OperatorError("current locked runtime capabilities check failed")
+    return payload.get("capabilities", {})
+
+
+def capability_diff(current: dict[str, Any], target: dict[str, Any]) -> dict[str, Any]:
+    common = sorted(current.keys() & target.keys())
+    return {"added": sorted(target.keys() - current.keys()),
+            "removed": sorted(current.keys() - target.keys()),
+            "changed": {key: {"current": current[key], "target": target[key]}
+                        for key in common if current[key] != target[key]},
+            "unchanged": [key for key in common if current[key] == target[key]]}
 
 
 def ensure_wheel_provenance(repository: str, commit: str) -> dict[str, Any]:
     commit, source_dirty = _source_commit(repository, commit)
     environment = build_environment()
     if environment["builder"] == "unavailable":
-        raise OperatorError("no usable wheel builder: install uv outside the project runtime; "
-                            f"python={environment['python']} pip_available={environment['pip_available']}")
+        raise OperatorError("no usable wheel builder: install uv or provide Python with venv, pip, and build "
+                            f"outside the project runtime; python={environment['python']} "
+                            f"venv_available={environment['venv_available']} "
+                            f"pip_available={environment['pip_available']} "
+                            f"build_available={environment['build_available']}")
     identity = digest_bytes(canonical({"repository": str(repository), "commit": commit,
                                        "abi": environment["abi"], "builder": environment["builder"]}).encode())[:16]
     wheel_dir = CACHE / "wheels" / commit / identity
@@ -118,8 +206,12 @@ def ensure_wheel_provenance(repository: str, commit: str) -> dict[str, Any]:
     if metadata_path.is_file():
         metadata = json.loads(metadata_path.read_text(encoding="utf-8"))
         wheel = wheel_dir / metadata["filename"]
+        inspected = wheel_metadata(wheel) if wheel.is_file() else {}
         if (wheel.is_file() and digest_file(wheel) == metadata.get("sha256")
-                and metadata.get("source_commit") == commit):
+                and metadata.get("source_commit") == commit
+                and inspected == {"distribution": metadata.get("distribution"), "version": metadata.get("version")}
+                and metadata.get("package_version") == metadata.get("version")
+                and isinstance(metadata.get("capabilities"), dict)):
             return {**metadata, "wheel": str(wheel), "source_worktree_dirty": source_dirty,
                     "build_environment": environment, "cache_reused": True}
     wheel_dir.mkdir(parents=True, exist_ok=True)
@@ -132,21 +224,23 @@ def ensure_wheel_provenance(repository: str, commit: str) -> dict[str, Any]:
         output = Path(directory) / "dist"
         timestamp = run(["git", "-C", str(checkout), "show", "-s", "--format=%ct", commit]).stdout.strip()
         env = os.environ.copy(); env["SOURCE_DATE_EPOCH"] = timestamp
-        run([environment["uv"], "build", "--wheel", "--out-dir", str(output)], cwd=checkout, env=env)
+        build_wheel(checkout, output, environment, env)
         wheels = list(output.glob("*.whl"))
         if len(wheels) != 1:
             raise OperatorError("expected exactly one wheel")
         target = wheel_dir / wheels[0].name
         shutil.copy2(wheels[0], target)
         sha = digest_file(target)
-        match = re.fullmatch(r"portable_knowledge-([^-]+)-.+\.whl", target.name)
-        if not sha or not match:
-            raise OperatorError("built wheel name or distribution is invalid")
-        metadata = {"filename": target.name, "sha256": sha, "version": match.group(1),
-                    "distribution": "portable-knowledge", "source_repository": str(repository),
-                    "source_commit": commit, "python": environment["python"],
-                    "python_version": environment["python_version"], "abi": environment["abi"],
-                    "builder": environment["builder"]}
+        if not sha:
+            raise OperatorError("built wheel hash is unavailable")
+        inspected = wheel_metadata(target)
+        verified = verify_wheel_runtime(target, environment)
+        if verified["package_version"] != inspected["version"]:
+            raise OperatorError("wheel metadata and importable package versions differ")
+        metadata = {"filename": target.name, "sha256": sha, **inspected, **verified,
+                    "source_repository": str(repository), "source_commit": commit,
+                    "python": environment["python"], "python_version": environment["python_version"],
+                    "abi": environment["abi"], "builder": environment["builder"]}
         metadata_path.write_text(json.dumps(metadata, indent=2) + "\n", encoding="utf-8")
         return {**metadata, "wheel": str(target), "source_worktree_dirty": source_dirty,
                 "build_environment": environment, "cache_reused": False}
@@ -346,6 +440,10 @@ def command_plan_upgrade(args: argparse.Namespace) -> dict[str, Any]:
                 "wheel_cache": str(wheel), "runtime": f".local/pkc/runtimes/{commit}",
                 "python_requirement": ">=3.11"}
     write = text_write(root, "tools/pkc-lock.json", json.dumps(new_lock, ensure_ascii=False, indent=2) + "\n")
+    current_capabilities = installed_capabilities(root, current)
+    compatibility = {"current_capabilities": current_capabilities,
+                     "target_capabilities": provenance.get("capabilities", {}),
+                     "capability_diff": capability_diff(current_capabilities, provenance.get("capabilities", {}))}
     state = git_state(root)
     verification = ["capabilities", "module-origin", "validate", "rebuild", "validate"]
     config = json.loads((root / "project-intelligence.json").read_text(encoding="utf-8"))
@@ -359,7 +457,7 @@ def command_plan_upgrade(args: argparse.Namespace) -> dict[str, Any]:
                        "version": provenance["version"], "wheel": str(wheel),
                        "wheel_sha256": provenance["sha256"], "provenance": provenance},
             "runtime": new_lock["runtime"], "rollback_runtime": current.get("runtime"),
-            "writes": [write], "links": [], "verification": verification,
+            "compatibility": compatibility, "writes": [write], "links": [], "verification": verification,
             "representative_queries": args.representative_query, "project_checks": args.project_check,
             "excluded": ["formal knowledge authority", "Git commit/push", "old runtime deletion"],
             "human_reviewed": False}
@@ -369,6 +467,7 @@ def command_plan_upgrade(args: argparse.Namespace) -> dict[str, Any]:
     return {"ok": True, "command": "plan-upgrade", "plan_file": str(args.output),
             "plan_hash": plan["plan_hash"], "current": plan["current"], "target": plan["source"],
             "runtime": plan["runtime"], "rollback_runtime": plan["rollback_runtime"],
+            "compatibility": compatibility,
             "writes": [{k: write[k] for k in ("path", "action", "expected_sha256", "new_sha256")}],
             "verification": verification, "target_worktree_dirty": state["status"],
             "next": "show this exact plan hash to a human; apply only after review", "errors": []}
@@ -416,13 +515,10 @@ def command_apply(args: argparse.Namespace) -> dict[str, Any]:
         raise OperatorError("planned runtime already exists")
     run([sys.executable, "-m", "venv", str(runtime)])
     python = runtime / ("Scripts/python.exe" if os.name == "nt" else "bin/python")
-    pip_check = run([str(python), "-m", "pip", "--version"], check=False)
-    if pip_check.returncode == 0:
-        run([str(python), "-m", "pip", "install", "--no-deps", str(wheel)])
-    elif shutil.which("uv"):
-        run([shutil.which("uv"), "pip", "install", "--python", str(python), "--no-deps", str(wheel)])
-    else:
-        raise OperatorError("new runtime has no pip and uv is unavailable; canonical selection was not changed")
+    try:
+        _install_wheel(python, wheel, shutil.which("uv"))
+    except OperatorError as exc:
+        raise OperatorError(f"{exc}; canonical selection was not changed") from exc
     written: list[str] = []
     previous = {item["path"]: (root / item["path"]).read_bytes() if (root / item["path"]).is_file() else None
                 for item in plan["writes"]}
@@ -438,7 +534,15 @@ def command_apply(args: argparse.Namespace) -> dict[str, Any]:
         results = []
         for command in (["capabilities"], ["validate"], ["rebuild"], ["validate"]):
             result = run([*wrapper, *command], cwd=root)
-            results.append(json.loads(result.stdout))
+            payload = json.loads(result.stdout)
+            if command == ["capabilities"]:
+                expected_version = plan["source"].get("version")
+                observed_versions = {payload.get("runtime_version"), payload.get("core_version")}
+                observed_versions.discard(None)
+                if expected_version and observed_versions != {expected_version}:
+                    raise OperatorError("runtime version mismatch after switch: "
+                                        f"expected={expected_version} observed={sorted(observed_versions)}")
+            results.append(payload)
         if "knowledge-check" in plan.get("verification", []):
             result = run([*wrapper, "knowledge-check", "--format", "json"], cwd=root)
             results.append(json.loads(result.stdout))
@@ -461,7 +565,16 @@ def command_apply(args: argparse.Namespace) -> dict[str, Any]:
                 path.unlink(missing_ok=True)
             else:
                 path.write_bytes(content)
-        raise OperatorError(f"post-switch verification failed; prior selection restored; both runtimes preserved: {exc}") from exc
+        receipt_path = root / ".local" / "pkc" / "operator-receipts" / f"upgrade-{actual}.json"
+        receipt = {"schema_version": 1, "kind": "pkc-upgrade-rollback", "plan_hash": actual,
+                   "ok": False, "failure": str(exc), "prior_selection_restored": True,
+                   "restored_files": sorted(previous),
+                   "retained_runtimes": [value for value in (plan.get("rollback_runtime"), plan.get("runtime")) if value],
+                   "next": "inspect this receipt and both runtimes; fix the cause and create a new plan"}
+        receipt_path.parent.mkdir(parents=True, exist_ok=True)
+        receipt_path.write_text(json.dumps(receipt, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
+        raise OperatorError("post-switch verification failed; prior selection restored; both runtimes preserved; "
+                            f"rollback_receipt={receipt_path}: {exc}") from exc
     return {"ok": True, "command": "apply-plan", "plan_hash": actual, "target": str(root),
             "runtime": plan["runtime"], "written": written, "links": [x["path"] for x in plan["links"]],
             "verification": results, "git_status": git_state(root)["status"],
