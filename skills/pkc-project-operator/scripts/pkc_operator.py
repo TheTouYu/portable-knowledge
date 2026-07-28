@@ -142,7 +142,7 @@ def initial_assets(root: Path, project_id: str, commit: str, remote: str, wheel:
     config = {
         "schema_version": 1, "instance": {"id": project_id, "name": root.name},
         "pkc": {"version": version, "projection_path": ".local/pkc/projection"},
-        "authority": {"registry": "data/knowledge/registry.json", "actors": "data/knowledge/actors.json", "store": "data/knowledge", "knowledge": "knowledge"},
+        "authority": {"registry": "data/knowledge/registry.json", "actors": "data/knowledge/actors.json", "store": "data/knowledge", "knowledge": "knowledge", "authority_refs": "data/knowledge/authority-refs.json"},
         "identities": {"principal": {"id": "human-reviewer"}, "executor": {"id": "agent"},
                        "workspace": {"id": f"{project_id}-workspace", "path": "."}, "writer": {"id": writer}},
         "compatibility": {"v1_actor_map": {writer: "human-reviewer"}},

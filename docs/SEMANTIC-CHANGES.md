@@ -39,7 +39,7 @@ pkc knowledge-plan add-claim PLAN_ID \
   --statement "One stable, atomic assertion." \
   --boundary "When this claim applies and what it does not prove." \
   --permission internal \
-  --fact-class current_implementation
+  --fact-class runtime_behavior
 ```
 
 `--topic-path` may be omitted when the Topic already exists. Repeat `--fact-class` when the Claim requires multiple controlled fact classes.
@@ -51,18 +51,30 @@ pkc knowledge-plan add-authority-ref PLAN_ID \
   --claim-id CLAIM_ID \
   --path src/module.py \
   --locator "function:run" \
-  --role implementation \
+  --role current_implementation \
   --change-policy invalidate_on_change \
-  --fact-class current_implementation
+  --fact-class runtime_behavior
 ```
 
 Valid Authority roles:
 
-- `implementation`
-- `test`
-- `schema`
-- `contract`
-- `verification`
+- `design_intent`
+- `current_implementation`
+- `documented_contract`
+- `external_environment_behavior`
+
+Valid fact classes:
+
+- `runtime_behavior`
+- `public_type_surface`
+- `cli_behavior`
+- `documented_contract`
+- `external_game_evidence`
+- `transform_defaults`
+- `writeback_behavior`
+- `evidence_scope`
+
+A role classifies what proposition the reference can establish; a fact class names the specific machine/evidence surface covered. Do not substitute one vocabulary for the other.
 
 Common change policies:
 

@@ -65,11 +65,11 @@ python tools/pkc.py knowledge-plan init --intent "..." --risk medium
 python tools/pkc.py knowledge-plan add-claim PLAN_ID \
   --node NODE --topic-id TOPIC --topic-path knowledge/topic.md \
   --title "..." --statement "..." --boundary "..." \
-  --permission internal --fact-class current_implementation
+  --permission internal --fact-class runtime_behavior
 python tools/pkc.py knowledge-plan add-authority-ref PLAN_ID \
   --claim-id CLAIM_ID --path src/module.py --locator "function:name" \
-  --role implementation --change-policy invalidate_on_change \
-  --fact-class current_implementation
+  --role current_implementation --change-policy invalidate_on_change \
+  --fact-class runtime_behavior
 python tools/pkc.py knowledge-plan check PLAN_ID --mode delta
 python tools/pkc.py knowledge-plan finalize PLAN_ID
 python tools/pkc.py bundle-inspect BUNDLE_ID --format json
@@ -86,7 +86,7 @@ python tools/pkc.py query "representative question" --level 2
 python tools/pkc.py bundle-inspect BUNDLE_ID --format json
 ```
 
-Valid Authority roles are `implementation`, `test`, `schema`, `contract`, and `verification`. `bundle-status` has no positional Bundle ID. Query text is positional; there is no `--text` option.
+Valid Authority roles are `design_intent`, `current_implementation`, `documented_contract`, and `external_environment_behavior`. Valid fact classes are `runtime_behavior`, `public_type_surface`, `cli_behavior`, `documented_contract`, `external_game_evidence`, `transform_defaults`, `writeback_behavior`, and `evidence_scope`. A role and a fact class are different controlled vocabularies. `bundle-status` has no positional Bundle ID. Query text is positional; there is no `--text` option.
 
 ## Human review language
 

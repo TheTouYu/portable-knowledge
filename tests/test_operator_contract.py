@@ -3,6 +3,7 @@ from __future__ import annotations
 import importlib.util
 import json
 import os
+import re
 import subprocess
 import tempfile
 import unittest
@@ -15,6 +16,7 @@ SPEC = importlib.util.spec_from_file_location("pkc_operator", SCRIPT)
 operator = importlib.util.module_from_spec(SPEC)
 assert SPEC.loader
 SPEC.loader.exec_module(operator)
+from portable_knowledge.authority import FACT_CLASSES, ROLES
 
 
 class OperatorContractTests(unittest.TestCase):
@@ -52,6 +54,9 @@ class OperatorContractTests(unittest.TestCase):
         registry = json.loads(by_path["data/knowledge/registry.json"])
         self.assertEqual(registry["nodes"], [])
         self.assertEqual(registry["topics"], [])
+        config = json.loads(by_path["project-intelligence.json"])
+        self.assertEqual(config["authority"]["authority_refs"], "data/knowledge/authority-refs.json")
+        self.assertIn(config["authority"]["authority_refs"], by_path)
         lock = json.loads(by_path["tools/pkc-lock.json"])
         self.assertEqual(lock["source_commit"], "a" * 40)
         self.assertEqual(lock["wheel_sha256"], "b" * 64)
@@ -85,6 +90,16 @@ class OperatorContractTests(unittest.TestCase):
         (self.root / "working.txt").write_text("change", encoding="utf-8")
         with self.assertRaisesRegex(operator.OperatorError, "Git state changed"):
             operator.command_apply(args)
+
+    def test_documented_authority_vocabularies_match_core(self):
+        for relative in ("docs/SEMANTIC-CHANGES.md", "skills/pkc-project-operator/references/MODES.md"):
+            text = (ROOT / relative).read_text(encoding="utf-8")
+            for role in ROLES:
+                self.assertIn(f"`{role}`", text, relative)
+            for fact_class in FACT_CLASSES:
+                self.assertIn(f"`{fact_class}`", text, relative)
+            self.assertNotRegex(text, re.compile(r"--role (?:implementation|test|schema|contract|verification)(?:\s|\\)"), relative)
+            self.assertNotIn("--fact-class current_implementation", text, relative)
 
     def test_skill_declares_full_lifecycle_and_no_self_review(self):
         text = (ROOT / "skills/pkc-project-operator/SKILL.md").read_text(encoding="utf-8")
