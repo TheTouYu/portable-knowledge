@@ -20,11 +20,16 @@ PKC has no third-party runtime dependencies. Build frontends such as `build` or 
 ## 2. Clone
 
 ```bash
-git clone <repository-url> portable-knowledge
+git clone https://github.com/TheTouYu/portable-knowledge.git
 cd portable-knowledge
 ```
 
-Until a remote URL is configured, replace `<repository-url>` with the path or URL supplied by the repository owner.
+Verify the configured remote before installing:
+
+```bash
+git remote get-url origin
+# https://github.com/TheTouYu/portable-knowledge.git
+```
 
 ## 3. Install non-editably
 

@@ -26,7 +26,7 @@ Requirements:
 Install from a clone into an isolated virtual environment:
 
 ```bash
-git clone <repository-url> portable-knowledge
+git clone https://github.com/TheTouYu/portable-knowledge.git
 cd portable-knowledge
 python3 -m venv .venv
 .venv/bin/python -m pip install --upgrade pip
@@ -97,4 +97,4 @@ If the `build` module is unavailable, create a disposable build environment or i
 
 Current version: `0.2.0rc1` (release candidate).
 
-This repository currently has **no declared open-source license**. Source availability does not grant redistribution or modification rights. Add an explicit license before public distribution.
+This public repository currently has **no declared open-source license**. Public source visibility does not grant redistribution or modification rights. An explicit license must be chosen before representing PKC as open-source software.

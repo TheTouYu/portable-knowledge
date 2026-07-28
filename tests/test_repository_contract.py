@@ -23,6 +23,10 @@ class RepositoryContractTests(unittest.TestCase):
         readme = (ROOT / "README.md").read_text(encoding="utf-8")
         for relative in ("AGENTS.md", "INSTALL.md", "docs/QUICKSTART.md", "docs/SEMANTIC-CHANGES.md"):
             self.assertIn(relative, readme)
+        repository_url = "https://github.com/TheTouYu/portable-knowledge"
+        self.assertIn(repository_url, readme)
+        self.assertIn(repository_url, (ROOT / "INSTALL.md").read_text(encoding="utf-8"))
+        self.assertIn(repository_url, (ROOT / "pyproject.toml").read_text(encoding="utf-8"))
 
     def test_example_is_complete_and_ignores_projection(self):
         config = json.loads((EXAMPLE / "project-intelligence.json").read_text(encoding="utf-8"))
