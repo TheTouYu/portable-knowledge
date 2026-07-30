@@ -113,8 +113,14 @@ class SemanticPlanContractTests(unittest.TestCase):
         self.assertEqual(delta["touched_operations"], 9)
         self.assertTrue(delta["can_finalize"])
         self.assertEqual(self.formal_authority(), self.authority_before)
+        open_inspection = self.cli("knowledge-plan", "inspect", plan_id)
+        self.assertEqual((open_inspection["approval_recorded"], open_inspection["bundle_state"], open_inspection["bundle_applied"]),
+                         (False, "not_finalized", False))
         finalized = self.cli("knowledge-plan", "finalize", plan_id)
         self.assertFalse(finalized["summary"]["approved"]); self.assertFalse(finalized["summary"]["applied"])
+        finalized_inspection = self.cli("knowledge-plan", "inspect", plan_id)
+        self.assertEqual((finalized_inspection["approval_recorded"], finalized_inspection["bundle_state"], finalized_inspection["bundle_applied"]),
+                         (False, "draft", False))
         self.assertEqual(len(list((self.root / "data/knowledge/bundles").glob("bnd_*.json"))), 1)
         bundle = json.loads((self.root / "data/knowledge/bundles" / f"{finalized['bundle_id']}.json").read_text(encoding="utf-8"))
         self.assertTrue(all(set(action["provenance"]) == {"plan_id", "operation_id", "operation_type", "operation_digest", "core_version"}
@@ -124,8 +130,13 @@ class SemanticPlanContractTests(unittest.TestCase):
         self.assertTrue(replay["summary"]["replayed"])
         self.assertEqual((replay["bundle_id"], replay["content_hash"]), (finalized["bundle_id"], finalized["content_hash"]))
         self.assertEqual(len(list((self.root / "data/knowledge/bundles").glob("bnd_*.json"))), 1)
-        # Only the immutable, unapproved Bundle artifact was created; production authority remains unchanged.
+        # Only the immutable Bundle artifact was created; production authority remains unchanged.
         self.assertEqual(self.formal_authority(), self.authority_before)
+        approved = self.cli("bundle-approve", finalized["bundle_id"], "--content-hash", finalized["content_hash"], "--apply")
+        self.assertTrue(approved["applied"])
+        approved_inspection = self.cli("knowledge-plan", "inspect", plan_id)
+        self.assertEqual((approved_inspection["approval_recorded"], approved_inspection["bundle_state"], approved_inspection["bundle_applied"]),
+                         (True, "approved", False))
 
     def test_same_plan_replay_keeps_ids_delta_diff_files_and_bundle(self):
         plan_id, claims, delta = self.build_complete_plan()

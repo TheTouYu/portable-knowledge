@@ -15,7 +15,8 @@ from typing import Any
 
 from .authority import (FACT_CLASSES, authority_refs_from_document, canonical_authority_document,
                         validate_authority_coverage, validate_authority_ref)
-from .bundle import build_bundle, canonical as bundle_bytes, digest as canonical_digest
+from .bundle import (build_bundle, canonical as bundle_bytes, digest as canonical_digest,
+                     lifecycle_projection)
 from .evaluation_contract import (EvaluationContractError, evaluate_normalized_cases,
                                   load_evaluation_contract, select_delta_cases)
 from .instance import Instance
@@ -799,8 +800,24 @@ def record_post_apply_full_check(root: Path, instance: Instance, bundle: dict[st
 
 def inspect(root: Path, instance: Instance, args: argparse.Namespace) -> dict[str, Any]:
     _, plan = _load(root, instance, args.plan_id)
-    return _summary(plan, "inspect", delta=plan.get("delta"), finalized_bundle_id=(plan.get("finalized_bundle") or {}).get("bundle_id"),
-                    full_preflight_receipt=plan.get("full_preflight_receipt"), post_apply_receipt=plan.get("post_apply_receipt"))
+    bundle = plan.get("finalized_bundle")
+    lifecycle = {"approval_recorded": False, "bundle_state": "not_finalized", "bundle_applied": False}
+    if bundle:
+        _, approval_path, receipt_path = _core().bundle_paths(root, bundle["bundle_id"])
+        projected = lifecycle_projection(
+            bundle,
+            approved=approval_path.is_file(),
+            applied=receipt_path.is_file(),
+            events=_core()._lifecycle_events(root, bundle["bundle_id"]),
+        )
+        lifecycle = {
+            "approval_recorded": approval_path.is_file(),
+            "bundle_state": projected["state"],
+            "bundle_applied": receipt_path.is_file(),
+        }
+    return _summary(plan, "inspect", delta=plan.get("delta"), finalized_bundle_id=(bundle or {}).get("bundle_id"),
+                    full_preflight_receipt=plan.get("full_preflight_receipt"), post_apply_receipt=plan.get("post_apply_receipt"),
+                    **lifecycle)
 
 
 def abandon(root: Path, instance: Instance, args: argparse.Namespace) -> dict[str, Any]:
