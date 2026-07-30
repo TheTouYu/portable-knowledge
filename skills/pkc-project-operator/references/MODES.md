@@ -107,16 +107,22 @@ python tools/pkc.py knowledge-plan finalize PLAN_ID
 python tools/pkc.py bundle-inspect BUNDLE_ID --format json
 ```
 
-Stop and show the full immutable hash. After a real human confirms that exact hash:
+Inspect and show the Bundle ID without abbreviation, the complete immutable 64-character `content_hash`, semantic difference, Authority/evidence basis, exclusions, permission effect, risk, and exact changed files. Stop. A generic “continue/agree” is not approval; only a real human confirmation naming that exact displayed hash authorizes approval and application. After that confirmation:
 
 ```bash
 python tools/pkc.py bundle-approve BUNDLE_ID --content-hash HASH --apply
 python tools/pkc.py bundle-apply BUNDLE_ID --content-hash HASH --apply
 python tools/pkc.py rebuild
 python tools/pkc.py validate
+python tools/pkc.py tree --format text
 python tools/pkc.py query "representative question" --level 2
+# Run the target project's configured retrieval evaluation/knowledge-check.
 python tools/pkc.py bundle-inspect BUNDLE_ID --format json
+git diff --check
+git status --short --branch
 ```
+
+Post-apply checks prove Bundle lifecycle, text authority, projection, routing, and configured retrieval expectations only. Report evidence as separate layers: current source implementation; automated tests; generated/decoded GIA or equivalent artifact; editor import/loading; writeback/injection; and in-game behavior. Never promote one layer as proof of a later layer.
 
 Use `add-claim` for new knowledge, `revise-claim` for correction, and `move-topic` for ownership/path refactoring. Multi-Bundle orchestration (`bundle_migration_plan`, formerly the ambiguous `migration_plan`) is non-atomic across phases and is not structure migration.
 
