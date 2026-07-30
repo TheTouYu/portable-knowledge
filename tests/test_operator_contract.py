@@ -40,6 +40,24 @@ class OperatorContractTests(unittest.TestCase):
         args = operator.parser().parse_args(["install-global"])
         self.assertEqual(args.source.resolve(), ROOT)
 
+    def test_global_install_manages_both_repository_skills_and_is_idempotent(self):
+        root = Path(self.temp.name) / "skills"
+        args = operator.parser().parse_args([
+            "install-global", "--source", str(ROOT), "--skill-root", str(root)
+        ])
+        clean = subprocess.CompletedProcess([], 0, "", "")
+        real_run = operator.run
+        with mock.patch.object(operator, "CACHE", Path(self.temp.name) / "cache"), \
+             mock.patch.object(operator, "run") as run:
+            run.side_effect = lambda command, **kwargs: clean if command[-2:] == ["status", "--porcelain"] else real_run(command, **kwargs)
+            first = operator.command_install_global(args)
+            second = operator.command_install_global(args)
+        expected = {str(root / "pkc-project-operator"), str(root / "isolated-model-evaluator")}
+        self.assertEqual(set(first["installed"]), expected)
+        self.assertEqual(set(second["installed"]), expected)
+        manifest = json.loads((Path(self.temp.name) / "cache/operator-install.json").read_text())
+        self.assertEqual(set(manifest["skill_sources"]), {"pkc-project-operator", "isolated-model-evaluator"})
+
     def test_plan_hash_is_stable_and_excludes_its_own_field(self):
         plan = {"schema_version": 1, "writes": [], "plan_hash": "old"}
         first = operator.plan_hash(plan)
@@ -398,6 +416,12 @@ class OperatorContractTests(unittest.TestCase):
         for mode in ("install", "first-use", "query", "intake", "capture", "memory", "maintain", "doctor", "upgrade", "uninstall", "status", "approve-apply"):
             self.assertIn(mode, text)
         self.assertIn("model may never review its own proposal", text)
+        self.assertIn("single human-facing operator", text)
+        self.assertIn("install/update entry for both repository companion Skills", text)
+        self.assertIn("Adapter revisions require a separate reviewed project diff", text)
+        evaluator = (ROOT / "skills/isolated-model-evaluator/SKILL.md").read_text(encoding="utf-8")
+        self.assertIn("optional evaluation companion", evaluator)
+        self.assertIn("not a second operator", evaluator)
         self.assertIn("Never use editable installs", text)
         self.assertIn("Never delete tracked knowledge", text)
         self.assertIn("refresh-authority-ref PLAN_ID --authority-ref-id ID --reason REASON", text)

@@ -86,15 +86,22 @@ python3 skills/isolated-model-evaluator/scripts/evaluate.py \
 
 The evaluator defaults to the cost-effective `aijws / gpt-5.6-luna / medium` profile. Keep provider, model, thinking level, task, fixture, and tools fixed when comparing iterations. Raw traces and reports belong outside Git by default. Process success alone is not semantic correctness; define and inspect task-specific acceptance criteria. See the [Skill contract](skills/isolated-model-evaluator/SKILL.md) and [report contract](skills/isolated-model-evaluator/references/report-contract.md).
 
-## Install the global Operator Skill
+## Install or update the repository Skills
 
-From a clean checkout of this repository:
+PKC ships two global companion Skills:
+
+- `pkc-project-operator` is the single human-facing entry for normal project installation, query, capture, maintenance, upgrade, and exact-hash approval/application.
+- `isolated-model-evaluator` is an optional test harness for checking whether a fresh model can discover and execute a Skill, CLI, Adapter, or workflow without hidden context. Do not invoke it for ordinary project knowledge work.
+
+A target project's `<project>-knowledge-adapter` is a third, project-owned thin routing layer—not one of these two repository Skills. It supplies project-specific Contexts, handlers, and safety boundaries to the Operator and delegates deterministic semantics to Core. Runtime upgrades do not update global Skills or project Adapters; Adapter changes require a separate reviewed project diff.
+
+From a clean checkout, use the same idempotent command for first installation and later update of both repository Skills:
 
 ```bash
 python3 skills/pkc-project-operator/scripts/pkc_operator.py install-global --source .
 ```
 
-This creates managed discovery projections in `~/.agents/skills/` and `~/.pi/agent/skills/` and records their source commit. Restart or rescan your Agent harness, then invoke `pkc-project-operator` naturally—for example, “给这个项目安装知识树” or “检查并维护这个项目的知识系统”. The Operator always plans tracked/runtime changes first and requires a real human review before applying them.
+This creates or refreshes managed discovery projections in `~/.agents/skills/` and `~/.pi/agent/skills/` and records their shared source commit. It refuses an existing destination not managed by this checkout rather than overwriting it. Restart or rescan your Agent harness, then invoke `pkc-project-operator` naturally—for example, “给这个项目安装知识树” or “检查并维护这个项目的知识系统”. Invoke `isolated-model-evaluator` only for explicit model-usability evaluation. The Operator always plans tracked/runtime changes first and requires a real human review before applying them.
 
 Operator contract `0.1` is an early real-project testing release. Linux/Pi is the first tested target; other platform/Agent claims remain explicitly limited until real-environment validation.
 

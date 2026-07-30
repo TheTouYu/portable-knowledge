@@ -659,8 +659,9 @@ def command_update(args: argparse.Namespace) -> dict[str, Any]:
 
 def command_install_global(args: argparse.Namespace) -> dict[str, Any]:
     source = args.source.resolve()
-    skill = source / "skills/pkc-project-operator"
-    if not (skill / "SKILL.md").is_file(): raise OperatorError(f"operator Skill not found: {skill}")
+    skills = {name: source / "skills" / name for name in ("pkc-project-operator", "isolated-model-evaluator")}
+    missing = [str(path) for path in skills.values() if not (path / "SKILL.md").is_file()]
+    if missing: raise OperatorError(f"repository Skill not found: {', '.join(missing)}")
     commit = run(["git", "-C", str(source), "rev-parse", "HEAD"]).stdout.strip()
     if run(["git", "-C", str(source), "status", "--porcelain"]).stdout.strip():
         raise OperatorError("source repository must be clean before global Skill installation")
@@ -668,19 +669,20 @@ def command_install_global(args: argparse.Namespace) -> dict[str, Any]:
     installed = []
     for root in roots:
         root = root.expanduser().resolve(); root.mkdir(parents=True, exist_ok=True)
-        dest = root / "pkc-project-operator"
-        if dest.is_symlink() and dest.resolve() == skill: installed.append(str(dest)); continue
-        if dest.exists() or dest.is_symlink(): raise OperatorError(f"global Skill destination already exists: {dest}")
-        if os.name == "nt": shutil.copytree(skill, dest); projection = "managed-copy"
-        else: dest.symlink_to(skill, target_is_directory=True); projection = "symlink"
-        installed.append(str(dest))
+        for name, skill in skills.items():
+            dest = root / name
+            if dest.is_symlink() and dest.resolve() == skill: installed.append(str(dest)); continue
+            if dest.exists() or dest.is_symlink(): raise OperatorError(f"global Skill destination already exists and is not managed by this checkout: {dest}")
+            if os.name == "nt": shutil.copytree(skill, dest)
+            else: dest.symlink_to(skill, target_is_directory=True)
+            installed.append(str(dest))
     manifest = {"schema_version": 1, "operator_contract": CONTRACT, "source_repository": str(source),
-                "source_commit": commit, "skill_source": str(skill), "projections": installed,
-                "projection_type": "managed-copy" if os.name == "nt" else "symlink"}
+                "source_commit": commit, "skill_sources": {name: str(path) for name, path in skills.items()},
+                "projections": installed, "projection_type": "managed-copy" if os.name == "nt" else "symlink"}
     path = CACHE / "operator-install.json"; path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(json.dumps(manifest, indent=2) + "\n", encoding="utf-8")
     return {"ok": True, "command": "install-global", "manifest": str(path), "installed": installed,
-            "source_commit": commit, "note": "restart/rescan Agent harness to discover the Skill", "errors": []}
+            "source_commit": commit, "note": "restart/rescan Agent harness to discover both repository Skills", "errors": []}
 
 
 def parser() -> argparse.ArgumentParser:

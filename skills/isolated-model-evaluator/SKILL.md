@@ -6,6 +6,10 @@ compatibility: Project skill for Pi and other Agent Skills-compatible harnesses;
 
 # Isolated Model Evaluator
 
+This is the optional evaluation companion to `pkc-project-operator`, not a second operator. Humans use the Operator for all ordinary project installation, query, capture, maintenance, runtime upgrade, and approval/application work. Invoke this Evaluator only when fresh-context model usability is itself being tested—for example after a Skill, CLI, project Adapter, routing Context, or model-facing workflow changes. A normal knowledge Bundle, Authority refresh, or real-environment check does not require it.
+
+A target project's `<project>-knowledge-adapter` is a separate project-owned thin routing layer, not either repository companion Skill. Runtime upgrades do not update this Evaluator, the global Operator, or project Adapters. From a clean PKC checkout, both repository Skills are installed or updated together with `python3 skills/pkc-project-operator/scripts/pkc_operator.py install-global --source .`; Adapter changes use a separate reviewed project diff.
+
 Test project intelligence and model-facing workflows without trusting the current conversation's accumulated context. The runner launches a new Pi process with no session, no context files, no auto-discovered Skills, and no extensions, then explicitly loads only the target Skill(s) requested for the evaluation.
 
 This is the canonical package at `skills/isolated-model-evaluator/`. Resolve script paths from this directory.

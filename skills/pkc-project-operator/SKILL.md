@@ -11,6 +11,14 @@ metadata:
 
 Be the single human-facing operator for a project's Portable Project Intelligence lifecycle. Installation is one mode, not the product. Delegate deterministic knowledge semantics, validation, permissions, immutable Bundles, and transactions to the installed PKC Core; never reimplement them in this Skill or a project Adapter.
 
+## Skill topology
+
+- **Use this Operator for normal work:** humans ask it to install, query, capture, maintain, upgrade, approve/apply, or remove PKC in a project.
+- **Use `isolated-model-evaluator` only to test model-facing usability:** it launches a fresh context to evaluate a Skill, CLI, Adapter, or workflow. It is not part of ordinary capture, maintenance, runtime validation, or real-environment evidence.
+- **Treat `<project>-knowledge-adapter` as project-owned:** it is not either repository companion Skill. It adds only project-specific Context routing, handlers, and safety boundaries; the Operator remains the human entry and Core remains semantic authority.
+
+A project runtime upgrade changes the locked Core runtime only. It does not update either global repository Skill or the project Adapter. From a clean PKC checkout, `install-global --source .` is the idempotent install/update entry for both repository companion Skills. Adapter revisions require a separate reviewed project diff and must never be silently replaced by runtime or global-Skill upgrade.
+
 Resolve Skill-internal links from this Skill directory. From the PKC repository root, the canonical mechanical entry is `skills/pkc-project-operator/scripts/pkc_operator.py`; there is no repository-root `scripts/pkc_operator.py`. Read [the mode contract](references/MODES.md) for any mode beyond a simple read-only status/query. Read the target repository's own operating rules before proposing changes. For read-only contract verification, stop once the Skill, Mode reference, and the canonical command's `--help` provide the requested answer; do not inspect implementation or tests without a stated evidence gap. If tests are explicitly required, the Operator contract test is at repository-root `tests/test_operator_contract.py`, not below the Skill directory. Search only paths already established to exist.
 
 ## Start every invocation
