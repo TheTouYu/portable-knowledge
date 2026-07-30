@@ -112,12 +112,12 @@ class OperatorContractTests(unittest.TestCase):
         self.assertEqual(json.loads(authority.read_text(encoding="utf-8"))["nodes"][0]["id"], "real")
         self.assertFalse((self.root / "tools").exists())
 
-    def test_plan_upgrade_is_lock_only_and_records_rollback_and_provenance(self):
+    def test_plan_upgrade_synchronizes_lock_and_declared_version_and_records_rollback(self):
         old_commit = "a" * 40
         new_commit = "b" * 40
         runtime = self.root / ".local/pkc/runtimes" / old_commit
         runtime.mkdir(parents=True)
-        (self.root / "project-intelligence.json").write_text('{"schema_version":1}', encoding="utf-8")
+        (self.root / "project-intelligence.json").write_text('{"schema_version":1,"pkc":{"version":"0.2.0rc4","projection_path":".local/pkc"}}', encoding="utf-8")
         lock = {"schema_version": 1, "version": "0.2.0rc4", "source_commit": old_commit,
                 "runtime": f".local/pkc/runtimes/{old_commit}"}
         (self.root / "tools").mkdir()
@@ -140,7 +140,9 @@ class OperatorContractTests(unittest.TestCase):
             result = operator.command_plan_upgrade(args)
         plan = json.loads(args.output.read_text(encoding="utf-8"))
         self.assertEqual(plan["kind"], "pkc-upgrade")
-        self.assertEqual([item["path"] for item in plan["writes"]], ["tools/pkc-lock.json"])
+        self.assertEqual([item["path"] for item in plan["writes"]], ["tools/pkc-lock.json", "project-intelligence.json"])
+        config_write = next(item for item in plan["writes"] if item["path"] == "project-intelligence.json")
+        self.assertEqual(json.loads(config_write["content"])["pkc"]["version"], "0.2.0rc5")
         self.assertEqual(plan["rollback_runtime"], lock["runtime"])
         self.assertEqual(plan["source"]["wheel_sha256"], provenance["sha256"])
         self.assertEqual(plan["compatibility"]["capability_diff"], {

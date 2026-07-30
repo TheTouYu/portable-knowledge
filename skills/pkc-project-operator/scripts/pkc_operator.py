@@ -443,14 +443,18 @@ def command_plan_upgrade(args: argparse.Namespace) -> dict[str, Any]:
                 "source_ref": commit, "source_commit": commit, "wheel_sha256": provenance["sha256"],
                 "wheel_cache": str(wheel), "runtime": f".local/pkc/runtimes/{commit}",
                 "python_requirement": ">=3.11"}
-    write = text_write(root, "tools/pkc-lock.json", json.dumps(new_lock, ensure_ascii=False, indent=2) + "\n")
+    lock_write = text_write(root, "tools/pkc-lock.json", json.dumps(new_lock, ensure_ascii=False, indent=2) + "\n")
+    config_path = root / "project-intelligence.json"
+    config = json.loads(config_path.read_text(encoding="utf-8"))
+    config.setdefault("pkc", {})["version"] = provenance["version"]
+    config_write = text_write(root, "project-intelligence.json", json.dumps(config, ensure_ascii=False, indent=2) + "\n")
+    writes = [lock_write] + ([] if config_write["expected_sha256"] == config_write["new_sha256"] else [config_write])
     current_capabilities = installed_capabilities(root, current)
     compatibility = {"current_capabilities": current_capabilities,
                      "target_capabilities": provenance.get("capabilities", {}),
                      "capability_diff": capability_diff(current_capabilities, provenance.get("capabilities", {}))}
     state = git_state(root)
     verification = ["capabilities", "module-origin", "validate", "rebuild", "validate"]
-    config = json.loads((root / "project-intelligence.json").read_text(encoding="utf-8"))
     has_evaluation = bool((config.get("evaluation") or {}).get("cases_path"))
     deferred_checks: list[dict[str, str]] = []
     if has_evaluation and getattr(args, "defer_knowledge_check_for_authority_maintenance", False):
@@ -471,7 +475,7 @@ def command_plan_upgrade(args: argparse.Namespace) -> dict[str, Any]:
                        "version": provenance["version"], "wheel": str(wheel),
                        "wheel_sha256": provenance["sha256"], "provenance": provenance},
             "runtime": new_lock["runtime"], "rollback_runtime": current.get("runtime"),
-            "compatibility": compatibility, "writes": [write], "links": [], "verification": verification,
+            "compatibility": compatibility, "writes": writes, "links": [], "verification": verification,
             "deferred_checks": deferred_checks,
             "representative_queries": args.representative_query, "project_checks": args.project_check,
             "excluded": ["formal knowledge authority", "Git commit/push", "old runtime deletion"],
@@ -483,7 +487,7 @@ def command_plan_upgrade(args: argparse.Namespace) -> dict[str, Any]:
             "plan_hash": plan["plan_hash"], "current": plan["current"], "target": plan["source"],
             "runtime": plan["runtime"], "rollback_runtime": plan["rollback_runtime"],
             "compatibility": compatibility,
-            "writes": [{k: write[k] for k in ("path", "action", "expected_sha256", "new_sha256")}],
+            "writes": [{k: write[k] for k in ("path", "action", "expected_sha256", "new_sha256")} for write in writes],
             "verification": verification, "deferred_checks": deferred_checks,
             "target_worktree_dirty": state["status"],
             "next": "show this exact plan hash to a human; apply only after review", "errors": []}
