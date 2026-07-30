@@ -9,7 +9,7 @@ disable-model-invocation: true
 
 Create a handoff document that lets a fresh agent resume the work with the smallest useful context window.
 
-The handoff document is the **minimum recovery surface**. A fresh agent should be able to understand the current state, choose the next safe action, and run the first read-only verification by reading only the handoff document. References are for later deep dives, not prerequisites for ordinary resumption.
+The handoff document is the **minimum recovery surface**. Put the objective, current state, next action, first read-only check, protected changes, authorization gates, and acceptance criteria directly in it. A fresh agent should understand and begin safe recovery by reading only this core information. References are for later deep dives, not prerequisites for ordinary resumption. Read an original file only when the handoff is missing a fact required for the next action or a bounded evidence gap makes it necessary.
 
 ## Two simple user paths
 
@@ -43,12 +43,12 @@ Report the exact output path when finished.
 
 Write information in this order:
 
-1. **Resume now**: the immediate task, current objective, next action, and first verification command.
-2. **Operational truth**: confirmed state, files, IDs, paths, hashes, commands, prerequisites, safety gates, and known blockers needed to act correctly.
-3. **Decision boundaries**: what is confirmed, what is only generated/automatically tested, what requires explicit human confirmation, and what must stop the work.
-4. **Optional context**: links to specs, plans, ADRs, research, commits, diffs, logs, or external sources for deeper understanding.
+1. **Core recovery package**: objective, current state, next action, first read-only check, acceptance criteria, protected changes, authorization gates, and stop conditions.
+2. **Operational truth**: only the confirmed files, IDs, paths, hashes, commands, prerequisites, and blockers needed for that next action.
+3. **Decision boundaries**: what is confirmed, what is generated or automatically tested, what needs explicit confirmation, and what must stop the work.
+4. **Optional references**: specs, plans, ADRs, research, commits, diffs, logs, or external sources for a demonstrated evidence gap.
 
-Do not make the reader reconstruct critical facts by following references. If a fact is needed to execute the next action, copy the fact into the handoff even when it also exists elsewhere.
+Do not make the reader reconstruct critical facts by following references. If a fact is needed to execute the next action, copy it into the handoff. Omit detail that does not affect the next bounded action; the ponytail rule is to add context only when the evidence gap justifies it.
 
 ## Required Handoff Content
 
@@ -189,14 +189,14 @@ For each reference, give an exact path or URL and one phrase explaining when to 
 
 Write the handoff so that the receiving agent follows this protocol:
 
-1. Read only the handoff document first.
+1. Read only the handoff's core recovery package first.
 2. Determine whether the mode is `next-task` or `interrupted-task`.
-3. Extract the immediate objective, first check, constraints, authorization scope, and stop conditions.
+3. Extract the immediate objective, first check, constraints, authorization scope, stop conditions, and acceptance criteria.
 4. Inspect the current worktree and run the first read-only reconciliation check.
 5. Compare observed state with the handoff's confirmed facts, including dirty paths, hashes, IDs, generated files, and process state where applicable.
-6. If they match, continue with the bounded next action.
+6. If they match, continue with the bounded next action without re-reading the same evidence.
 7. If they differ, stop and report the mismatch before mutating anything; do not silently refresh the handoff from the new state.
-8. Read optional references only when a specific implementation or evidence gap requires them.
+8. If a required fact is absent or a concrete evidence gap remains, read only the relevant original file or reference and state why it was needed.
 9. Reconfirm any pending human gate immediately before the mutation it protects.
 
 If project-specific rules require additional startup files, record that as an explicit exception in the handoff's `References` or `Safety and Communication Gates` section. Do not silently turn every referenced artifact into a recovery prerequisite.
@@ -205,12 +205,13 @@ If project-specific rules require additional startup files, record that as an ex
 
 Avoid copying large specifications, plans, ADRs, issue bodies, logs, or diffs. Instead:
 
-- copy only the exact facts needed to resume safely;
+- put the small core recovery package directly in the handoff;
 - summarize decisions and their current scope;
-- reference the complete artifact for details;
-- preserve distinctions between implementation, generated output, real-file evidence, and external behavior.
+- reference complete artifacts for conditional deep dives;
+- preserve distinctions between implementation, generated output, real-file evidence, and external behavior;
+- record a short evidence-gap reason whenever an original file must be read during recovery.
 
-The handoff may repeat a small fact already present elsewhere when that repetition removes a required lookup during recovery. Minimal context means minimal **required reading**, not minimal operational detail.
+The handoff may repeat a small fact already present elsewhere when that repetition removes a required lookup during recovery. Do not repeat evidence merely for completeness. Minimal context means minimal **required reading**, not missing operational detail.
 
 ## Redaction
 
@@ -238,6 +239,6 @@ Before finishing:
 
 ## Session-start rule
 
-When a new session receives a handoff path, the receiving agent must first read only that handoff, then run its stated reconciliation check. It must not treat the handoff as permission to mutate anything. After reconciliation, it should load the project's configured Memory/Adapter and query durable knowledge only when the handoff's `knowledge_entrypoint` or the task requires it.
+When a new session receives a handoff path, the receiving agent must first read only the handoff's core recovery package, then run its stated reconciliation check. It must not treat the handoff as permission to mutate anything. After reconciliation, it should load the project's configured Memory/Adapter and query durable knowledge only when the handoff's `knowledge_entrypoint` or the task requires it. Do not load original references unless the core package is insufficient for the next action; name the missing fact or evidence gap first.
 
 When the user did not explicitly request durable capture, the next session may use `durable_candidates` as a prompt for review, but must not promote them automatically. A candidate becomes durable only through the project's normal review and authority workflow.
