@@ -1,0 +1,5 @@
+interface:
+  display_name: "Handoff"
+  short_description: "Write a self-contained, executable handoff with optional deep references"
+policy:
+  allow_implicit_invocation: false
