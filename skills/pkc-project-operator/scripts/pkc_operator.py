@@ -277,6 +277,7 @@ def initial_assets(root: Path, project_id: str, commit: str, remote: str, wheel:
     config = {
         "schema_version": 1, "instance": {"id": project_id, "name": root.name},
         "pkc": {"version": version, "projection_path": ".local/pkc/projection"},
+        "adapter": {"skill": f"skills/{project_id}-knowledge-adapter/SKILL.md"},
         "authority": {"registry": "data/knowledge/registry.json", "actors": "data/knowledge/actors.json", "store": "data/knowledge", "knowledge": "knowledge", "authority_refs": "data/knowledge/authority-refs.json"},
         "identities": {"principal": {"id": "human-reviewer"}, "executor": {"id": "agent"},
                        "workspace": {"id": f"{project_id}-workspace", "path": "."}, "writer": {"id": writer}},
@@ -313,7 +314,7 @@ metadata:
 
 # {root.name} Knowledge Adapter
 
-Read `project-intelligence.json`, then configured operating/current/decision roles. Use `python tools/pkc.py` as the only PKC entry. Delegate installation, repair, upgrade, intake orchestration, and general lifecycle work to global `pkc-project-operator`. Ordinary mechanical work does not query. Never self-review a tracked, authority, runtime, Git, or remote mutation.
+This is a project-owned thin router used by the global `pkc-project-operator`; it is not a second human-facing operator. Read `project-intelligence.json`, then configured operating/current/decision roles. Use `python tools/pkc.py` as the only PKC entry. Delegate installation, repair, upgrade, novice onboarding, intake orchestration, and general lifecycle work to global `pkc-project-operator`. Ordinary mechanical work does not query. Never self-review a tracked, authority, runtime, Git, or remote mutation.
 '''
     operating = "# Knowledge Operating Entry\n\nUse the project Adapter and `python tools/pkc.py`. Read CURRENT and DECISIONS before complex work. Human review is required for tracked/runtime changes; exact-hash review is required for knowledge authority.\n"
     current = "# Current Recovery\n\nPrimary Context: `default`\n\nGoal and next action require project-owner confirmation during first-use.\n"
@@ -381,7 +382,10 @@ def command_plan(args: argparse.Namespace) -> dict[str, Any]:
             "source": {"repository": args.remote, "ref": args.ref, "commit": commit, "version": version,
                        "wheel": str(wheel), "wheel_sha256": sha}, "runtime": f".local/pkc/runtimes/{commit}",
             "writes": writes, "links": links, "excluded": ["existing project source/docs except declared writes", "Git commit/push", "business Claims/Topics/Nodes", "authority apply"],
-            "verification": ["capabilities", "validate", "rebuild", "validate"], "human_reviewed": False}
+            "verification": ["capabilities", "validate", "rebuild", "validate"],
+            "onboarding_next": {"mode": "first-use", "questions": ["project goal", "next real task", "committed truth sources", "privacy/confirmation boundaries"], "result": "2–3 proposed initial tree shapes; no invented Claims"},
+            "readiness_after_apply": {"technical_install": "verified", "initial_shape": "pending first-use", "first_capture": "pending real input", "retrieval_evaluation": "pending real Claims and representative questions"},
+            "human_reviewed": False}
     plan["plan_hash"] = plan_hash(plan)
     args.output.parent.mkdir(parents=True, exist_ok=True)
     args.output.write_text(json.dumps(plan, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")

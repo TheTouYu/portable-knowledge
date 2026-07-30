@@ -43,7 +43,17 @@ skills/<project-id>-knowledge-adapter/SKILL.md
 
 Existing files are preserved unless their exact prior hash and replacement are present in the reviewed plan. For a degraded existing instance with `project-intelligence.json` but no lock, `plan-adopt` may plan only `tools/pkc-lock.json`, `tools/pkc.py`, and the parallel ignored runtime; it preserves configured Memory, Adapter, authority, knowledge, JSONL history, and Bundles. The first implementation does not automatically edit an existing root `AGENTS.md`; it reports the trigger snippet for human placement. This avoids silently changing a project's highest-precedence operating contract.
 
-The neutral initial authority is empty. Do not copy the example Claim into a real project.
+The neutral initial authority is empty. Do not copy the example Claim into a real project. A novice “install a knowledge tree” request covers technical installation plus an immediate guided first-use offer; it does not authorize invented Claims. Report four independent readiness states: technical install, chosen initial shape, first governed capture, and representative retrieval evaluation.
+
+## Novice natural-language flow
+
+The human does not need to name modes or PKC objects:
+
+- “帮我安装知识树” routes to `install`, then guided `first-use` after reviewed apply.
+- “帮我添加知识” routes to `intake`/`capture`; identify pasted material, named committed files, or a commit/range, and ask one concrete input question only when none is identifiable.
+- Translate `Claim` as a stable reusable assertion, `Authority Ref` as the committed source that supports it, `Bundle` as the reviewable draft, and `content_hash` as that draft's exact fingerprint. Show canonical names and full hashes at the review gate, but lead with plain language.
+
+Installation creates a minimal default Context and empty authority so it never guesses business facts. Guided first-use proposes 2–3 project-specific tree shapes from the goal, next task, committed truth sources, and privacy boundaries. After a shape is chosen, all real knowledge still enters through exact-hash governed capture. Once real Claims exist, propose 3–5 representative questions and configure retrieval evaluation through a separately reviewed project change; never use synthetic cases as real-project proof.
 
 ## Project wrapper
 

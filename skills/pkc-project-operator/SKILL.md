@@ -33,6 +33,14 @@ project_state: unconfigured | configured | degraded | unknown
 
 Then run the smallest required inspection. Declare this block before the first project tool call. Ordinary mechanical edits that do not involve project intelligence do not trigger this Skill.
 
+## Novice interface
+
+Treat plain requests such as “帮我安装知识树”, “设置项目知识库”, “帮我添加知识”, or “把这些记下来” as complete requests to start the appropriate safe workflow. Never require the human to know PKC, Context, Claim, Authority Ref, Bundle, or hash terminology before helping.
+
+For **“install a knowledge tree”**: inspect → explain the plan in plain language → produce the reviewed technical install plan → apply only after plan-hash confirmation → run technical verification → immediately offer guided first-use. Ask at most four plain questions in one batch: (1) this project's main goal, (2) the next real task, (3) which committed files are trusted sources, and (4) what must stay private or require confirmation. From those answers and bounded committed project evidence, propose 2–3 small initial tree shapes and recommend one. Empty authority after technical installation is safe but onboarding is not complete until the human chooses a shape or explicitly defers it. Never invent business Claims to make the tree look populated.
+
+For **“add knowledge”**: first identify the actual input in plain language—pasted material, named committed files, or an identified commit/range. If no input is identifiable, ask one concrete question instead of exposing command syntax. Then deduplicate, classify, build one governed plan, and translate the review gate as: “I prepared a draft; please confirm this exact fingerprint.” Always show the full technical hash, but explain what it means.
+
 ## Human Review Gate
 
 Do not build an identity bureaucracy. One real human review is sufficient, but a model may never review its own proposal.
@@ -83,7 +91,9 @@ After technical installation, offer `first-use`; do not start it automatically.
 
 ## First use
 
-Confirm project goal, one primary production task, real truth sources, sensitive-data boundaries, and mapped Memory roles. Read bounded entry files, propose 2–3 non-authoritative structures, and let the human choose. Empty Domain Knowledge is valid. Do not scan the whole repository or copy facts from examples/Domain Packs. Any real Claim/Authority change follows `capture` and L3 exact-hash review.
+First-use is the required usability continuation of a novice install, not an automatic authority write. Confirm project goal, one primary production task, real truth sources, sensitive-data boundaries, and mapped Memory roles using the four plain questions in the novice interface. Read bounded entry files, propose 2–3 non-authoritative structures, recommend the smallest useful one, and let the human choose. Empty Domain Knowledge is valid. Do not scan the whole repository or copy facts from examples/Domain Packs. Any real Claim/Authority change follows `capture` and L3 exact-hash review.
+
+Before declaring onboarding complete, demonstrate one representative query, explain how the user can later say “帮我添加知识”, and propose 3–5 real retrieval questions for the project's evaluation fixture once Claims exist. Do not fabricate an empty or synthetic evaluation as proof of retrieval quality. Report readiness separately: `technical_install`, `initial_shape`, `first_capture`, and `retrieval_evaluation` may mature at different times.
 
 ## Query and task routing
 

@@ -75,12 +75,16 @@ class OperatorContractTests(unittest.TestCase):
         self.assertEqual(registry["nodes"], [])
         self.assertEqual(registry["topics"], [])
         config = json.loads(by_path["project-intelligence.json"])
+        self.assertEqual(config["adapter"]["skill"], "skills/existing-project-knowledge-adapter/SKILL.md")
         self.assertEqual(config["authority"]["authority_refs"], "data/knowledge/authority-refs.json")
         self.assertIn(config["authority"]["authority_refs"], by_path)
         lock = json.loads(by_path["tools/pkc-lock.json"])
         self.assertEqual(lock["source_commit"], "a" * 40)
         self.assertEqual(lock["wheel_sha256"], "b" * 64)
         self.assertEqual(links[0]["path"], ".agents/skills/existing-project-knowledge-adapter")
+        adapter = by_path["skills/existing-project-knowledge-adapter/SKILL.md"]
+        self.assertIn("project-owned thin router", adapter)
+        self.assertIn("not a second human-facing operator", adapter)
 
     def test_plan_adopt_preserves_existing_instance_and_authority(self):
         config = {"schema_version": 1, "instance": {"id": "existing-project"},
@@ -416,6 +420,10 @@ class OperatorContractTests(unittest.TestCase):
         for mode in ("install", "first-use", "query", "intake", "capture", "memory", "maintain", "doctor", "upgrade", "uninstall", "status", "approve-apply"):
             self.assertIn(mode, text)
         self.assertIn("model may never review its own proposal", text)
+        self.assertIn("帮我安装知识树", text)
+        self.assertIn("帮我添加知识", text)
+        self.assertIn("technical_install", text)
+        self.assertIn("retrieval_evaluation", text)
         self.assertIn("single human-facing operator", text)
         self.assertIn("install/update entry for both repository companion Skills", text)
         self.assertIn("Adapter revisions require a separate reviewed project diff", text)
