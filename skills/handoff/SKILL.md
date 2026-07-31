@@ -27,7 +27,20 @@ The document must declare exactly one handoff mode:
 - `next-task`: the current work package is substantially complete and the next session begins a new task using the current results and durable constraints.
 - `interrupted-task`: the current work package is incomplete and the next session must resume from a concrete unfinished step.
 
-Do not blur these modes. `next-task` summarizes delivered results and starts a new task; `interrupted-task` preserves the unfinished execution state and prevents duplicate or unsafe work.
+Choose the mode by substantive task state, not by Git packaging state. A completed implementation, verification, or governed knowledge application must use the exact field `mode: next-task` when only an optional or separately authorized commit, push, cleanup, or publication step is pending, even when the user's next task is not yet specified. Record that tail work as a secondary pending action and authorization gate; do not make it the next-session focus. Use `mode: interrupted-task` only when the requested behavior, required verification, or necessary artifact is incomplete and the next session must continue it before starting new work.
+
+Mode selection is mechanical:
+
+```text
+if requested behavior, required verification, or a necessary artifact is incomplete:
+    mode: interrupted-task
+else:
+    mode: next-task
+```
+
+Pending commit, push, cleanup, or publication does not make substantive work incomplete. The literal mode line must match `^mode: (next-task|interrupted-task)$`; every other value is invalid and must be rewritten before saving.
+
+Do not blur these modes. `next-task` summarizes delivered results and starts a new task; `interrupted-task` preserves unfinished execution state and prevents duplicate or unsafe work.
 
 ## Output Location
 
@@ -80,8 +93,9 @@ knowledge_entrypoint: <project wrapper/Adapter path, or none>
 For `next-task`, explicitly separate:
 
 - `completed_this_round`: delivered results and their evidence;
-- `next_round_task`: the new task, not a repetition of completed work;
-- `durable_constraints`: facts from this round that must affect the new task.
+- `next_round_task`: the new task, not a repetition of completed work; use `not specified — ask for the user's next task after reconciliation` when none has been provided;
+- `durable_constraints`: facts from this round that must affect the new task;
+- `secondary_pending_actions`: optional packaging, commit, push, cleanup, or publication work that is not the next-session focus, or `none`; include its authorization gate.
 
 For `interrupted-task`, explicitly separate:
 
@@ -224,9 +238,10 @@ Keep technical identifiers that are required to resume, such as repository-relat
 Before finishing:
 
 - Verify the document exists at the requested temporary path.
-- Verify exactly one mode is declared: `next-task` or `interrupted-task`.
+- Verify exactly one mode line matches `^mode: (next-task|interrupted-task)$`; rewrite the document if it does not.
 - Confirm the first reconciliation action is executable or explicitly blocked.
 - Confirm `completed_this_round`/`next_round_task` or the interrupted-task equivalents are not conflated.
+- Confirm a pending commit, push, cleanup, or publication step did not incorrectly force `interrupted-task` after the substantive work completed.
 - Confirm the last successful action and next action are distinguishable when work is interrupted.
 - Confirm every critical unknown is marked instead of guessed.
 - Confirm authorization scope is specific and pending gates are visible.
