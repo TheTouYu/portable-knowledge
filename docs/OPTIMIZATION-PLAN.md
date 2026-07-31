@@ -1,6 +1,13 @@
 # PKC Optimization Plan
 
-Status: implementation-ready; Phase 2 partially implemented
+> **OBSOLETE — superseded 2026-07-31.** This document is retained as a
+> historical record of the v1 plan. Do not implement from it. The canonical
+> plan is `docs/OPTIMIZATION-PLAN-v2.md`, which carries forward this plan's
+> unfinished work (Phase 2 remaining diagnostics; Phase 1 evidence review;
+> Phases 3, 4, 5) and adds the CLI contract-surface workstream from
+> `docs/FEEDBACK-star-cube-nexus-knowledge-plan-cli-friction-2026-07-31.md`.
+
+Status: obsolete; superseded by `docs/OPTIMIZATION-PLAN-v2.md` (historical v1 record, Phase 2 partially implemented)
 Updated: 2026-07-31
 
 This is an ordinary plan, not PKC Authority. It does not create Claims,

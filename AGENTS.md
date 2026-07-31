@@ -86,3 +86,10 @@ knowledge-plan init
 Before approval, report semantic difference, evidence/Authority basis, exclusions, permission effect, expected changed files, risk, and the full content hash. Changed content invalidates approval.
 
 Never treat installation success, a neutral example, synthetic fixture, or local automated test as real-project evidence.
+
+
+## 沟通规则（用户全局要求）
+
+- 所有项目工作中一律用中文回复；代码、命令、文件名、技术术语可以保留英文原文。
+- 风格通俗易懂：先给结论、再讲原因；少堆术语，多用具体例子。
+- 除非用户明确要求英文，否则不要用英文回复。
