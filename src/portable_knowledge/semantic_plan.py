@@ -327,7 +327,7 @@ def add_authority_ref(root: Path, instance: Instance, args: argparse.Namespace) 
         _fail("PLAN_AUTHORITY_NOT_COMMITTED", "authority path does not exist in committed baseline", path=args.path)
     working = root / args.path
     if not working.is_file() or working.read_bytes() != committed:
-        _fail("PLAN_AUTHORITY_WORKTREE_DIRTY", "authority path has uncommitted content", path=args.path)
+        _fail("PLAN_AUTHORITY_WORKTREE_DIRTY", "authority path has uncommitted content; restore the committed baseline or commit it and start a new plan", path=args.path)
     facts = sorted(set(args.fact_class))
     if not facts or any(value not in FACT_CLASSES for value in facts):
         _fail("PLAN_FACT_CLASS_REQUIRED", "Authority Ref requires valid fact classes", path=args.path)
@@ -593,9 +593,11 @@ def check_delta(root: Path, instance: Instance, args: argparse.Namespace) -> dic
                 continue
             committed = _committed_bytes(root, plan["baseline_commit"], ref["path"])
             if committed is None or hashlib.sha256(committed).hexdigest() != ref["approved_hash"]:
-                findings.append({"code": "PLAN_AUTHORITY_STALE", "path": ref["path"], "message": "committed Authority hash changed"})
+                findings.append({"code": "PLAN_AUTHORITY_STALE", "path": ref["path"],
+                                 "message": "committed Authority hash changed since plan baseline; commit the intended Authority change, then start a new plan"})
             elif not (root / ref["path"]).is_file() or (root / ref["path"]).read_bytes() != committed:
-                findings.append({"code": "PLAN_AUTHORITY_WORKTREE_DIRTY", "path": ref["path"], "message": "Authority has uncommitted content"})
+                findings.append({"code": "PLAN_AUTHORITY_WORKTREE_DIRTY", "path": ref["path"],
+                                 "message": "Authority has uncommitted content; restore the committed baseline or commit it and start a new plan"})
         contract, affected, selection = _affected_cases(staging, instance, plan)
         if not findings:
             projection = _core().rebuild(staging)
@@ -640,9 +642,9 @@ def _assert_finalized_environment(root: Path, plan: dict[str, Any], *, allow_app
     for ref in checked_refs:
         committed = _committed_bytes(root, plan["baseline_commit"], ref["path"])
         if committed is None or hashlib.sha256(committed).hexdigest() != ref["approved_hash"]:
-            _fail("PLAN_AUTHORITY_STALE", "committed Authority hash changed", path=ref["path"])
+            _fail("PLAN_AUTHORITY_STALE", "committed Authority hash changed since plan baseline; commit the intended Authority change, then start a new plan", path=ref["path"])
         if not (root / ref["path"]).is_file() or (root / ref["path"]).read_bytes() != committed:
-            _fail("PLAN_AUTHORITY_WORKTREE_DIRTY", "Authority has uncommitted content", path=ref["path"])
+            _fail("PLAN_AUTHORITY_WORKTREE_DIRTY", "Authority has uncommitted content; restore the committed baseline or commit it and start a new plan", path=ref["path"])
     if not allow_applied:
         for action in (plan.get("finalized_bundle") or {}).get("actions", []):
             target = root / action["path"]

@@ -451,6 +451,7 @@ class SemanticPlanContractTests(unittest.TestCase):
                          "--locator", "x", "--role", "current_implementation", "--change-policy", "invalidate_on_change",
                          "--fact-class", "runtime_behavior", expected=1)
         self.assertEqual(dirty["errors"][0]["code"], "PLAN_AUTHORITY_WORKTREE_DIRTY")
+        self.assertIn("restore the committed baseline or commit it and start a new plan", dirty["errors"][0]["message"])
         subprocess.run(["git", "checkout", "--", "authority/runtime-contract.md"], cwd=self.root, check=True)
         subprocess.run(["git", "commit", "--allow-empty", "-qm", "advance baseline"], cwd=self.root, check=True)
         stale = self.cli("knowledge-plan", "inspect", plan_id)
@@ -514,6 +515,8 @@ class SemanticPlanContractTests(unittest.TestCase):
     def test_concurrent_baseline_and_worktree_drift_fail_before_approval_or_apply(self):
         plan_id, _, _ = self.build_complete_plan()
         finalized = self.cli("knowledge-plan", "finalize", plan_id)
+        preview = self.cli("knowledge-plan", "inspect", plan_id)["closeout_preview"]
+        self.assertIn(preview["health"], {"PASS", "PASS_WITH_REVIEW"})
         before = self.formal_authority()
         topic = self.root / "domain/topics/schema.md"
         topic.write_text(topic.read_text(encoding="utf-8") + "concurrent\n", encoding="utf-8")
