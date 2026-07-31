@@ -6,11 +6,11 @@
 
 ### 计划检查提供只读的五阶段收尾预览
 
-knowledge-plan inspect 会返回只读的 closeout_preview，依次展示 Claim capture、Memory synchronization、Git commit、Authority refresh 和 final validation 五个阶段。
+knowledge-plan inspect 会返回只读的 closeout_preview，依次展示 Claim capture、Memory synchronization、Git commit、Authority refresh 和 final validation；当 Claim 变更影响配置为 count_surfaces 的 Memory 角色时，它会列出待同步路径及关联 Authority，报告 Authority Reference 的 added、refreshed、retired、affected 计数，并以 PASS、PASS_WITH_REVIEW 或 FAIL 表示当前收尾健康状态。
 
 #### 适用边界
 
-这只说明检查输出中会展示五个阶段；不表示检查会创建 Bundle、批准或应用 Bundle、提交 Git、刷新 Authority，或修改本地投影。
+这只说明检查输出会预告阶段、依赖和审查状态；不表示检查会更新 Memory、创建 Bundle、批准或应用 Bundle、提交 Git、刷新 Authority，或修改本地投影。preview 后发生的基线或工作区漂移仍由普通 plan、approval 和 apply 门禁拒绝。
 
 <!-- CLAIM:END clm_2A7C39AAEDCC3D4395D9E56EB5 -->
 

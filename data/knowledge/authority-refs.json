@@ -8,7 +8,7 @@
       "role": "current_implementation",
       "baseline_state": "committed_baseline",
       "change_policy": "invalidate_on_change",
-      "approved_hash": "6d3be797c3a6f050328ad2f1c93aa7e62640f2992f6cde3b20a97f934f00e3ed",
+      "approved_hash": "febfba921b3b168f9158f8fb13603ccf3ccb1479b73ed177cc8cfd38ee6a84cb",
       "claim_ids": [
         "clm_2A7C39AAEDCC3D4395D9E56EB5"
       ],
@@ -23,7 +23,7 @@
       "role": "current_implementation",
       "baseline_state": "committed_baseline",
       "change_policy": "invalidate_on_change",
-      "approved_hash": "6d3be797c3a6f050328ad2f1c93aa7e62640f2992f6cde3b20a97f934f00e3ed",
+      "approved_hash": "febfba921b3b168f9158f8fb13603ccf3ccb1479b73ed177cc8cfd38ee6a84cb",
       "claim_ids": [
         "clm_83EBA25FDD31CB6DF23447C7C7"
       ],
