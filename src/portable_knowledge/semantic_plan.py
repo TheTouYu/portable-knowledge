@@ -202,6 +202,8 @@ def init_plan(root: Path, instance: Instance, args: argparse.Namespace) -> dict[
     path = _plan_path(root, instance, plan_id)
     if path.exists():
         _, existing = _load(root, instance, plan_id)
+        if existing.get("state") == "abandoned":
+            _fail("PLAN_ABANDONED", f"plan {plan_id} was previously abandoned; use a different intent to start a new plan")
         return _summary(existing, "init", artifact_path=_local_base(instance).joinpath(path.name).as_posix())
     plan = {"schema_version": 2, "plan_id": plan_id, "plan_digest": plan_digest, **identity, "state": "open",
             "operations": [], "writes": {}, "claims": {}, "existing_claim_changes": {}, "structure_changes": [],
@@ -318,7 +320,8 @@ def add_authority_ref(root: Path, instance: Instance, args: argparse.Namespace) 
     path, plan = _load(root, instance, args.plan_id); _ensure_open(root, plan)
     claim = plan["claims"].get(args.claim_id)
     if not claim:
-        _fail("PLAN_CLAIM_MISSING", f"planned claim not found: {args.claim_id}")
+        plan_path = _local_base(instance) / f"{plan['plan_id']}.json"
+        _fail("PLAN_CLAIM_MISSING", f"planned claim not found: {args.claim_id}; inspect {plan_path.as_posix()} (planned claim ids are listed under 'claims')")
     pure = PurePosixPath(args.path)
     if not args.path or pure.is_absolute() or ".." in pure.parts or "\\" in args.path or args.path.startswith(".local/"):
         _fail("PLAN_AUTHORITY_PATH_INVALID", "authority path must be portable, project-relative, and non-local", path=args.path)

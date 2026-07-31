@@ -1707,7 +1707,9 @@ def bundle_inspect_command(root: Path, bundle_id: str | None, state: str | None 
         bundle = read_json(bundle_path); verify_bundle(bundle)
         projected = lifecycle_projection(bundle, approved=approval_path.is_file(), applied=receipt_path.is_file(), events=_lifecycle_events(root, value))
         item = {"bundle_id": value, "content_hash": bundle["content_hash"], "approved": approval_path.is_file(), "applied": receipt_path.is_file(),
-                "expected_changed_files": bundle["expected_changed_files"], **projected}
+                "expected_changed_files": bundle["expected_changed_files"],
+                "lifecycle_files": {"bundle": relpath(root, bundle_path), "approval": relpath(root, approval_path),
+                                    "applied": relpath(root, receipt_path)}, **projected}
         if state is None or item["state"] == state:
             items.append(item)
     return {"ok": True, "command": "bundle-inspect", "count": len(items), "bundles": items, "errors": []}
@@ -1942,6 +1944,7 @@ def output(payload: dict[str, Any], fmt: str) -> None:
     else:
         print(f"OK: {payload.get('command')}")
         if "count" in payload: print(f"count: {payload['count']}")
+        if payload.get("claim_id"): print(f"Claim ID: {payload['claim_id']}")
         if payload.get("next_step"): print(f"Next step: {payload['next_step']}")
 
 

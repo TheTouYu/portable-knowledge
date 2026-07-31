@@ -172,6 +172,8 @@ Inspect the Bundle:
 pkc bundle-inspect BUNDLE_ID --format json
 ```
 
+For compatibility, JSON inspection always returns Bundle records under `bundles`; inspecting one ID uses `bundles[0]`. Each record separates immutable action targets in `expected_changed_files` from the Bundle, approval, and application receipt paths in `lifecycle_files`.
+
 Present to the human:
 
 - semantic difference;

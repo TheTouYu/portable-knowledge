@@ -54,6 +54,13 @@ class SemanticPlanContractTests(unittest.TestCase):
         self.assertEqual(completed.returncode, expected, {"payload": payload, "stderr": completed.stderr})
         return payload
 
+    def cli_text(self, *argv: str, expected: int = 0) -> str:
+        stream = io.StringIO()
+        with contextlib.redirect_stdout(stream):
+            result = core.main(["--root", str(self.root), *argv, "--format", "text"])
+        self.assertEqual(result, expected, stream.getvalue())
+        return stream.getvalue()
+
     def formal_authority(self) -> dict[str, bytes]:
         return {path.relative_to(self.root).as_posix(): path.read_bytes()
                 for base in (self.root / "data", self.root / "domain")
@@ -123,6 +130,13 @@ class SemanticPlanContractTests(unittest.TestCase):
                          (False, "draft", False))
         self.assertEqual(len(list((self.root / "data/knowledge/bundles").glob("bnd_*.json"))), 1)
         bundle = json.loads((self.root / "data/knowledge/bundles" / f"{finalized['bundle_id']}.json").read_text(encoding="utf-8"))
+        bundle_inspection = self.cli("bundle-inspect", finalized["bundle_id"])
+        self.assertEqual(bundle_inspection["count"], 1)
+        self.assertEqual(bundle_inspection["bundles"][0]["lifecycle_files"], {
+            "bundle": f"data/knowledge/bundles/{finalized['bundle_id']}.json",
+            "approval": f"data/knowledge/bundles/{finalized['bundle_id']}.approval.json",
+            "applied": f"data/knowledge/bundles/{finalized['bundle_id']}.applied.json",
+        })
         self.assertTrue(all(set(action["provenance"]) == {"plan_id", "operation_id", "operation_type", "operation_digest", "core_version"}
                             for action in bundle["actions"]))
         self.assertNotIn("bundle", finalized)
@@ -296,6 +310,11 @@ class SemanticPlanContractTests(unittest.TestCase):
             "--fact-class", "documented_contract",
         )
         self.assertFalse(added["replayed"])
+        text_plan = self.cli("knowledge-plan", "init", "--intent", "Text claim id output", "--risk", "low")["plan_id"]
+        text = self.cli_text("knowledge-plan", "add-claim", text_plan, "--node", "software-core", "--topic-id", "topic-runtime",
+                             "--title", "Text output", "--statement", "Text output exposes its generated Claim id.",
+                             "--boundary", "Neutral fixture only.", "--fact-class", "cli_behavior")
+        self.assertIn("Claim ID: clm_", text)
         inspected = self.cli("knowledge-plan", "inspect", plan_id)
         self.assertEqual(inspected["claim_count"], 1)
         plan = json.loads((self.root / ".local/pkc/semantic-plans" / f"{plan_id}.json").read_text(encoding="utf-8"))
@@ -473,7 +492,11 @@ class SemanticPlanContractTests(unittest.TestCase):
         ]
         (self.root / "untracked.md").write_text("working tree only\n", encoding="utf-8")
         for invoke, code in failures:
-            self.assertEqual(invoke()["errors"][0]["code"], code)
+            failure = invoke()
+            self.assertEqual(failure["errors"][0]["code"], code)
+            if code == "PLAN_CLAIM_MISSING":
+                self.assertIn(f".local/pkc/semantic-plans/{plan_id}.json", failure["errors"][0]["message"])
+                self.assertIn("'claims'", failure["errors"][0]["message"])
             self.assertEqual(self.formal_authority(), self.authority_before)
 
         public_plan = self.cli("knowledge-plan", "init", "--intent", "Permission expansion", "--risk", "high")["plan_id"]
@@ -515,6 +538,10 @@ class SemanticPlanContractTests(unittest.TestCase):
         self.assertEqual(self.formal_authority(), self.authority_before)
         denied = self.cli("knowledge-plan", "check", plan_id, "--mode", "delta", expected=1)
         self.assertEqual(denied["errors"][0]["code"], "PLAN_NOT_OPEN")
+        restarted = self.cli("knowledge-plan", "init", "--intent", "Add neutral software contracts", "--risk", "medium", expected=1)
+        self.assertEqual(restarted["errors"][0]["code"], "PLAN_ABANDONED")
+        self.assertIn(plan_id, restarted["errors"][0]["message"])
+        self.assertIn("different intent", restarted["errors"][0]["message"])
 
     def test_finalize_requires_delta_and_tampered_provenance_fails_closed(self):
         plan_id = self.init()["plan_id"]
