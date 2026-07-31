@@ -1,0 +1,14 @@
+{
+  "schema_version": 1,
+  "actors": [
+    {
+      "id": "human-review-channel",
+      "name": "Human review channel",
+      "status": "active",
+      "roles": [
+        "owner",
+        "business_reviewer"
+      ]
+    }
+  ]
+}

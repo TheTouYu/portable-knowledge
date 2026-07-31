@@ -1,0 +1,13 @@
+{
+  "schema_version": 1,
+  "operator_contract": "0.1",
+  "version": "0.2.0rc5",
+  "release_channel": "remote-commit",
+  "source_repository": "/home/h/portable-knowledge",
+  "source_ref": "main",
+  "source_commit": "20ffead03d9c347f2d66288604520f7a42309cb0",
+  "wheel_sha256": "d41bd445b0d9a7363572f73f96130bdfaa822286db395e44b2cdd3c9863182a3",
+  "wheel_cache": "/home/h/.local/share/portable-knowledge/wheels/20ffead03d9c347f2d66288604520f7a42309cb0/e43bae29588e3fa9/portable_knowledge-0.2.0rc5-py3-none-any.whl",
+  "runtime": ".local/pkc/runtimes/20ffead03d9c347f2d66288604520f7a42309cb0",
+  "python_requirement": ">=3.11"
+}

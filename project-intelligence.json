@@ -1,0 +1,80 @@
+{
+  "schema_version": 1,
+  "instance": {
+    "id": "portable-knowledge",
+    "name": "portable-knowledge"
+  },
+  "pkc": {
+    "version": "0.2.0rc5",
+    "projection_path": ".local/pkc/projection"
+  },
+  "adapter": {
+    "skill": "skills/portable-knowledge-knowledge-adapter/SKILL.md"
+  },
+  "authority": {
+    "registry": "data/knowledge/registry.json",
+    "actors": "data/knowledge/actors.json",
+    "store": "data/knowledge",
+    "knowledge": "knowledge",
+    "authority_refs": "data/knowledge/authority-refs.json"
+  },
+  "identities": {
+    "principal": {
+      "id": "human-reviewer"
+    },
+    "executor": {
+      "id": "agent"
+    },
+    "workspace": {
+      "id": "portable-knowledge-workspace",
+      "path": "."
+    },
+    "writer": {
+      "id": "human-review-channel"
+    }
+  },
+  "compatibility": {
+    "v1_actor_map": {
+      "human-review-channel": "human-reviewer"
+    }
+  },
+  "memory": {
+    "roles": [
+      {
+        "role": "operating_entry",
+        "path": "memory/OPERATING.md",
+        "mutation_policy": "reference"
+      },
+      {
+        "role": "current_recovery",
+        "path": "memory/CURRENT.md",
+        "mutation_policy": "replace"
+      },
+      {
+        "role": "decision_entry",
+        "path": "memory/DECISIONS.md",
+        "mutation_policy": "supersede"
+      }
+    ],
+    "contexts": [
+      {
+        "id": "default",
+        "default": true,
+        "lifecycle": "active",
+        "goal": "Maintain project intelligence",
+        "recovery_role": "current_recovery",
+        "validation_gate": "python tools/pkc.py validate"
+      }
+    ],
+    "startup_budget": {
+      "max_files": 4,
+      "max_characters": 12000
+    },
+    "applies_to": {
+      "workspace": ".",
+      "branches": [
+        "*"
+      ]
+    }
+  }
+}
