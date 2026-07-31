@@ -1,6 +1,43 @@
 {
   "schema_version": 1,
-  "nodes": [],
-  "topics": [],
-  "relationships": []
+  "nodes": [
+    {
+      "id": "node-pkc-workflows",
+      "name": "PKC 工作流程",
+      "path": "knowledge/pkc-workflows",
+      "boundary": "PKC 自身经过实现和验证的操作流程；不包含其他项目的业务知识。",
+      "keywords": [
+        "PKC",
+        "workflow"
+      ],
+      "migration_status": "pilot"
+    }
+  ],
+  "topics": [
+    {
+      "id": "topic-governed-closeout",
+      "node_id": "node-pkc-workflows",
+      "title": "受保护的收尾流程",
+      "path": "knowledge/pkc-workflows/governed-closeout.md",
+      "summary": "记录 PKC 在正式写入前如何展示收尾步骤和生命周期状态。",
+      "keywords": [
+        "closeout",
+        "lifecycle"
+      ],
+      "permission": "internal"
+    }
+  ],
+  "relationships": [],
+  "claim_metadata": {
+    "clm_2A7C39AAEDCC3D4395D9E56EB5": {
+      "fact_classes": [
+        "runtime_behavior"
+      ]
+    },
+    "clm_83EBA25FDD31CB6DF23447C7C7": {
+      "fact_classes": [
+        "runtime_behavior"
+      ]
+    }
+  }
 }

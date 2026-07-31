@@ -1,4 +1,35 @@
 {
   "schema_version": 1,
-  "refs": []
+  "refs": [
+    {
+      "id": "aref_02803d26a7d7a1bfef00925372",
+      "path": "src/portable_knowledge/semantic_plan.py",
+      "locator": "function:_closeout_preview",
+      "role": "current_implementation",
+      "baseline_state": "committed_baseline",
+      "change_policy": "invalidate_on_change",
+      "approved_hash": "6d3be797c3a6f050328ad2f1c93aa7e62640f2992f6cde3b20a97f934f00e3ed",
+      "claim_ids": [
+        "clm_2A7C39AAEDCC3D4395D9E56EB5"
+      ],
+      "supports_fact_classes": [
+        "runtime_behavior"
+      ]
+    },
+    {
+      "id": "aref_251c91ef37ac8912ff6a953e8a",
+      "path": "src/portable_knowledge/semantic_plan.py",
+      "locator": "function:inspect lifecycle fields",
+      "role": "current_implementation",
+      "baseline_state": "committed_baseline",
+      "change_policy": "invalidate_on_change",
+      "approved_hash": "6d3be797c3a6f050328ad2f1c93aa7e62640f2992f6cde3b20a97f934f00e3ed",
+      "claim_ids": [
+        "clm_83EBA25FDD31CB6DF23447C7C7"
+      ],
+      "supports_fact_classes": [
+        "runtime_behavior"
+      ]
+    }
+  ]
 }
