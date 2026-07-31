@@ -31,7 +31,7 @@ from typing import Any, Iterable, Iterator
 
 from .instance import Instance, InstanceError, load_instance, validate_project_memory
 from .bundle import BundleError, apply_bundle, approval, build_bundle, bundle_paths, canonical as bundle_json, capture_bundle_draft, enforce_production_provenance, lifecycle_path, lifecycle_projection, rollback_bundle, seal_preflight, verify_bundle
-from .authority import AuthorityRegistryError, authority_refs_from_document, observe_authority_refs, validate_authority_conflicts, validate_authority_coverage, validate_authority_ref
+from .authority import (FACT_CLASSES, AuthorityRegistryError, authority_refs_from_document, observe_authority_refs, validate_authority_conflicts, validate_authority_coverage, validate_authority_ref)
 from .retrieval import RetrievalError, build_progressive_scope
 from .experience import (ExperienceError, authorized_claims, build_vector_index, evaluate_cases,
                          freshness_markers, search_knowledge, upstream_freshness)
@@ -1460,7 +1460,6 @@ def plan_new_claim(root: Path, args: argparse.Namespace, *, claim_id: str, fact_
     if not topic and args.duplicate_resolution != "create_distinct_with_boundary":
         raise KnowledgeError("new topic/claim requires --duplicate-resolution create_distinct_with_boundary")
     if fact_classes is not None:
-        from .authority import FACT_CLASSES
         if not fact_classes or any(value not in FACT_CLASSES for value in fact_classes):
             raise SemanticPlanError("PLAN_FACT_CLASS_REQUIRED", "add-claim requires valid fact classes")
         registry.setdefault("claim_metadata", {})[claim_id] = {"fact_classes": sorted(set(fact_classes))}
@@ -1651,7 +1650,7 @@ def bundle_approve_command(root: Path, args: argparse.Namespace, instance: Insta
     _, path, _ = bundle_paths(root, args.bundle_id)
     writes = {relpath(root, path): bundle_json(value)}
     if not args.apply:
-        return {"ok": True, "command": "bundle-approve", "bundle_id": args.bundle_id, "content_hash": bundle["content_hash"], "applied": False, "dry_run": True, "changed_files": sorted(writes), "approval": value, "errors": []}
+        return {"ok": True, "command": "bundle-approve", "bundle_id": args.bundle_id, "content_hash": bundle["content_hash"], "applied": False, "dry_run": True, "changed_files": sorted(writes), "approval": value, "errors": [], "next_step": "DRY RUN — nothing was written. Re-run bundle-approve with --apply to record the approval."}
     changed = transactional_replace(root, "bundle-approve", writes)
     return {"ok": True, "command": "bundle-approve", "bundle_id": args.bundle_id, "applied": True, "dry_run": False, "changed_files": changed, "errors": []}
 
@@ -1668,7 +1667,7 @@ def bundle_apply_command(root: Path, args: argparse.Namespace, instance: Instanc
     _, approval_path, receipt_path = bundle_paths(root, args.bundle_id)
     approved = read_json(approval_path)
     if not args.apply:
-        return {"ok": True, "command": "bundle-apply", "bundle_id": args.bundle_id, "content_hash": bundle["content_hash"], "applied": False, "dry_run": True, "changed_files": bundle["expected_changed_files"], "errors": []}
+        return {"ok": True, "command": "bundle-apply", "bundle_id": args.bundle_id, "content_hash": bundle["content_hash"], "applied": False, "dry_run": True, "changed_files": bundle["expected_changed_files"], "errors": [], "next_step": "DRY RUN — nothing was written. Re-run bundle-apply with --apply to apply the Bundle."}
     receipt_rel = relpath(root, receipt_path)
     receipt = {"schema_version": 1, "bundle_id": args.bundle_id, "content_hash": bundle["content_hash"], "changed_files": bundle["expected_changed_files"]}
     def replace_with_receipt(target_root: Path, command: str, writes: dict[str, bytes | None]) -> list[str]:
@@ -2143,7 +2142,7 @@ def parser_build() -> argparse.ArgumentParser:
     plan_claim.add_argument("--boundary", required=True)
     plan_claim.add_argument("--permission", choices=tuple(PERMISSIONS), default="internal")
     plan_claim.add_argument("--duplicate-resolution", choices=("create_distinct_with_boundary", "cancel"), default="cancel")
-    plan_claim.add_argument("--fact-class", action="append", default=[])
+    plan_claim.add_argument("--fact-class", choices=FACT_CLASSES, action="append", default=[])
     plan_revise = plan_command("revise-claim")
     plan_revise.add_argument("plan_id"); plan_revise.add_argument("--claim-id", required=True)
     plan_revise.add_argument("--title"); plan_revise.add_argument("--statement", required=True); plan_revise.add_argument("--boundary", required=True)
@@ -2158,7 +2157,7 @@ def parser_build() -> argparse.ArgumentParser:
     plan_ref.add_argument("plan_id"); plan_ref.add_argument("--claim-id", required=True)
     plan_ref.add_argument("--path", required=True); plan_ref.add_argument("--locator", required=True)
     plan_ref.add_argument("--role", required=True); plan_ref.add_argument("--change-policy", required=True)
-    plan_ref.add_argument("--fact-class", action="append", default=[])
+    plan_ref.add_argument("--fact-class", choices=FACT_CLASSES, action="append", default=[])
     plan_ref.add_argument("--diagnostic-hash")
     plan_refresh_ref = plan_command("refresh-authority-ref")
     plan_refresh_ref.add_argument("plan_id"); plan_refresh_ref.add_argument("--authority-ref-id", required=True)

@@ -132,7 +132,17 @@ class SemanticPlanContractTests(unittest.TestCase):
         self.assertEqual(len(list((self.root / "data/knowledge/bundles").glob("bnd_*.json"))), 1)
         # Only the immutable Bundle artifact was created; production authority remains unchanged.
         self.assertEqual(self.formal_authority(), self.authority_before)
+        dry = self.cli("bundle-approve", finalized["bundle_id"], "--content-hash", finalized["content_hash"])
+        self.assertTrue(dry["dry_run"])
+        self.assertFalse(dry["applied"])
+        self.assertIn("DRY RUN", dry["next_step"])
+        self.assertFalse((self.root / "data/knowledge/bundles" / f"{finalized['bundle_id']}.approval.json").exists())
         approved = self.cli("bundle-approve", finalized["bundle_id"], "--content-hash", finalized["content_hash"], "--apply")
+        self.assertTrue(approved["applied"])
+        dry_apply = self.cli("bundle-apply", finalized["bundle_id"], "--content-hash", finalized["content_hash"])
+        self.assertTrue(dry_apply["dry_run"])
+        self.assertIn("DRY RUN", dry_apply["next_step"])
+        self.assertFalse((self.root / "data/knowledge/bundles" / f"{finalized['bundle_id']}.applied.json").exists())
         self.assertTrue(approved["applied"])
         approved_inspection = self.cli("knowledge-plan", "inspect", plan_id)
         self.assertEqual((approved_inspection["approval_recorded"], approved_inspection["bundle_state"], approved_inspection["bundle_applied"]),
