@@ -447,7 +447,8 @@ def refresh_authority_ref(root: Path, instance: Instance, args: argparse.Namespa
     _store_authority_registry(plan, refs_rel, data, "refresh_authority_ref")
     event_path = _append_authority_event(root, plan, event, "refresh_authority_ref")
     details = {"authority_ref_id": args.authority_ref_id, "old_hash": old_hash, "new_hash": new_hash,
-               "affected_claim_ids": old.get("claim_ids", []), "path": old["path"], "event_id": event["event_id"], "event_path": event_path}
+               "affected_claim_ids": old.get("claim_ids", []), "path": old["path"], "reason": reason,
+               "event_id": event["event_id"], "event_path": event_path}
     operation["authority_ref_id"] = args.authority_ref_id
     plan["operations"].append(operation); plan.setdefault("authority_ref_refreshes", []).append(details)
     plan["delta"] = None; _counters(plan); _save(path, plan)
@@ -506,6 +507,7 @@ def retire_authority_ref(root: Path, instance: Instance, args: argparse.Namespac
     _store_authority_registry(plan, refs_rel, data, "retire_authority_ref")
     event_path = _append_authority_event(root, plan, event, "retire_authority_ref")
     details = {"authority_ref_id": args.authority_ref_id, "affected_claim_ids": retired.get("claim_ids", []),
+               "path": retired["path"], "old_hash": retired.get("approved_hash") or retired.get("fragment_hash"),
                "replacement_authority_ref_id": replacement_ref, "replacement_claim_id": replacement_claim,
                "reason": reason, "event_id": event["event_id"], "event_path": event_path}
     operation["authority_ref_id"] = args.authority_ref_id
@@ -798,10 +800,50 @@ def record_post_apply_full_check(root: Path, instance: Instance, bundle: dict[st
     return receipt
 
 
-def _closeout_preview(instance: Instance, plan: dict[str, Any]) -> dict[str, Any]:
+def _affected_authority_refs(root: Path, instance: Instance, plan: dict[str, Any]) -> list[dict[str, Any]]:
+    report = []
+    for ref in plan.get("authority_refs", []):
+        report.append({"authority_ref_id": ref["id"], "change": "added", "path": ref["path"],
+                       "old_hash": None, "new_hash": ref.get("approved_hash") or ref.get("fragment_hash"),
+                       "linked_claim_ids": ref.get("claim_ids", []),
+                       "human_review_reason": "A new Authority Reference requires exact-hash human review."})
+    for item in plan.get("authority_ref_refreshes", []):
+        report.append({"authority_ref_id": item["authority_ref_id"], "change": "refreshed", "path": item["path"],
+                       "old_hash": item["old_hash"], "new_hash": item["new_hash"],
+                       "linked_claim_ids": item.get("affected_claim_ids", []),
+                       "human_review_reason": item.get("reason", "The committed Authority changed and requires exact-hash human review.")})
+    for item in plan.get("authority_ref_retirements", []):
+        report.append({"authority_ref_id": item["authority_ref_id"], "change": "retired", "path": item.get("path"),
+                       "old_hash": item.get("old_hash"), "new_hash": None,
+                       "linked_claim_ids": item.get("affected_claim_ids", []),
+                       "human_review_reason": item["reason"]})
+
+    refs_rel = instance.authority.get("authority_refs")
+    committed = _committed_bytes(root, plan["baseline_commit"], refs_rel) if refs_rel else None
+    if committed:
+        try:
+            existing = authority_refs_from_document(json.loads(committed.decode("utf-8")))
+        except (ValueError, UnicodeDecodeError, json.JSONDecodeError):
+            existing = []
+        reported = {item["authority_ref_id"] for item in report}
+        writes = _decode_writes(plan)
+        for ref in existing:
+            if ref.get("id") in reported or ref.get("path") not in writes:
+                continue
+            after = writes[ref["path"]]
+            report.append({"authority_ref_id": ref["id"], "change": "source_path_staged", "path": ref["path"],
+                           "old_hash": ref.get("approved_hash") or ref.get("fragment_hash"),
+                           "new_hash": hashlib.sha256(after).hexdigest() if after is not None else None,
+                           "linked_claim_ids": ref.get("claim_ids", []),
+                           "human_review_reason": "The staged Authority change requires a committed baseline before this reference can be refreshed or retired."})
+    return sorted(report, key=lambda item: (item["path"] or "", item["authority_ref_id"]))
+
+
+def _closeout_preview(root: Path, instance: Instance, plan: dict[str, Any]) -> dict[str, Any]:
     operation_types = {item["operation_type"] for item in plan.get("operations", [])}
     claim_work = bool(operation_types.intersection({"add_claim", "revise_claim", "move_topic"}))
-    authority_work = bool(operation_types.intersection({"add_authority_ref", "refresh_authority_ref", "retire_authority_ref"}))
+    affected_authority_refs = _affected_authority_refs(root, instance, plan)
+    authority_work = bool(affected_authority_refs)
     memory_paths = {item.get("path") for item in instance.raw.get("memory", {}).get("roles", [])}
     memory_work = bool(memory_paths.intersection(plan.get("writes", {})))
     delta = plan.get("delta") or {}
@@ -822,7 +864,7 @@ def _closeout_preview(instance: Instance, plan: dict[str, Any]) -> dict[str, Any
          "read_only": True, "mutation_required": False,
          "reason": "Current delta validation permits finalize" if delta.get("ok") and delta.get("delta_digest") == _content_digest(plan) else "A current successful delta check is required before finalize"},
     ]
-    return {"read_only": True, "phases": phases}
+    return {"read_only": True, "phases": phases, "affected_authority_refs": affected_authority_refs}
 
 
 def inspect(root: Path, instance: Instance, args: argparse.Namespace) -> dict[str, Any]:
@@ -842,7 +884,7 @@ def inspect(root: Path, instance: Instance, args: argparse.Namespace) -> dict[st
             "bundle_state": projected["state"],
             "bundle_applied": receipt_path.is_file(),
         }
-    return _summary(plan, "inspect", delta=plan.get("delta"), closeout_preview=_closeout_preview(instance, plan),
+    return _summary(plan, "inspect", delta=plan.get("delta"), closeout_preview=_closeout_preview(root, instance, plan),
                     finalized_bundle_id=(bundle or {}).get("bundle_id"),
                     full_preflight_receipt=plan.get("full_preflight_receipt"), post_apply_receipt=plan.get("post_apply_receipt"),
                     **lifecycle)

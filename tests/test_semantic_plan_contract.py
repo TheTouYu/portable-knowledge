@@ -141,7 +141,7 @@ class SemanticPlanContractTests(unittest.TestCase):
     def test_inspect_previews_closeout_phases_without_mutation(self):
         plan_id = self.init()["plan_id"]
         claim_id = self.add_claim(plan_id, "schema", "Preview contract", "Inspection previews the governed closeout phases.", ("documented_contract",))["claim_id"]
-        self.add_ref(plan_id, claim_id, "schema", "authority/schema-contract.md", "documented_contract", "documented_contract")
+        added_ref = self.add_ref(plan_id, claim_id, "schema", "authority/schema-contract.md", "documented_contract", "documented_contract")
         plan_path = self.root / ".local/pkc/semantic-plans" / f"{plan_id}.json"
         before = plan_path.read_bytes()
         preview = self.cli("knowledge-plan", "inspect", plan_id)["closeout_preview"]
@@ -151,6 +151,15 @@ class SemanticPlanContractTests(unittest.TestCase):
         self.assertEqual([phase["status"] for phase in preview["phases"]],
                          ["planned", "not_configured", "planned", "planned", "pending"])
         self.assertTrue(all(phase["read_only"] for phase in preview["phases"]))
+        self.assertEqual(preview["affected_authority_refs"], [{
+            "authority_ref_id": added_ref["authority_ref_id"],
+            "change": "added",
+            "path": "authority/schema-contract.md",
+            "old_hash": None,
+            "new_hash": added_ref["approved_hash"],
+            "linked_claim_ids": [claim_id],
+            "human_review_reason": "A new Authority Reference requires exact-hash human review.",
+        }])
         self.assertEqual(plan_path.read_bytes(), before)
         self.assertEqual(list((self.root / "data/knowledge/bundles").glob("bnd_*.json")), [])
 
@@ -161,6 +170,44 @@ class SemanticPlanContractTests(unittest.TestCase):
         self.assertEqual(ready["phases"][-1]["reason"], "Current delta validation permits finalize")
         self.assertEqual(self.cli("knowledge-plan", "inspect", plan_id)["cost_counters"],
                          delta["cost_counters"])
+
+    def test_inspect_reports_staged_authority_dependency_without_mutation(self):
+        topic = self.root / "domain/topics/schema.md"
+        old_hash = hashlib.sha256(topic.read_bytes()).hexdigest()
+        refs_path = self.root / "data/store/authority-refs.json"
+        refs_path.write_text(json.dumps({"schema_version": 1, "refs": [{
+            "id": "aref_schema_topic", "path": "domain/topics/schema.md", "locator": "whole topic",
+            "role": "documented_contract", "baseline_state": "committed_baseline",
+            "change_policy": "invalidate_on_change", "approved_hash": old_hash,
+            "claim_ids": ["clm_existing"], "supports_fact_classes": ["documented_contract"],
+        }]}, indent=2) + "\n", encoding="utf-8")
+        subprocess.run(["git", "add", "data/store/authority-refs.json"], cwd=self.root, check=True)
+        subprocess.run(["git", "commit", "-qm", "add topic Authority dependency"], cwd=self.root, check=True)
+
+        plan_id = self.init()["plan_id"]
+        self.add_claim(plan_id, "schema", "Dependent preview", "A staged Topic affects its existing Authority Ref.",
+                       ("documented_contract",))
+        plan_path = self.root / ".local/pkc/semantic-plans" / f"{plan_id}.json"
+        before = plan_path.read_bytes()
+        formal_before = self.formal_authority()
+        preview = self.cli("knowledge-plan", "inspect", plan_id)["closeout_preview"]
+        report = preview["affected_authority_refs"]
+
+        self.assertEqual(next(phase for phase in preview["phases"] if phase["id"] == "authority_refresh")["status"], "planned")
+        self.assertEqual(len(report), 1)
+        self.assertEqual(report[0], {
+            "authority_ref_id": "aref_schema_topic",
+            "change": "source_path_staged",
+            "path": "domain/topics/schema.md",
+            "old_hash": old_hash,
+            "new_hash": report[0]["new_hash"],
+            "linked_claim_ids": ["clm_existing"],
+            "human_review_reason": "The staged Authority change requires a committed baseline before this reference can be refreshed or retired.",
+        })
+        self.assertNotEqual(report[0]["new_hash"], old_hash)
+        self.assertEqual(plan_path.read_bytes(), before)
+        self.assertEqual(self.formal_authority(), formal_before)
+        self.assertEqual(list((self.root / "data/knowledge/bundles").glob("bnd_*.json")), [])
 
     def test_same_plan_replay_keeps_ids_delta_diff_files_and_bundle(self):
         plan_id, claims, delta = self.build_complete_plan()
@@ -762,6 +809,15 @@ class SemanticPlanContractTests(unittest.TestCase):
         self.assertEqual(refreshed["authority_ref_id"], original["authority_ref_id"])
         self.assertNotEqual(refreshed["old_approved_hash"], refreshed["new_approved_hash"])
         self.assertEqual(refreshed["affected_claim_ids"], [added["claim_id"]])
+        self.assertEqual(self.cli("knowledge-plan", "inspect", plan_id)["closeout_preview"]["affected_authority_refs"], [{
+            "authority_ref_id": original["authority_ref_id"],
+            "change": "refreshed",
+            "path": "authority/runtime-contract.md",
+            "old_hash": refreshed["old_approved_hash"],
+            "new_hash": refreshed["new_approved_hash"],
+            "linked_claim_ids": [added["claim_id"]],
+            "human_review_reason": "Committed implementation changed and was reviewed.",
+        }])
         replay = self.cli("knowledge-plan", "refresh-authority-ref", plan_id,
                           "--authority-ref-id", original["authority_ref_id"],
                           "--reason", "Committed implementation changed and was reviewed.")
@@ -843,6 +899,15 @@ class SemanticPlanContractTests(unittest.TestCase):
                            "--replacement-authority-ref-id", replacement["authority_ref_id"],
                            "--reason", "The validation contract is now the canonical source.")
         self.assertEqual(retired["affected_claim_ids"], [added["claim_id"]])
+        self.assertEqual(self.cli("knowledge-plan", "inspect", plan_id)["closeout_preview"]["affected_authority_refs"], [{
+            "authority_ref_id": retiring["authority_ref_id"],
+            "change": "retired",
+            "path": "authority/schema-contract.md",
+            "old_hash": retiring["approved_hash"],
+            "new_hash": None,
+            "linked_claim_ids": [added["claim_id"]],
+            "human_review_reason": "The validation contract is now the canonical source.",
+        }])
         replay = self.cli("knowledge-plan", "retire-authority-ref", plan_id,
                           "--authority-ref-id", retiring["authority_ref_id"],
                           "--replacement-authority-ref-id", replacement["authority_ref_id"],
