@@ -864,7 +864,14 @@ def _closeout_preview(root: Path, instance: Instance, plan: dict[str, Any]) -> d
          "read_only": True, "mutation_required": False,
          "reason": "Current delta validation permits finalize" if delta.get("ok") and delta.get("delta_digest") == _content_digest(plan) else "A current successful delta check is required before finalize"},
     ]
-    return {"read_only": True, "phases": phases, "affected_authority_refs": affected_authority_refs}
+    counts = {"added": 0, "refreshed": 0, "retired": 0, "affected": len(affected_authority_refs)}
+    for item in affected_authority_refs:
+        if item["change"] in counts:
+            counts[item["change"]] += 1
+    delta_ready = bool(delta.get("ok") and delta.get("delta_digest") == _content_digest(plan))
+    health = "PASS_WITH_REVIEW" if delta_ready and affected_authority_refs else "PASS" if delta_ready else "FAIL"
+    return {"read_only": True, "phases": phases, "affected_authority_refs": affected_authority_refs,
+            "authority_ref_counts": counts, "health": health}
 
 
 def inspect(root: Path, instance: Instance, args: argparse.Namespace) -> dict[str, Any]:

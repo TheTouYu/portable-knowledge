@@ -160,12 +160,15 @@ class SemanticPlanContractTests(unittest.TestCase):
             "linked_claim_ids": [claim_id],
             "human_review_reason": "A new Authority Reference requires exact-hash human review.",
         }])
+        self.assertEqual(preview["authority_ref_counts"], {"added": 1, "refreshed": 0, "retired": 0, "affected": 1})
+        self.assertEqual(preview["health"], "FAIL")
         self.assertEqual(plan_path.read_bytes(), before)
         self.assertEqual(list((self.root / "data/knowledge/bundles").glob("bnd_*.json")), [])
 
         delta = self.cli("knowledge-plan", "check", plan_id, "--mode", "delta")
         self.assertTrue(delta["can_finalize"])
         ready = self.cli("knowledge-plan", "inspect", plan_id)["closeout_preview"]
+        self.assertEqual(ready["health"], "PASS_WITH_REVIEW")
         self.assertEqual(ready["phases"][-1]["status"], "ready")
         self.assertEqual(ready["phases"][-1]["reason"], "Current delta validation permits finalize")
         self.assertEqual(self.cli("knowledge-plan", "inspect", plan_id)["cost_counters"],
