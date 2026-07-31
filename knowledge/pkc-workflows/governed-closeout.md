@@ -25,3 +25,39 @@ knowledge-plan inspect 会把 approval_recorded、bundle_state 和 bundle_applie
 这只说明检查结果会区分是否已记录批准、Bundle 当前状态和是否已应用；它不自动批准或应用 Bundle，也不证明后续 Git 提交或最终验证已经完成。
 
 <!-- CLAIM:END clm_83EBA25FDD31CB6DF23447C7C7 -->
+
+<!-- CLAIM:START clm_75D42A38D15CF9BF2CA282BD18 -->
+
+### 计划 Claim 标识可直接发现
+
+knowledge-plan add-claim 的文本成功输出会显示生成的 Claim ID；add-authority-ref 找不到计划 Claim 时会指出对应计划 JSON 路径，并说明标识位于 claims 下。
+
+#### 适用边界
+
+这只描述 CLI 的可发现性；不改变 Claim ID 生成算法、计划内容、Authority 校验或正式写入流程。
+
+<!-- CLAIM:END clm_75D42A38D15CF9BF2CA282BD18 -->
+
+<!-- CLAIM:START clm_0CCABBA16112B45E1E013C7B9D -->
+
+### 废弃计划不能被 init 静默复用
+
+knowledge-plan init 若以相同确定性输入命中已废弃计划，会立即返回 PLAN_ABANDONED，指出计划 ID 并提示使用不同 intent 创建新计划。
+
+#### 适用边界
+
+开放计划的幂等重放保持不变；废弃计划不会重新打开，也不会自动生成新的计划 ID。
+
+<!-- CLAIM:END clm_0CCABBA16112B45E1E013C7B9D -->
+
+<!-- CLAIM:START clm_FEA9677C7712F21ACDD64C4212 -->
+
+### Bundle 检查兼容地列出生命周期文件
+
+bundle-inspect 保持 bundles 数组输出形状，并在每个 Bundle 记录的 lifecycle_files 中分别列出 Bundle、approval 和 applied 文件路径；expected_changed_files 继续只表示不可变 Bundle action 的目标文件。
+
+#### 适用边界
+
+指定单个 Bundle ID 时记录仍位于 bundles[0]；该字段不改变 Bundle 内容哈希、action 目标或审批与应用分离。
+
+<!-- CLAIM:END clm_FEA9677C7712F21ACDD64C4212 -->

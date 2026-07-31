@@ -8,7 +8,7 @@
       "role": "current_implementation",
       "baseline_state": "committed_baseline",
       "change_policy": "invalidate_on_change",
-      "approved_hash": "febfba921b3b168f9158f8fb13603ccf3ccb1479b73ed177cc8cfd38ee6a84cb",
+      "approved_hash": "92aa65400a62979f124e9114e39424ff47ce0ae50432d46f08f958d1e2252f18",
       "claim_ids": [
         "clm_2A7C39AAEDCC3D4395D9E56EB5"
       ],
@@ -23,12 +23,87 @@
       "role": "current_implementation",
       "baseline_state": "committed_baseline",
       "change_policy": "invalidate_on_change",
-      "approved_hash": "febfba921b3b168f9158f8fb13603ccf3ccb1479b73ed177cc8cfd38ee6a84cb",
+      "approved_hash": "92aa65400a62979f124e9114e39424ff47ce0ae50432d46f08f958d1e2252f18",
       "claim_ids": [
         "clm_83EBA25FDD31CB6DF23447C7C7"
       ],
       "supports_fact_classes": [
         "runtime_behavior"
+      ]
+    },
+    {
+      "id": "aref_5a50e8ebc130253045c309de70",
+      "path": "src/portable_knowledge/core.py",
+      "locator": "function:output",
+      "role": "current_implementation",
+      "baseline_state": "committed_baseline",
+      "change_policy": "invalidate_on_change",
+      "approved_hash": "d11bd16636fb4b96c81b1a09f6b35ba61db9caeed87b78d3c7cbc629e5c94480",
+      "claim_ids": [
+        "clm_75D42A38D15CF9BF2CA282BD18"
+      ],
+      "supports_fact_classes": [
+        "cli_behavior"
+      ]
+    },
+    {
+      "id": "aref_71d45508393553f31d2250a3da",
+      "path": "src/portable_knowledge/semantic_plan.py",
+      "locator": "function:init_plan",
+      "role": "current_implementation",
+      "baseline_state": "committed_baseline",
+      "change_policy": "invalidate_on_change",
+      "approved_hash": "92aa65400a62979f124e9114e39424ff47ce0ae50432d46f08f958d1e2252f18",
+      "claim_ids": [
+        "clm_0CCABBA16112B45E1E013C7B9D"
+      ],
+      "supports_fact_classes": [
+        "cli_behavior"
+      ]
+    },
+    {
+      "id": "aref_92819c28cb8efc7b15e16dd7ef",
+      "path": "src/portable_knowledge/core.py",
+      "locator": "function:bundle_inspect_command",
+      "role": "current_implementation",
+      "baseline_state": "committed_baseline",
+      "change_policy": "invalidate_on_change",
+      "approved_hash": "d11bd16636fb4b96c81b1a09f6b35ba61db9caeed87b78d3c7cbc629e5c94480",
+      "claim_ids": [
+        "clm_FEA9677C7712F21ACDD64C4212"
+      ],
+      "supports_fact_classes": [
+        "cli_behavior"
+      ]
+    },
+    {
+      "id": "aref_972483117feb397e099a71def5",
+      "path": "docs/SEMANTIC-CHANGES.md",
+      "locator": "section:Before approval",
+      "role": "documented_contract",
+      "baseline_state": "committed_baseline",
+      "change_policy": "review_on_change",
+      "approved_hash": "e8382aa5536855c9c81419c63539ee9f036a1afb1cb5fe5787d9f34654753d2f",
+      "claim_ids": [
+        "clm_FEA9677C7712F21ACDD64C4212"
+      ],
+      "supports_fact_classes": [
+        "documented_contract"
+      ]
+    },
+    {
+      "id": "aref_bc82333d0ff700b6f15489a2a5",
+      "path": "src/portable_knowledge/semantic_plan.py",
+      "locator": "function:add_authority_ref",
+      "role": "current_implementation",
+      "baseline_state": "committed_baseline",
+      "change_policy": "invalidate_on_change",
+      "approved_hash": "92aa65400a62979f124e9114e39424ff47ce0ae50432d46f08f958d1e2252f18",
+      "claim_ids": [
+        "clm_75D42A38D15CF9BF2CA282BD18"
+      ],
+      "supports_fact_classes": [
+        "cli_behavior"
       ]
     }
   ]
