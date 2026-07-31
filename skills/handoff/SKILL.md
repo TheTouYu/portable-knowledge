@@ -9,13 +9,15 @@ disable-model-invocation: true
 
 Create a handoff document that lets a fresh agent resume the work with the smallest useful context window.
 
+The handoff serves two situations: the current task must continue in a fresh session because context is running out, or the current task is complete enough to start a separate task with a lighter context. In both cases it is a compressed task cursor, not a general project report.
+
 The handoff document is the **minimum recovery surface**. Put the objective, current state, next action, first read-only check, protected changes, authorization gates, and acceptance criteria directly in it. A fresh agent should understand and begin safe recovery by reading only this core information. References are for later deep dives, not prerequisites for ordinary resumption. Read an original file only when the handoff is missing a fact required for the next action or a bounded evidence gap makes it necessary.
 
 ## Two simple user paths
 
 Keep the user-facing workflow simple:
 
-1. When the user invokes `handoff`, create the recovery document. Do not require PKC terminology, a schema, or a second form. Record stable goals and decisions as **durable candidates** in the handoff, but do not silently write them into formal knowledge.
+1. When the user invokes `handoff`, create the recovery document. Do not require PKC terminology, a schema, or a second form. If no additional focus is supplied, inherit the active task from the current conversation rather than asking for a new task. Record stable goals and decisions as **durable candidates** in the handoff, but do not silently write them into formal knowledge.
 2. When the user says to remember something in the knowledge tree, knowledge base, project memory, or long-term project knowledge, treat that as an explicit durable-capture request. Inspect the target project's operating rules and Adapter, then use its configured governed knowledge workflow. Preserve the distinction between feedback, Memory, a proposed decision, and a formal Claim/Authority change. Stop at the project's human approval gate; never self-approve, directly edit Authority, or turn an ordinary handoff into a Bundle.
 
 If the project has no configured knowledge workflow, keep the item in the handoff under `durable_candidates` with `promotion_status: blocked_or_not_configured`, state the exact missing prerequisite, and continue producing the handoff. Do not invent a PKC layout or copy a neutral example.
@@ -38,9 +40,7 @@ else:
     mode: next-task
 ```
 
-Pending commit, push, cleanup, or publication does not make substantive work incomplete. The literal mode line must match `^mode: (next-task|interrupted-task)$`; every other value is invalid and must be rewritten before saving.
-
-Do not blur these modes. `next-task` summarizes delivered results and starts a new task; `interrupted-task` preserves unfinished execution state and prevents duplicate or unsafe work.
+The literal mode line must match `^mode: (next-task|interrupted-task)$`; every other value is invalid and must be rewritten before saving.
 
 ## Output Location
 
@@ -63,9 +63,11 @@ Write information in this order:
 
 Do not make the reader reconstruct critical facts by following references. If a fact is needed to execute the next action, copy it into the handoff. Omit detail that does not affect the next bounded action; the ponytail rule is to add context only when the evidence gap justifies it.
 
+Before writing, determine the task state in this order: extract the user's active goal and latest intended action from the current conversation; identify the current phase, completed result, and unfinished step; then use the worktree, relevant files, tests, and recent commits only to verify those facts. Treat the current conversation as sufficient evidence unless it conflicts with observed state or omits a value required for the first check; do not reread source, tests, history, or project documents merely to restate facts already present. A dirty path is evidence of a change, not proof that it is the active task. If the active task remains identifiable and incomplete, record its continuation as `next_action`; do not execute that action during handoff. Ask for clarification only when the conversation and bounded project evidence cannot identify the task.
+
 ## Required Handoff Content
 
-Use concise headings and concrete values. Include the sections below unless a section is genuinely not applicable; state `none` instead of omitting it.
+Use concise headings and concrete values. Treat the sections below as a checklist, not mandatory prose: include a section only when it changes the next session's action or safety; otherwise omit it or state `none` in a compact line.
 
 ### 1. Mode and Next Session Focus
 
@@ -93,7 +95,7 @@ knowledge_entrypoint: <project wrapper/Adapter path, or none>
 For `next-task`, explicitly separate:
 
 - `completed_this_round`: delivered results and their evidence;
-- `next_round_task`: the new task, not a repetition of completed work; use `not specified — ask for the user's next task after reconciliation` when none has been provided;
+- `next_round_task`: the new task, not a repetition of completed work; if the current task is complete and no new task was provided, use `not specified — ask for the user's next task after reconciliation`; if work remains, describe the continuation of the active task instead of asking for a new one;
 - `durable_constraints`: facts from this round that must affect the new task;
 - `secondary_pending_actions`: optional packaging, commit, push, cleanup, or publication work that is not the next-session focus, or `none`; include its authorization gate.
 
@@ -183,6 +185,8 @@ For work involving code, generated artifacts, real files, or external behavior, 
 
 Use an explicit table or status list with `done`, `pending`, or `blocked`. For every completed layer, include the observed result and its path/hash when relevant. For every pending layer, name the next evidence-producing action. Never describe a lower layer as proof of a higher layer.
 
+For multi-phase work, distinguish the current phase's acceptance from final owner or in-product acceptance. State which later phase first makes end-to-end testing possible; do not imply that a completed design or logic phase is ready for product/game testing before its integration layer exists.
+
 ### 8. Suggested Skills
 
 Include a `suggested skills` section. List only skills that are relevant to the next session, with one short reason each. Do not suggest skills merely because they exist.
@@ -201,19 +205,7 @@ For each reference, give an exact path or URL and one phrase explaining when to 
 
 ## Recovery Contract
 
-Write the handoff so that the receiving agent follows this protocol:
-
-1. Read only the handoff's core recovery package first.
-2. Determine whether the mode is `next-task` or `interrupted-task`.
-3. Extract the immediate objective, first check, constraints, authorization scope, stop conditions, and acceptance criteria.
-4. Inspect the current worktree and run the first read-only reconciliation check.
-5. Compare observed state with the handoff's confirmed facts, including dirty paths, hashes, IDs, generated files, and process state where applicable.
-6. If they match, continue with the bounded next action without re-reading the same evidence.
-7. If they differ, stop and report the mismatch before mutating anything; do not silently refresh the handoff from the new state.
-8. If a required fact is absent or a concrete evidence gap remains, read only the relevant original file or reference and state why it was needed.
-9. Reconfirm any pending human gate immediately before the mutation it protects.
-
-If project-specific rules require additional startup files, record that as an explicit exception in the handoff's `References` or `Safety and Communication Gates` section. Do not silently turn every referenced artifact into a recovery prerequisite.
+The receiving agent reads only the core package, extracts the mode, objective, first check, constraints, authorization scope, stop conditions, and acceptance criteria, then inspects the current worktree and runs that read-only reconciliation check. If confirmed facts match, it continues the bounded next action without rereading the same evidence. If they differ, it stops and reports the mismatch before mutation; it never silently refreshes the handoff. It reads a referenced original only for a named evidence gap and states why, then reconfirms every pending human gate immediately before the mutation it protects. Project-specific startup exceptions belong in `References` or `Safety and Communication Gates`; references are not automatic prerequisites.
 
 ## No-Duplication Rule
 
