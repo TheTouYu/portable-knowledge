@@ -138,6 +138,30 @@ class SemanticPlanContractTests(unittest.TestCase):
         self.assertEqual((approved_inspection["approval_recorded"], approved_inspection["bundle_state"], approved_inspection["bundle_applied"]),
                          (True, "approved", False))
 
+    def test_inspect_previews_closeout_phases_without_mutation(self):
+        plan_id = self.init()["plan_id"]
+        claim_id = self.add_claim(plan_id, "schema", "Preview contract", "Inspection previews the governed closeout phases.", ("documented_contract",))["claim_id"]
+        self.add_ref(plan_id, claim_id, "schema", "authority/schema-contract.md", "documented_contract", "documented_contract")
+        plan_path = self.root / ".local/pkc/semantic-plans" / f"{plan_id}.json"
+        before = plan_path.read_bytes()
+        preview = self.cli("knowledge-plan", "inspect", plan_id)["closeout_preview"]
+        self.assertTrue(preview["read_only"])
+        self.assertEqual([phase["id"] for phase in preview["phases"]],
+                         ["claim_capture", "memory_synchronization", "git_commit", "authority_refresh", "final_validation"])
+        self.assertEqual([phase["status"] for phase in preview["phases"]],
+                         ["planned", "not_configured", "planned", "planned", "pending"])
+        self.assertTrue(all(phase["read_only"] for phase in preview["phases"]))
+        self.assertEqual(plan_path.read_bytes(), before)
+        self.assertEqual(list((self.root / "data/knowledge/bundles").glob("bnd_*.json")), [])
+
+        delta = self.cli("knowledge-plan", "check", plan_id, "--mode", "delta")
+        self.assertTrue(delta["can_finalize"])
+        ready = self.cli("knowledge-plan", "inspect", plan_id)["closeout_preview"]
+        self.assertEqual(ready["phases"][-1]["status"], "ready")
+        self.assertEqual(ready["phases"][-1]["reason"], "Current delta validation permits finalize")
+        self.assertEqual(self.cli("knowledge-plan", "inspect", plan_id)["cost_counters"],
+                         delta["cost_counters"])
+
     def test_same_plan_replay_keeps_ids_delta_diff_files_and_bundle(self):
         plan_id, claims, delta = self.build_complete_plan()
         replay = self.add_claim(plan_id, "schema", "Schema input is explicit", "The schema parser accepts explicit versioned fields.",

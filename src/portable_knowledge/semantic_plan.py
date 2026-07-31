@@ -798,6 +798,33 @@ def record_post_apply_full_check(root: Path, instance: Instance, bundle: dict[st
     return receipt
 
 
+def _closeout_preview(instance: Instance, plan: dict[str, Any]) -> dict[str, Any]:
+    operation_types = {item["operation_type"] for item in plan.get("operations", [])}
+    claim_work = bool(operation_types.intersection({"add_claim", "revise_claim", "move_topic"}))
+    authority_work = bool(operation_types.intersection({"add_authority_ref", "refresh_authority_ref", "retire_authority_ref"}))
+    memory_paths = {item.get("path") for item in instance.raw.get("memory", {}).get("roles", [])}
+    memory_work = bool(memory_paths.intersection(plan.get("writes", {})))
+    delta = plan.get("delta") or {}
+    phases = [
+        {"id": "claim_capture", "status": "planned" if claim_work else "not_needed",
+         "read_only": True, "mutation_required": claim_work,
+         "reason": "Claim operations are staged in this plan" if claim_work else "No Claim operation is staged"},
+        {"id": "memory_synchronization", "status": "planned" if memory_work else "not_configured",
+         "read_only": True, "mutation_required": memory_work,
+         "reason": "A configured Memory role is staged for update" if memory_work else "This plan has no staged Memory synchronization"},
+        {"id": "git_commit", "status": "planned" if plan.get("writes") else "not_needed",
+         "read_only": True, "mutation_required": bool(plan.get("writes")),
+         "reason": "Staged files require an authorized Git commit" if plan.get("writes") else "No files are staged"},
+        {"id": "authority_refresh", "status": "planned" if authority_work else "not_needed",
+         "read_only": True, "mutation_required": authority_work,
+         "reason": "Authority References are added, refreshed, or retired" if authority_work else "No Authority Reference maintenance is staged"},
+        {"id": "final_validation", "status": "ready" if delta.get("ok") and delta.get("delta_digest") == _content_digest(plan) else "pending",
+         "read_only": True, "mutation_required": False,
+         "reason": "Current delta validation permits finalize" if delta.get("ok") and delta.get("delta_digest") == _content_digest(plan) else "A current successful delta check is required before finalize"},
+    ]
+    return {"read_only": True, "phases": phases}
+
+
 def inspect(root: Path, instance: Instance, args: argparse.Namespace) -> dict[str, Any]:
     _, plan = _load(root, instance, args.plan_id)
     bundle = plan.get("finalized_bundle")
@@ -815,7 +842,8 @@ def inspect(root: Path, instance: Instance, args: argparse.Namespace) -> dict[st
             "bundle_state": projected["state"],
             "bundle_applied": receipt_path.is_file(),
         }
-    return _summary(plan, "inspect", delta=plan.get("delta"), finalized_bundle_id=(bundle or {}).get("bundle_id"),
+    return _summary(plan, "inspect", delta=plan.get("delta"), closeout_preview=_closeout_preview(instance, plan),
+                    finalized_bundle_id=(bundle or {}).get("bundle_id"),
                     full_preflight_receipt=plan.get("full_preflight_receipt"), post_apply_receipt=plan.get("post_apply_receipt"),
                     **lifecycle)
 

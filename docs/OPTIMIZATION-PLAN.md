@@ -1,6 +1,6 @@
 # PKC Optimization Plan
 
-Status: implementation-ready
+Status: implementation-ready; Phase 2 partially implemented
 Updated: 2026-07-31
 
 This is an ordinary plan, not PKC Authority. It does not create Claims,
@@ -146,6 +146,8 @@ knowledge capture, or project-file modification is implied.
 
 ### Phase 1: Recovery and source-only feedback protocol
 
+Status: implementation complete; real-project/manual evidence review remains separate.
+
 Priority: P0. First implementation round.
 
 Purpose: make the most common workflow failure observable without adding a
@@ -205,6 +207,8 @@ consumer feedback must not be rewritten or promoted as part of this phase.
 
 ### Phase 2: Closeout preview and diagnostic clarity
 
+Status: partial. Lifecycle inspection and the read-only five-phase preview are implemented; detailed diagnostics remain.
+
 Priority: P1. Start after Phase 1 passes.
 
 Purpose: expose the complete governed workflow before the first finalize or
@@ -229,16 +233,30 @@ Implementation default: first place the preview/reporting seam in the Operator
 if existing Core diagnostics are sufficient. Move deterministic portions into
 Core only when they have a reusable contract or a second caller.
 
-Acceptance:
+Delivered so far:
 
-- preview is read-only, creates no Bundle, grants no approval, and makes no
-  Git or projection mutation;
-- a fixture with a Claim-count Memory dependency reports the full phase chain
-  before finalize;
-- drift after preview still fails closed during ordinary plan/apply;
-- approval output cannot be mistaken for Bundle application;
-- pending review cannot be mistaken for fully closed health;
-- no automatic Authority refresh or Git commit is introduced.
+- `knowledge-plan inspect` reports `approval_recorded`, `bundle_state`, and
+  `bundle_applied` as separate lifecycle facts;
+- `knowledge-plan inspect` reports a read-only five-phase `closeout_preview`
+  for Claim capture, Memory synchronization, Git commit, Authority refresh,
+  and final validation;
+- the preview does not create a Bundle, grant approval, apply a Bundle, mutate
+  Git, or change the projection;
+- focused and full contract tests cover the preview and lifecycle separation;
+  the full repository suite passed with 114 tests.
+
+Remaining acceptance work:
+
+- preview a fixture with a Claim-count Memory dependency;
+- add an affected Authority report with path, old/new hash, linked Claim IDs,
+  and human-review reason;
+- add explicit added/refreshed/retired/affected Authority Reference counters;
+- add `PASS`, `PASS_WITH_REVIEW`, and `FAIL` health presentation;
+- improve dirty-Authority diagnostics with the committed-baseline requirement
+  and safe next steps;
+- verify that drift after preview still fails closed during ordinary plan/apply;
+- keep approval distinct from application and do not add automatic Authority
+  refresh or Git commit.
 
 ### Phase 3: Bootstrap Adapter to reviewed/evaluated Adapter
 
@@ -404,22 +422,23 @@ write capability.
 
 ## 9. Next Implementation Round
 
-Start with Phase 1 only.
+Continue with the remaining bounded Phase 2 diagnostics only. Do not start
+Phase 3.
 
 First read-only checks:
 
 ```bash
 git status --short --branch
 git diff --check
-python3 -m unittest tests.test_repository_contract
+python3 -m unittest tests.test_semantic_plan_contract tests.test_repository_contract tests.test_feedback_protocol
 ```
 
-Then inspect only the handoff Skill, the three feedback documents, and the
-focused repository contract before editing. Produce the Markdown feedback
-protocol/template and its smallest deterministic check. Keep the existing
-untracked feedback files and unrelated project changes intact.
+The next slice should use the existing `knowledge-plan inspect` reporting
+seam. Prefer one of the remaining acceptance points: the affected Authority
+report, explicit Authority Reference counters, health presentation, or clearer
+dirty-Authority diagnostics. Keep the output read-only and preserve exact-hash,
+committed-baseline, approval/application, permission, and evidence-layer gates.
 
-The expected Phase 1 result is a reviewable, source-only workflow and a compact
-handoff recovery contract. Stop for review before starting Phase 2 or changing
-PKC Core, Operator behavior, any project Adapter, Memory, Authority, or Git
-state.
+The expected Phase 2 result is clearer closeout reporting without automatic
+Authority refresh, Git commit, formal knowledge capture, or cross-project
+behavior. Stop for review before starting Phase 3.
