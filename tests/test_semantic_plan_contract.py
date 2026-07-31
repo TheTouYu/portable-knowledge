@@ -174,6 +174,40 @@ class SemanticPlanContractTests(unittest.TestCase):
         self.assertEqual(self.cli("knowledge-plan", "inspect", plan_id)["cost_counters"],
                          delta["cost_counters"])
 
+    def test_inspect_previews_claim_count_memory_authority_dependency_without_mutation(self):
+        config_path = self.root / "project-intelligence.json"
+        config = json.loads(config_path.read_text(encoding="utf-8"))
+        config["experience"] = {"count_surfaces": ["memory/CURRENT.md"]}
+        config_path.write_text(json.dumps(config, indent=2) + "\n", encoding="utf-8")
+        memory_path = self.root / "memory/CURRENT.md"
+        old_hash = hashlib.sha256(memory_path.read_bytes()).hexdigest()
+        refs_path = self.root / "data/store/authority-refs.json"
+        refs_path.write_text(json.dumps({"schema_version": 1, "refs": [{
+            "id": "aref_current_counts", "path": "memory/CURRENT.md", "locator": "claim counts",
+            "role": "documented_contract", "baseline_state": "committed_baseline",
+            "change_policy": "invalidate_on_change", "approved_hash": old_hash,
+            "claim_ids": ["clm_existing"], "supports_fact_classes": ["documented_contract"],
+        }]}, indent=2) + "\n", encoding="utf-8")
+        subprocess.run(["git", "add", "project-intelligence.json", "data/store/authority-refs.json"], cwd=self.root, check=True)
+        subprocess.run(["git", "commit", "-qm", "configure count Memory Authority"], cwd=self.root, check=True)
+
+        plan_id = self.init()["plan_id"]
+        self.add_claim(plan_id, "schema", "Counted Claim", "Claim count changes require Memory synchronization.", ("documented_contract",))
+        plan_path = self.root / ".local/pkc/semantic-plans" / f"{plan_id}.json"
+        before = {path: path.read_bytes() for path in (config_path, memory_path, refs_path, plan_path)}
+        preview = self.cli("knowledge-plan", "inspect", plan_id)["closeout_preview"]
+
+        memory_phase = next(phase for phase in preview["phases"] if phase["id"] == "memory_synchronization")
+        self.assertEqual((memory_phase["status"], memory_phase["affected_paths"]), ("planned", ["memory/CURRENT.md"]))
+        self.assertEqual(preview["affected_authority_refs"], [{
+            "authority_ref_id": "aref_current_counts", "change": "memory_sync_required", "path": "memory/CURRENT.md",
+            "old_hash": old_hash, "new_hash": None, "linked_claim_ids": ["clm_existing"],
+            "human_review_reason": "Claim-count Memory must be synchronized and committed before this reference can be refreshed.",
+        }])
+        self.assertEqual([phase["status"] for phase in preview["phases"][:4]], ["planned", "planned", "planned", "planned"])
+        self.assertEqual({path: path.read_bytes() for path in before}, before)
+        self.assertEqual(list((self.root / "data/knowledge/bundles").glob("bnd_*.json")), [])
+
     def test_inspect_reports_staged_authority_dependency_without_mutation(self):
         topic = self.root / "domain/topics/schema.md"
         old_hash = hashlib.sha256(topic.read_bytes()).hexdigest()

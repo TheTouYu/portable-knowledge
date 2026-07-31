@@ -802,7 +802,7 @@ def record_post_apply_full_check(root: Path, instance: Instance, bundle: dict[st
     return receipt
 
 
-def _affected_authority_refs(root: Path, instance: Instance, plan: dict[str, Any]) -> list[dict[str, Any]]:
+def _affected_authority_refs(root: Path, instance: Instance, plan: dict[str, Any], required_paths: set[str] | None = None) -> list[dict[str, Any]]:
     report = []
     for ref in plan.get("authority_refs", []):
         report.append({"authority_ref_id": ref["id"], "change": "added", "path": ref["path"],
@@ -829,33 +829,40 @@ def _affected_authority_refs(root: Path, instance: Instance, plan: dict[str, Any
             existing = []
         reported = {item["authority_ref_id"] for item in report}
         writes = _decode_writes(plan)
+        required_paths = required_paths or set()
         for ref in existing:
-            if ref.get("id") in reported or ref.get("path") not in writes:
+            if ref.get("id") in reported or ref.get("path") not in set(writes) | required_paths:
                 continue
-            after = writes[ref["path"]]
-            report.append({"authority_ref_id": ref["id"], "change": "source_path_staged", "path": ref["path"],
+            after = writes.get(ref["path"])
+            count_dependency = ref["path"] in required_paths and ref["path"] not in writes
+            report.append({"authority_ref_id": ref["id"], "change": "memory_sync_required" if count_dependency else "source_path_staged", "path": ref["path"],
                            "old_hash": ref.get("approved_hash") or ref.get("fragment_hash"),
-                           "new_hash": hashlib.sha256(after).hexdigest() if after is not None else None,
+                           "new_hash": None if count_dependency else hashlib.sha256(after).hexdigest() if after is not None else None,
                            "linked_claim_ids": ref.get("claim_ids", []),
-                           "human_review_reason": "The staged Authority change requires a committed baseline before this reference can be refreshed or retired."})
+                           "human_review_reason": "Claim-count Memory must be synchronized and committed before this reference can be refreshed." if count_dependency else
+                                                  "The staged Authority change requires a committed baseline before this reference can be refreshed or retired."})
     return sorted(report, key=lambda item: (item["path"] or "", item["authority_ref_id"]))
 
 
 def _closeout_preview(root: Path, instance: Instance, plan: dict[str, Any]) -> dict[str, Any]:
     operation_types = {item["operation_type"] for item in plan.get("operations", [])}
     claim_work = bool(operation_types.intersection({"add_claim", "revise_claim", "move_topic"}))
-    affected_authority_refs = _affected_authority_refs(root, instance, plan)
-    authority_work = bool(affected_authority_refs)
     memory_paths = {item.get("path") for item in instance.raw.get("memory", {}).get("roles", [])}
-    memory_work = bool(memory_paths.intersection(plan.get("writes", {})))
+    staged_memory_paths = memory_paths.intersection(plan.get("writes", {}))
+    count_memory_paths = memory_paths.intersection(instance.raw.get("experience", {}).get("count_surfaces", [])) if claim_work else set()
+    affected_memory_paths = sorted(staged_memory_paths | count_memory_paths)
+    memory_work = bool(affected_memory_paths)
+    affected_authority_refs = _affected_authority_refs(root, instance, plan, count_memory_paths)
+    authority_work = bool(affected_authority_refs)
     delta = plan.get("delta") or {}
     phases = [
         {"id": "claim_capture", "status": "planned" if claim_work else "not_needed",
          "read_only": True, "mutation_required": claim_work,
          "reason": "Claim operations are staged in this plan" if claim_work else "No Claim operation is staged"},
         {"id": "memory_synchronization", "status": "planned" if memory_work else "not_configured",
-         "read_only": True, "mutation_required": memory_work,
-         "reason": "A configured Memory role is staged for update" if memory_work else "This plan has no staged Memory synchronization"},
+         "read_only": True, "mutation_required": memory_work, "affected_paths": affected_memory_paths,
+         "reason": "Configured Memory count surfaces require synchronization after Claim changes" if count_memory_paths else
+                   "A configured Memory role is staged for update" if memory_work else "This plan has no staged Memory synchronization"},
         {"id": "git_commit", "status": "planned" if plan.get("writes") else "not_needed",
          "read_only": True, "mutation_required": bool(plan.get("writes")),
          "reason": "Staged files require an authorized Git commit" if plan.get("writes") else "No files are staged"},
