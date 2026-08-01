@@ -273,6 +273,112 @@ class OperatorContractTests(unittest.TestCase):
             operator.command_apply_adapter(args)
         self.assertEqual(target.read_bytes(), before)
 
+    def test_evaluate_adapter_marks_only_all_agreed_cases_evaluated(self):
+        self.configure_adapter_fixture()
+        candidate = Path(self.temp.name) / "candidate.md"
+        candidate.write_text("name: existing-project-knowledge-adapter\nUse python tools/pkc.py for build.\n", encoding="utf-8")
+        proposal = Path(self.temp.name) / "adapter-plan.json"
+        plan_args = type("Args", (), {"target": self.root, "candidate": candidate, "output": proposal,
+                                        "context": ["build"], "node": [], "topic": [], "path": []})()
+        planned = operator.command_plan_adapter(plan_args)
+        operator.command_apply_adapter(type("Args", (), {"plan": proposal,
+            "plan_hash": planned["plan_hash"], "human_reviewed": True})())
+        cases = {"schema_version": 1, "cases": [
+            {"id": "route", "type": "capability", "task": "Route the task. End with ROUTE_OK.",
+             "expected": {"final_contains": ["ROUTE_OK"], "final_excludes": ["ROUTE_BAD"]}},
+            {"id": "boundary", "type": "boundary", "task": "Respect read-only. End with BOUNDARY_OK.",
+             "expected": {"final_contains": ["BOUNDARY_OK"]}},
+        ]}
+        cases_path = Path(self.temp.name) / "cases.json"
+        cases_path.write_text(json.dumps(cases), encoding="utf-8")
+        output = Path(self.temp.name) / "evaluation.json"
+        args = type("Args", (), {"plan": proposal, "plan_hash": planned["plan_hash"],
+            "cases": cases_path, "cases_hash": operator.digest_file(cases_path), "human_reviewed": True,
+            "provider": "test-provider", "model": "test-model", "thinking": "medium", "output": output})()
+
+        real_run = operator.run
+        def fake_run(command, **kwargs):
+            if "--output-dir" not in command:
+                return real_run(command, **kwargs)
+            run_dir = Path(command[command.index("--output-dir") + 1])
+            task = command[command.index("--task") + 1]
+            final = "ROUTE_OK" if "Route" in task else "BOUNDARY_OK"
+            run_dir.mkdir(parents=True)
+            (run_dir / "final.md").write_text(final, encoding="utf-8")
+            (run_dir / "report.json").write_text(json.dumps({
+                "ok": True, "process": {"exit_code": 0, "elapsed_seconds": 1.25, "timed_out": False},
+                "trace": {"tool_calls": 2, "tool_errors": 0},
+                "usage": {"input": 10, "output": 2, "cost_usd": 0.01},
+                "workspace": {"changed": False, "added": [], "removed": [], "modified": []},
+                "errors": [],
+            }), encoding="utf-8")
+            return subprocess.CompletedProcess(command, 0, "", "")
+
+        with mock.patch.object(operator, "run", side_effect=fake_run):
+            result = operator.command_evaluate_adapter(args)
+
+        record = json.loads(output.read_text(encoding="utf-8"))
+        self.assertTrue(result["ok"])
+        self.assertEqual(record["evaluation_status"], "evaluated")
+        self.assertEqual(record["plan_hash"], planned["plan_hash"])
+        self.assertEqual(record["adapter_sha256"], operator.digest_file(candidate))
+        self.assertEqual([case["status"] for case in record["cases"]], ["passed", "passed"])
+        self.assertEqual(record["totals"], {"cases": 2, "passed": 2, "tool_errors": 0,
+                                             "elapsed_seconds": 2.5, "cost_usd": 0.02})
+        self.assertEqual(json.loads(proposal.read_text())["evaluation_status"], "not_evaluated")
+
+    def test_evaluate_adapter_fails_closed_on_case_failure_and_input_drift(self):
+        self.configure_adapter_fixture()
+        candidate = Path(self.temp.name) / "candidate.md"
+        candidate.write_text("name: existing-project-knowledge-adapter\nUse python tools/pkc.py.\n", encoding="utf-8")
+        proposal = Path(self.temp.name) / "adapter-plan.json"
+        planned = operator.command_plan_adapter(type("Args", (), {"target": self.root, "candidate": candidate,
+            "output": proposal, "context": [], "node": [], "topic": [], "path": []})())
+        operator.command_apply_adapter(type("Args", (), {"plan": proposal,
+            "plan_hash": planned["plan_hash"], "human_reviewed": True})())
+        cases = {"schema_version": 1, "cases": [
+            {"id": "one", "type": "capability", "task": "one", "expected": {"final_contains": ["OK"]}},
+            {"id": "two", "type": "boundary", "task": "two", "expected": {"final_contains": ["SAFE"]}},
+        ]}
+        cases_path = Path(self.temp.name) / "cases.json"; cases_path.write_text(json.dumps(cases), encoding="utf-8")
+        output = Path(self.temp.name) / "evaluation.json"
+        args = type("Args", (), {"plan": proposal, "plan_hash": planned["plan_hash"], "cases": cases_path,
+            "cases_hash": operator.digest_file(cases_path), "human_reviewed": True, "provider": "p", "model": "m",
+            "thinking": "medium", "output": output})()
+
+        with self.assertRaisesRegex(operator.OperatorError, "cases hash mismatch"):
+            args.cases_hash = "wrong"; operator.command_evaluate_adapter(args)
+        args.cases_hash = operator.digest_file(cases_path)
+        with self.assertRaisesRegex(operator.OperatorError, "outside the target project"):
+            args.output = self.root / "evaluation.json"; operator.command_evaluate_adapter(args)
+        args.output = output
+        (self.root / "unexpected.txt").write_text("drift", encoding="utf-8")
+        with self.assertRaisesRegex(operator.OperatorError, "Git state contains changes other than"):
+            operator.command_evaluate_adapter(args)
+        (self.root / "unexpected.txt").unlink()
+
+        real_run = operator.run
+        def failed_run(command, **kwargs):
+            if "--output-dir" not in command:
+                return real_run(command, **kwargs)
+            run_dir = Path(command[command.index("--output-dir") + 1]); run_dir.mkdir(parents=True)
+            (run_dir / "final.md").write_text("wrong", encoding="utf-8")
+            (run_dir / "report.json").write_text(json.dumps({
+                "ok": False, "process": {"exit_code": 1, "elapsed_seconds": 3.0, "timed_out": False},
+                "trace": {"tool_calls": 1, "tool_errors": 1}, "usage": {"cost_usd": 0.03},
+                "workspace": {"changed": True, "added": ["bad"], "removed": [], "modified": []},
+                "errors": [{"tool": "bash"}],
+            }), encoding="utf-8")
+            return subprocess.CompletedProcess(command, 1, "", "")
+
+        with mock.patch.object(operator, "run", side_effect=failed_run):
+            result = operator.command_evaluate_adapter(args)
+        record = json.loads(output.read_text(encoding="utf-8"))
+        self.assertFalse(result["ok"])
+        self.assertEqual(record["evaluation_status"], "not_evaluated")
+        self.assertTrue(all(case["status"] == "failed" for case in record["cases"]))
+        self.assertEqual(record["totals"]["tool_errors"], 2)
+
     def test_apply_adapter_rejects_tampered_candidate_and_apply_plan_stays_separate(self):
         self.configure_adapter_fixture()
         candidate = Path(self.temp.name) / "candidate.md"
@@ -640,7 +746,7 @@ class OperatorContractTests(unittest.TestCase):
 
     def test_documented_operator_commands_exist(self):
         choices = operator.parser()._subparsers._group_actions[0].choices
-        for command in ("plan-install", "plan-adopt", "plan-adapter", "plan-upgrade", "apply-plan", "apply-adapter"):
+        for command in ("plan-install", "plan-adopt", "plan-adapter", "plan-upgrade", "apply-plan", "apply-adapter", "evaluate-adapter"):
             self.assertIn(command, choices)
 
 

@@ -550,6 +550,123 @@ def command_apply_adapter(args: argparse.Namespace) -> dict[str, Any]:
             "next": "human reviews the tracked diff; evaluation and Git commit/push remain separate", "errors": []}
 
 
+def command_evaluate_adapter(args: argparse.Namespace) -> dict[str, Any]:
+    plan = json.loads(args.plan.read_text(encoding="utf-8"))
+    if plan.get("kind") != "pkc-adapter-proposal":
+        raise OperatorError(f"evaluate-adapter requires plan kind pkc-adapter-proposal: {plan.get('kind')}")
+    actual_plan_hash = plan_hash(plan)
+    if plan.get("plan_hash") != actual_plan_hash or args.plan_hash != actual_plan_hash:
+        raise OperatorError("plan hash mismatch")
+    if not args.human_reviewed:
+        raise OperatorError("a real human must review the exact Adapter evaluation cases")
+    if plan.get("evaluation_status") != "not_evaluated":
+        raise OperatorError("Adapter proposal must remain not_evaluated")
+
+    root = Path(plan["target_root"]).resolve()
+    if git_root(root) != root:
+        raise OperatorError("target root is no longer the Git project root")
+    config = json.loads((root / "project-intelligence.json").read_text(encoding="utf-8"))
+    target_rel = config.get("adapter", {}).get("skill")
+    if target_rel != plan.get("target_path"):
+        raise OperatorError("configured Adapter path changed after planning")
+    target = (root / target_rel).resolve()
+    if not target.is_relative_to(root) or not target.is_file() or target.is_symlink():
+        raise OperatorError("configured Adapter is missing, linked, or outside the project")
+    if digest_file(target) != plan.get("candidate_sha256"):
+        raise OperatorError("configured Adapter does not match the applied proposal candidate")
+    state = git_state(root)
+    if state["head"] != plan.get("created_from", {}).get("head"):
+        raise OperatorError("target Git HEAD changed after Adapter planning")
+    baseline_other = {line for line in plan["created_from"]["status"] if line[3:] != target_rel}
+    current_other = {line for line in state["status"] if line[3:] != target_rel}
+    if current_other != baseline_other or not any(line[3:] == target_rel for line in state["status"]):
+        raise OperatorError("target Git state contains changes other than the applied Adapter")
+
+    cases_path = args.cases.resolve()
+    actual_cases_hash = digest_file(cases_path)
+    if actual_cases_hash is None or args.cases_hash != actual_cases_hash:
+        raise OperatorError("cases hash mismatch")
+    specification = json.loads(cases_path.read_text(encoding="utf-8"))
+    cases = specification.get("cases") if specification.get("schema_version") == 1 else None
+    if not isinstance(cases, list) or len(cases) < 2:
+        raise OperatorError("Adapter evaluation requires schema version 1 with at least two cases")
+    ids: set[str] = set()
+    types: set[str] = set()
+    for case in cases:
+        if not isinstance(case, dict):
+            raise OperatorError("invalid Adapter evaluation case")
+        case_id, case_type = case.get("id"), case.get("type")
+        expected = case.get("expected")
+        if (not isinstance(case_id, str) or not re.fullmatch(r"[A-Za-z0-9._-]+", case_id)
+                or case_id in ids or case_type not in {"capability", "boundary"}
+                or not isinstance(case.get("task"), str) or not case["task"].strip()
+                or not isinstance(expected, dict)):
+            raise OperatorError("invalid Adapter evaluation case")
+        for field in ("final_contains", "final_excludes"):
+            values = expected.get(field, [])
+            if not isinstance(values, list) or any(not isinstance(value, str) or not value for value in values):
+                raise OperatorError(f"invalid Adapter evaluation assertion: {case_id}.{field}")
+        if not expected.get("final_contains") and not expected.get("final_excludes"):
+            raise OperatorError(f"Adapter evaluation case has no assertions: {case_id}")
+        ids.add(case_id); types.add(case_type)
+    if types != {"capability", "boundary"}:
+        raise OperatorError("Adapter evaluation requires capability and boundary cases")
+
+    output = args.output.resolve()
+    if output == root or output.is_relative_to(root):
+        raise OperatorError("Adapter evaluation output must stay outside the target project")
+    runs = output.parent / f"{output.stem}-runs"
+    evaluator = Path(__file__).resolve().parents[2] / "isolated-model-evaluator" / "scripts" / "evaluate.py"
+    operator_skill = Path(__file__).resolve().parents[1]
+    results = []
+    for case in cases:
+        run_dir = runs / case["id"]
+        shutil.rmtree(run_dir, ignore_errors=True)
+        command = [sys.executable, str(evaluator), "--root", str(root), "--task", case["task"],
+                   "--skill", str(operator_skill), "--skill", str(target),
+                   "--provider", args.provider, "--model", args.model, "--thinking", args.thinking,
+                   "--assert-no-changes", "--output-dir", str(run_dir)]
+        process = run(command, check=False)
+        report_path, final_path = run_dir / "report.json", run_dir / "final.md"
+        report = json.loads(report_path.read_text(encoding="utf-8")) if report_path.is_file() else {}
+        final = final_path.read_text(encoding="utf-8") if final_path.is_file() else ""
+        expected = case["expected"]
+        assertions = {
+            "final_contains": all(value in final for value in expected.get("final_contains", [])),
+            "final_excludes": all(value not in final for value in expected.get("final_excludes", [])),
+        }
+        passed = (process.returncode == 0 and report.get("ok") is True
+                  and report.get("trace", {}).get("tool_errors") == 0
+                  and report.get("workspace", {}).get("changed") is False
+                  and all(assertions.values()))
+        results.append({"id": case["id"], "type": case["type"],
+                        "status": "passed" if passed else "failed", "assertions": assertions,
+                        "process": report.get("process", {"exit_code": process.returncode}),
+                        "trace": report.get("trace", {}), "usage": report.get("usage", {}),
+                        "workspace": report.get("workspace", {}), "errors": report.get("errors", []),
+                        "report": str(report_path), "trace_file": str(run_dir / "trace.jsonl")})
+
+    evaluated = all(item["status"] == "passed" for item in results)
+    totals = {"cases": len(results), "passed": sum(item["status"] == "passed" for item in results),
+              "tool_errors": sum(int(item["trace"].get("tool_errors", 0) or 0) for item in results),
+              "elapsed_seconds": round(sum(float(item["process"].get("elapsed_seconds", 0) or 0) for item in results), 2),
+              "cost_usd": round(sum(float(item["usage"].get("cost_usd", 0) or 0) for item in results), 8)}
+    record = {"schema_version": 1, "operator_contract": CONTRACT, "kind": "pkc-adapter-evaluation",
+              "plan_hash": actual_plan_hash, "adapter_sha256": plan["candidate_sha256"],
+              "cases_hash": actual_cases_hash,
+              "model": {"provider": args.provider, "model": args.model, "thinking": args.thinking},
+              "cases": results, "totals": totals,
+              "evaluation_status": "evaluated" if evaluated else "not_evaluated",
+              "evidence_boundary": "Only the exact Adapter, cases, and model profile were evaluated; this is not production, game, compiler, or other real-environment evidence."}
+    output.parent.mkdir(parents=True, exist_ok=True)
+    output.write_text(json.dumps(record, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
+    return {"ok": evaluated, "command": "evaluate-adapter", "output": str(output),
+            "plan_hash": actual_plan_hash, "cases_hash": actual_cases_hash,
+            "evaluation_status": record["evaluation_status"], "totals": totals,
+            "next": "review failed case traces" if not evaluated else "retain scoped evidence; Git commit/push remains separate",
+            "errors": []}
+
+
 def command_plan_upgrade(args: argparse.Namespace) -> dict[str, Any]:
     root = git_root(args.target.resolve())
     existing = inspect_target(root)
@@ -841,6 +958,9 @@ def parser() -> argparse.ArgumentParser:
                          help="defer configured retrieval evaluation only when the target runtime is needed to refresh invalidated Authority References")
     apply = sub.add_parser("apply-plan"); apply.add_argument("--plan", type=Path, required=True); apply.add_argument("--plan-hash", required=True); apply.add_argument("--human-reviewed", action="store_true")
     adapter_apply = sub.add_parser("apply-adapter"); adapter_apply.add_argument("--plan", type=Path, required=True); adapter_apply.add_argument("--plan-hash", required=True); adapter_apply.add_argument("--human-reviewed", action="store_true")
+    adapter_evaluate = sub.add_parser("evaluate-adapter"); adapter_evaluate.add_argument("--plan", type=Path, required=True); adapter_evaluate.add_argument("--plan-hash", required=True)
+    adapter_evaluate.add_argument("--cases", type=Path, required=True); adapter_evaluate.add_argument("--cases-hash", required=True); adapter_evaluate.add_argument("--human-reviewed", action="store_true")
+    adapter_evaluate.add_argument("--provider", default="aijws"); adapter_evaluate.add_argument("--model", default="gpt-5.6-luna"); adapter_evaluate.add_argument("--thinking", default="medium"); adapter_evaluate.add_argument("--output", type=Path, required=True)
     global_install = sub.add_parser("install-global"); global_install.add_argument("--source", type=Path, default=Path(__file__).resolve().parents[3]); global_install.add_argument("--skill-root", type=Path, action="append")
     return p
 
@@ -855,6 +975,7 @@ def main(argv: list[str] | None = None) -> int:
         elif args.command == "plan-upgrade": payload = command_plan_upgrade(args)
         elif args.command == "apply-plan": payload = command_apply(args)
         elif args.command == "apply-adapter": payload = command_apply_adapter(args)
+        elif args.command == "evaluate-adapter": payload = command_evaluate_adapter(args)
         elif args.command == "status": payload = command_status(args)
         elif args.command == "doctor": payload = command_status(args, True)
         elif args.command == "check-update": payload = command_update(args)

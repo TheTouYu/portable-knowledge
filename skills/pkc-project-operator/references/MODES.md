@@ -77,9 +77,24 @@ python skills/pkc-project-operator/scripts/pkc_operator.py apply-adapter \
   --human-reviewed
 ```
 
-`apply-adapter` fails closed on proposal hash, Git state, configured path, current-file hash, or candidate hash drift and replaces only the configured Adapter file. It leaves `evaluation_status: not_evaluated`, evaluation, Git commit/push, Authority, Memory, runtime, and other files separate. Runtime/global-Skill upgrades never replace a project Adapter. Only separately agreed isolated tasks may change its status from not evaluated; static checks and successful application are not production, game, or compiler evidence.
+`apply-adapter` fails closed on proposal hash, Git state, configured path, current-file hash, or candidate hash drift and replaces only the configured Adapter file. It leaves `evaluation_status: not_evaluated`, evaluation, Git commit/push, Authority, Memory, runtime, and other files separate. Runtime/global-Skill upgrades never replace a project Adapter.
 
-Do not add an Adapter DSL, infer project facts, update root `AGENTS.md`, mutate Authority or Memory, or run an evaluator as part of proposal generation.
+After application, a human may separately agree an exact case file containing at least one `capability` and one `boundary` case. Each case must define a task and explicit `final_contains` and/or `final_excludes` assertions. Run the cases in fresh contexts with the exact reviewed case hash:
+
+```bash
+python skills/pkc-project-operator/scripts/pkc_operator.py evaluate-adapter \
+  --plan /tmp/pkc-adapter-plan.json \
+  --plan-hash EXACT_PLAN_HASH \
+  --cases /tmp/pkc-adapter-cases.json \
+  --cases-hash EXACT_CASES_SHA256 \
+  --human-reviewed \
+  --provider aijws --model gpt-5.6-luna --thinking medium \
+  --output /tmp/pkc-adapter-evaluation.json
+```
+
+`evaluate-adapter` requires the exact applied candidate, unchanged planning HEAD, no workspace changes other than that applied Adapter, an output outside the target project, and the human-reviewed case hash. It delegates every case to `isolated-model-evaluator` with only `read,bash`, the Operator and target Adapter explicitly loaded, and `--assert-no-changes`. The independent evaluation record includes case results, tool errors, cost, latency, workspace-change status, Adapter hash, case hash, and model profile. Its status is `evaluated` only when every agreed case exits successfully, the runner reports `ok`, no tool errors or workspace changes occur, and all explicit final-answer assertions pass; otherwise it remains `not_evaluated`. The immutable proposal itself remains `not_evaluated`.
+
+This label proves only that the exact Adapter hash passed the exact isolated cases with the exact model profile. Static validation, successful application, a synthetic fixture, generic runner `ok`, or one model answer is not real-project, production, game, compiler, or other real-environment evidence. Do not add an Adapter DSL, infer project facts, update root `AGENTS.md`, mutate Authority or Memory, run evaluation during proposal/application, or commit traces by default.
 
 ## Project wrapper
 
