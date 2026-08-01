@@ -114,13 +114,41 @@ first-use confirmation, static checks of concrete references only, reviewed
 diff before replacing routing, isolated-task evaluation marked evaluated only
 when agreed cases pass. Not started; no change planned in this round.
 
-### WS-E: Read-only federation (carried forward from v2, unchanged)
+### WS-E: Read-only federation
 
-Priority: P1/P2, after ownership/permission contracts are clear. A small
-registry of pointers (no copied Claims) with a limited relation vocabulary
-(`produces`, `consumed_by`, `verifies`, `documents`, `supersedes`).
-Cross-project writes are not permitted in the first version. Not started; no
-change planned in this round.
+Priority: P1/P2. Started after owner confirmation on 2026-08-01.
+
+The first real topology is a three-project loop: the game project and compiler
+project use PKC for long-term memory and retrieval, while this knowledge project
+provides PKC and learns from their feedback and retrieval results. The game may
+query compiler knowledge while diagnosing whether a failure is local,
+documentation-related, or a compiler defect; the compiler may query game
+knowledge for reproduction knowledge during fixes and feature work.
+
+Confirmed v1 contract:
+
+- an explicitly supplied local registry lists allowed PKC project ids, roots,
+  fixed read permissions, and evidence boundaries;
+- each query explicitly selects one or more registered projects; PKC never
+  scans every local repository;
+- each project remains the sole owner of its Claims, Authority, Memory,
+  validation, and projection;
+- results stay grouped by owning project and are not merged or ranked across
+  projects;
+- the registry stores pointers only, never copied Claims;
+- federation uses existing lexical retrieval and never rebuilds a missing
+  projection;
+- one unavailable project is reported without hiding successful project
+  results;
+- v1 has no cross-project writes, Git mutation, semantic plans, remote service,
+  cache, relation graph traversal, or Context-level filtering.
+
+Implementation slice E1 is `federation-search` only. The earlier relation
+vocabulary (`produces`, `consumed_by`, `verifies`, `documents`, `supersedes`)
+is deferred until direct project search proves that relation traversal is
+needed. Acceptance requires focused registry/scope/permission/partial-result
+contracts, grouped JSON/text output, the full test suite, and a fixture
+walkthrough proving no target project files or projections are changed.
 
 ### WS-F: Coverage-gap regression and human-readable Bundle review (carried forward from v2, unchanged)
 

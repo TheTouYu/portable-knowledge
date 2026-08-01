@@ -154,7 +154,52 @@ Evaluation fixtures use schema version 1 with `defaults` and `cases`. Each case 
 
 Legacy top-level case scope fields (`node_ids`, `topic_ids`, `claim_ids`) remain accepted. A case without scope metadata runs during delta conservatively because a staged Claim can change global lexical ranking. Explicitly scoped non-intersecting cases are reported as deferred to full preflight rather than silently treated as covered.
 
-## 8. Maintain existing knowledge
+## 8. Search other registered projects (read-only)
+
+Create a small local registry that names only the PKC projects which may be
+queried. Paths are resolved relative to the registry file; absolute paths are
+also accepted for a machine-local registry. The registry is a routing list,
+not Authority, and it contains no copied Claims:
+
+```json
+{
+  "schema_version": 1,
+  "projects": [
+    {
+      "id": "game-project",
+      "root": "../game-project",
+      "read_permission": "internal",
+      "evidence_boundary": "Game-owned PKC knowledge only."
+    },
+    {
+      "id": "compiler-project",
+      "root": "../compiler-project",
+      "read_permission": "internal",
+      "evidence_boundary": "Compiler-owned PKC knowledge only."
+    }
+  ]
+}
+```
+
+Search explicitly selected projects:
+
+```bash
+pkc federation-search "minimal reproduction" \
+  --registry federation.json \
+  --project game-project \
+  --project compiler-project \
+  --format text
+```
+
+Results remain grouped by owning project. `read_permission` is fixed by the
+registry and cannot be raised on the command line. The command is read-only:
+it never rebuilds a missing projection, changes Authority or Memory, creates a
+Bundle, or writes another project. An unavailable project is reported as such;
+it is not treated as an empty search result. The registry grants routing scope
+to this command, not operating-system access control—protect repositories with
+normal filesystem and repository permissions.
+
+## 9. Maintain existing knowledge
 
 Use the operation that matches the semantic intent:
 
@@ -166,7 +211,7 @@ Use the operation that matches the semantic intent:
 
 These operations may share one plan and one immutable Bundle. Run one delta check after all operations, finalize for full staged preflight, then stop for exact-hash review. Multi-Bundle orchestration (`bundle_migration_plan`, historically the ambiguous `migration_plan`) is non-atomic across phases and is not a substitute for a structure-refactor Bundle.
 
-### 8.1 Authority documents must be committed before `init`
+### 9.1 Authority documents must be committed before `init`
 
 `knowledge-plan add-authority-ref` requires the referenced Authority document to
 match the committed baseline exactly, so commit every Authority document
@@ -181,7 +226,7 @@ match the committed baseline exactly, so commit every Authority document
 2. `knowledge-plan abandon <plan_id> --reason …` + re-`init` + replay — always
    available, but replays every operation.
 
-### 8.2 Bundle artifacts and `expected_changed_files`
+### 9.2 Bundle artifacts and `expected_changed_files`
 
 A Bundle's `expected_changed_files` lists the knowledge files its apply
 creates or replaces. The lifecycle artifacts themselves — `bnd_*.json`,

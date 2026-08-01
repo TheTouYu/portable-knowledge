@@ -35,6 +35,7 @@ from .authority import (FACT_CLASSES, AuthorityRegistryError, authority_refs_fro
 from .retrieval import RetrievalError, build_progressive_scope
 from .experience import (ExperienceError, authorized_claims, build_vector_index, evaluate_cases,
                          freshness_markers, search_knowledge, upstream_freshness)
+from .federation import FederationError, search as search_federation
 
 SCHEMA_VERSION = 1
 REGISTRY_REL = Path("data/knowledge/registry.json")
@@ -1828,6 +1829,16 @@ def knowledge_search_command(root: Path, instance: Instance, query: str, terms: 
     return search_knowledge(root, instance, query, terms, permission, limit, semantic, lexical, detail)
 
 
+def federation_search_command(registry: Path, projects: list[str], query: str, limit: int) -> dict[str, Any]:
+    def search_project(root: Path, instance: Instance, term: str, permission: str, result_limit: int) -> dict[str, Any]:
+        configure(instance)
+        try:
+            return knowledge_search_command(root, instance, term, [], permission, result_limit, False)
+        except (KnowledgeError, ExperienceError, OSError, sqlite3.Error) as exc:
+            raise FederationError(str(exc), code="FEDERATION_PROJECT_UNAVAILABLE", path=str(root)) from exc
+    return search_federation(registry, projects, query, limit, search_project)
+
+
 def knowledge_index_command(root: Path, instance: Instance, permission: str) -> dict[str, Any]:
     registry, _ = load_authority(root)
     claims, _ = parse_claims(root, registry)
@@ -1906,6 +1917,14 @@ def output(payload: dict[str, Any], fmt: str) -> None:
         for warning in payload.get("warnings", []): print(f"WARNING: {warning}")
         for failure in payload.get("failures", []): print(f"BLOCKING: {failure}")
         print(f"Evidence boundary: {payload.get('proof_boundary')}")
+    elif payload.get("command") == "federation-search":
+        print(f"Federation search: {payload.get('status')} (read-only)")
+        print(f"Query: {payload.get('query')}")
+        for project in payload.get("projects", []):
+            print(f"Project: {project.get('project_id')} [{project.get('status')}] permission={project.get('read_permission')}")
+            for item in project.get("results", []): print(f"  - {item.get('id')}: {item.get('title')}")
+            for error in project.get("errors", []): print(f"  ERROR [{error.get('code')}]: {error.get('message')}")
+            print(f"  Evidence boundary: {project.get('evidence_boundary')}")
     elif payload.get("command") == "knowledge-plan inspect":
         print(f"Plan: {payload.get('plan_id')} ({payload.get('state')})")
         print(f"Baseline: {payload.get('baseline_commit')}")
@@ -1982,7 +2001,8 @@ def capabilities_command() -> dict[str, Any]:
                              "claim_revision_plan": True, "authority_ref_refresh_plan": True,
                              "authority_ref_retirement_plan": True, "routes": False, "evaluation_cases": True,
                              "knowledge_health": True, "hybrid_retrieval": True, "vector_cache": True,
-                             "upstream_freshness": True, "manifest_compatibility_mode": True}, "errors": []}
+                             "upstream_freshness": True, "read_only_federation": True,
+                             "manifest_compatibility_mode": True}, "errors": []}
 
 
 def parser_build() -> argparse.ArgumentParser:
@@ -2012,6 +2032,11 @@ def parser_build() -> argparse.ArgumentParser:
     search.add_argument("--permission", choices=tuple(PERMISSIONS), default="internal")
     search.add_argument("--semantic", action="store_true")
     search.add_argument("--limit", type=int, default=8)
+    federation = command("federation-search", help="search explicitly selected registered PKC projects without modifying them")
+    federation.add_argument("query")
+    federation.add_argument("--registry", type=Path, required=True)
+    federation.add_argument("--project", action="append", default=[], help="registered project id; repeat to search more than one")
+    federation.add_argument("--limit", type=int, default=8)
     query = command("query")
     query.add_argument("query")
     query.add_argument("--level", type=int, choices=(1, 2, 3), default=1)
@@ -2234,6 +2259,10 @@ def main(argv: list[str] | None = None) -> int:
             payload = capabilities_command()
             output(payload, args.format)
             return 0
+        if args.command == "federation-search":
+            payload = federation_search_command(args.registry if args.registry.is_absolute() else root / args.registry, args.project, args.query, args.limit)
+            output(payload, args.format)
+            return int(payload.get("exit_code", 0 if payload.get("ok") else 1))
         instance = load_instance(root, args.config)
         configure(instance)
         if hasattr(args, "actor"):
@@ -2283,7 +2312,7 @@ def main(argv: list[str] | None = None) -> int:
             from .semantic_plan import dispatch_plan_command
             payload = dispatch_plan_command(root, args, instance)
         else: raise KnowledgeError(f"unknown command: {args.command}")
-    except (KnowledgeError, RetrievalError, BundleError, ExperienceError, AuthorityRegistryError, OSError, sqlite3.Error) as exc:
+    except (KnowledgeError, RetrievalError, BundleError, ExperienceError, FederationError, AuthorityRegistryError, OSError, sqlite3.Error) as exc:
         error = {"code": getattr(exc, "code", "AUTHORITY_REFS_SCHEMA" if isinstance(exc, AuthorityRegistryError) else "KNOWLEDGE_ERROR"),
                  "path": getattr(exc, "path", "."), "message": str(exc)}
         if isinstance(exc, RetrievalError):
@@ -2294,7 +2323,7 @@ def main(argv: list[str] | None = None) -> int:
                 "runtime_version": _runtime_version(), "evaluator_contract_version": 1,
             }.items() if value is not None})
         errors = exc.findings if isinstance(exc, (StagedValidationError, SemanticPlanError)) and exc.findings else [error]
-        payload = {"ok": False, "command": args.command, "read_only": args.command in {"progressive-query", "query-context", "capture", "knowledge-check", "knowledge-search"},
+        payload = {"ok": False, "command": args.command, "read_only": args.command in {"progressive-query", "query-context", "capture", "knowledge-check", "knowledge-search", "federation-search"},
                    "operation_authorized": False, "exit_code": 2 if isinstance(exc, ExperienceError) and exc.environment else 1, "errors": errors}
     if args.command in {"recover", "rollback", "abandon"}:
         payload["git_status"] = git_status(root)
