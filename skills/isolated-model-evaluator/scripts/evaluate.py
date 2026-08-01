@@ -170,6 +170,8 @@ def main() -> int:
     parser.add_argument("--model", default="gpt-5.6-luna", help="Pi model (default: gpt-5.6-luna)")
     parser.add_argument("--thinking", default="medium", help="Pi thinking level (default: medium)")
     parser.add_argument("--tools", default="read,bash")
+    parser.add_argument("--extensions", action="append", default=[],
+                        help="Extension paths to load in the child Pi (replaces --no-extensions; repeatable)")
     parser.add_argument("--timeout", type=int, default=900)
     parser.add_argument("--output-dir", type=Path,
                         default=Path(f"/tmp/isolated-model-eval-{int(time.time())}"))
@@ -206,6 +208,8 @@ def main() -> int:
         command.extend(["--thinking", args.thinking])
     for skill in skills:
         command.extend(["--skill", str(skill)])
+    for extension in args.extensions:
+        command.extend(["--extension", str(Path(extension).expanduser().resolve())])
     command.extend(["--no-extensions", "--no-prompt-templates", "--no-themes",
                     "--approve", prompt])
 
@@ -213,6 +217,7 @@ def main() -> int:
         "schema_version": SCHEMA_VERSION, "root": str(root),
         "provider": args.provider, "model": args.model, "thinking": args.thinking,
         "tools": args.tools.split(","), "skills": [str(path) for path in skills],
+        "extensions": [str(Path(path).expanduser().resolve()) for path in args.extensions],
         "assert_no_changes": args.assert_no_changes,
         "command": command[:-1] + ["<TASK_WITH_SAFETY_BOUNDARY>"],
     }
