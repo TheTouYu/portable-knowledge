@@ -14,7 +14,7 @@ from pathlib import Path, PurePosixPath
 from typing import Any
 
 from .authority import (FACT_CLASSES, authority_refs_from_document, canonical_authority_document,
-                        validate_authority_coverage, validate_authority_ref)
+                        observe_authority_refs, validate_authority_coverage, validate_authority_ref)
 from .bundle import (build_bundle, canonical as bundle_bytes, digest as canonical_digest,
                      lifecycle_projection)
 from .evaluation_contract import (EvaluationContractError, evaluate_normalized_cases,
@@ -113,7 +113,8 @@ def _ensure_open(root: Path, plan: dict[str, Any]) -> None:
     if plan.get("state") != "open":
         _fail("PLAN_NOT_OPEN", f"plan is {plan.get('state')}")
     if _head(root) != plan["baseline_commit"]:
-        _fail("PLAN_STALE_BASELINE", "committed baseline changed since plan init")
+        _fail("PLAN_STALE_BASELINE",
+              "committed baseline changed since plan init; recover with knowledge-plan rebase <plan_id> --reason ... (keeps operations) or abandon and re-init (replays them)")
 
 
 def _decode_writes(plan: dict[str, Any]) -> dict[str, bytes | None]:
@@ -321,6 +322,10 @@ def add_authority_ref(root: Path, instance: Instance, args: argparse.Namespace) 
     claim = plan["claims"].get(args.claim_id)
     if not claim:
         plan_path = _local_base(instance) / f"{plan['plan_id']}.json"
+        if args.claim_id in plan.get("existing_claim_changes", {}):
+            _fail("PLAN_CLAIM_REVISED_NEEDS_REFRESH",
+                  f"claim {args.claim_id} was revised, not added in this plan; refresh its existing Authority Ref instead: "
+                  f"knowledge-plan refresh-authority-ref <plan_id> --authority-ref-id <ref_id> --reason ...; plan JSON: {plan_path.as_posix()}")
         _fail("PLAN_CLAIM_MISSING", f"planned claim not found: {args.claim_id}; inspect {plan_path.as_posix()} (planned claim ids are listed under 'claims')")
     pure = PurePosixPath(args.path)
     if not args.path or pure.is_absolute() or ".." in pure.parts or "\\" in args.path or args.path.startswith(".local/"):
@@ -844,6 +849,14 @@ def _affected_authority_refs(root: Path, instance: Instance, plan: dict[str, Any
                            "linked_claim_ids": ref.get("claim_ids", []),
                            "human_review_reason": "Claim-count Memory must be synchronized and committed before this reference can be refreshed." if count_dependency else
                                                   "The staged Authority change requires a committed baseline before this reference can be refreshed or retired."})
+        for ref in observe_authority_refs(root, existing):
+            status = ref.get("effective_status")
+            if status in {"current", "fresh"} or ref.get("id") in reported:
+                continue
+            report.append({"authority_ref_id": ref["id"], "change": "external_invalidated", "path": ref["path"],
+                           "old_hash": ref.get("expected_hash"), "new_hash": ref.get("observed_hash"),
+                           "linked_claim_ids": ref.get("claim_ids", []),
+                           "human_review_reason": f"Committed Authority changed outside this plan ({status}); refresh the reference before finalize."})
     return sorted(report, key=lambda item: (item["path"] or "", item["authority_ref_id"]))
 
 
@@ -904,9 +917,59 @@ def inspect(root: Path, instance: Instance, args: argparse.Namespace) -> dict[st
             "bundle_applied": receipt_path.is_file(),
         }
     return _summary(plan, "inspect", delta=plan.get("delta"), closeout_preview=_closeout_preview(root, instance, plan),
-                    finalized_bundle_id=(bundle or {}).get("bundle_id"),
+                    intent=plan["intent"], finalized_bundle_id=(bundle or {}).get("bundle_id"),
                     full_preflight_receipt=plan.get("full_preflight_receipt"), post_apply_receipt=plan.get("post_apply_receipt"),
+                    claims=[{"claim_id": claim_id, "title": value.get("title", ""),
+                             "fact_classes": value.get("fact_classes", [])}
+                            for claim_id, value in sorted(plan["claims"].items())],
+                    revised_claims=[{"claim_id": claim_id, "semantic_declaration": value.get("semantic_declaration")}
+                                    for claim_id, value in sorted(plan.get("existing_claim_changes", {}).items())],
+                    operations=[{"operation_id": operation["operation_id"], "operation_type": operation["operation_type"]}
+                                for operation in plan.get("operations", [])],
+                    authority_refs=[{"authority_ref_id": ref["id"], "path": ref["path"], "role": ref["role"],
+                                     "claim_ids": ref.get("claim_ids", []),
+                                     "approved_hash": (ref.get("approved_hash") or ref.get("fragment_hash") or "")[:12]}
+                                    for ref in plan.get("authority_refs", [])],
                     **lifecycle)
+
+
+def rebase_plan(root: Path, instance: Instance, args: argparse.Namespace) -> dict[str, Any]:
+    path, plan = _load(root, instance, args.plan_id)
+    if plan.get("finalized_bundle"):
+        _fail("PLAN_FINALIZED_IMMUTABLE", "finalized plan cannot be rebased")
+    if plan.get("state") != "open":
+        _fail("PLAN_NOT_OPEN", f"plan is {plan.get('state')}")
+    reason = args.reason.strip()
+    if not reason:
+        _fail("PLAN_INPUT_INVALID", "rebase reason required")
+    old_baseline = plan["baseline_commit"]
+    head = _head(root)
+    if head == old_baseline:
+        _fail("PLAN_REBASE_NOOP", f"plan baseline {head} is already current")
+    refs_rel = instance.authority.get("authority_refs")
+    referenced = {item["path"] for item in plan.get("authority_refs", [])}
+    referenced |= {item.get("path") for item in plan.get("authority_ref_refreshes", []) if item.get("path")}
+    referenced |= {item.get("path") for item in plan.get("authority_ref_retirements", []) if item.get("path")}
+    if refs_rel:
+        referenced.add(refs_rel)
+    conflicts = []
+    for rel in sorted(referenced):
+        result = _git(root, "diff", "--quiet", old_baseline, head, "--", rel)
+        if result.returncode not in {0, 1}:
+            _fail("PLAN_REBASE_GIT_ERROR", f"git diff failed for {rel}: {result.stderr.strip()}")
+        if result.returncode == 1:
+            conflicts.append(rel)
+    if conflicts:
+        _fail("PLAN_REBASE_CONFLICT",
+              "Authority paths changed between plan baseline and HEAD; rebase would re-anchor them under new content: "
+              + ", ".join(conflicts)
+              + ". Refresh or retire the affected refs in the plan, or abandon and re-init.", path=refs_rel or ".")
+    plan["baseline_commit"] = head
+    plan.setdefault("rebase_history", []).append({"from": old_baseline, "to": head, "reason": reason,
+                                                  "at": dt.datetime.now().astimezone().isoformat(timespec="seconds")})
+    plan["delta"] = None
+    _save(path, plan)
+    return _summary(plan, "rebase", old_baseline_commit=old_baseline, rebase_count=len(plan["rebase_history"]))
 
 
 def abandon(root: Path, instance: Instance, args: argparse.Namespace) -> dict[str, Any]:
@@ -942,7 +1005,7 @@ def _summary(plan: dict[str, Any], action: str, **extra: Any) -> dict[str, Any]:
 
 
 def dispatch_plan_command(root: Path, args: argparse.Namespace, instance: Instance) -> dict[str, Any]:
-    commands = {"init": init_plan, "add-claim": add_claim, "revise-claim": revise_claim, "move-topic": move_topic,
+    commands = {"init": init_plan, "rebase": rebase_plan, "add-claim": add_claim, "revise-claim": revise_claim, "move-topic": move_topic,
                 "add-authority-ref": add_authority_ref, "refresh-authority-ref": refresh_authority_ref,
                 "retire-authority-ref": retire_authority_ref, "check": check_delta, "finalize": finalize,
                 "inspect": inspect, "abandon": abandon}

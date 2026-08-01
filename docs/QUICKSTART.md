@@ -165,3 +165,29 @@ Use the operation that matches the semantic intent:
 - remove an inapplicable Ref from the active registry while preserving a reasoned, replacement-linked audit event: `knowledge-plan retire-authority-ref`.
 
 These operations may share one plan and one immutable Bundle. Run one delta check after all operations, finalize for full staged preflight, then stop for exact-hash review. Multi-Bundle orchestration (`bundle_migration_plan`, historically the ambiguous `migration_plan`) is non-atomic across phases and is not a substitute for a structure-refactor Bundle.
+
+### 8.1 Authority documents must be committed before `init`
+
+`knowledge-plan add-authority-ref` requires the referenced Authority document to
+match the committed baseline exactly, so commit every Authority document
+(`authority/…`) *before* running `knowledge-plan init`. A commit made after
+`init` invalidates the plan's baseline: every later mutation fails with
+`PLAN_STALE_BASELINE`. Recovery, in increasing order of disruption:
+
+1. `knowledge-plan rebase <plan_id> --reason …` — re-anchors an open plan to
+   the new HEAD when no plan-referenced Authority path changed across the gap
+   (conflicting paths are listed and rejected). Operations and staged writes
+   are kept; the plan identity and plan id do not change.
+2. `knowledge-plan abandon <plan_id> --reason …` + re-`init` + replay — always
+   available, but replays every operation.
+
+### 8.2 Bundle artifacts and `expected_changed_files`
+
+A Bundle's `expected_changed_files` lists the knowledge files its apply
+creates or replaces. The lifecycle artifacts themselves — `bnd_*.json`,
+`bnd_*.approval.json`, `bnd_*.applied.json` — are written by finalize,
+bundle-approve, and bundle-apply respectively and are listed by
+`bundle-inspect` under `lifecycle_files`; they are intentionally not part of
+`expected_changed_files` (their filenames embed the Bundle content hash, so
+listing them inside the hashed body would be circular). Use `bundle-inspect
+<bundle_id>` to see the complete artifact set before approving.

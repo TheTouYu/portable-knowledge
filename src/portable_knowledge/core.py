@@ -1906,6 +1906,26 @@ def output(payload: dict[str, Any], fmt: str) -> None:
         for warning in payload.get("warnings", []): print(f"WARNING: {warning}")
         for failure in payload.get("failures", []): print(f"BLOCKING: {failure}")
         print(f"Evidence boundary: {payload.get('proof_boundary')}")
+    elif payload.get("command") == "knowledge-plan inspect":
+        print(f"Plan: {payload.get('plan_id')} ({payload.get('state')})")
+        print(f"Baseline: {payload.get('baseline_commit')}")
+        print(f"Intent: {payload.get('intent', '')}")
+        print(f"Operations: {payload.get('operation_count', 0)}  Claims: {payload.get('claim_count', 0)}  Authority refs: {payload.get('authority_ref_count', 0)}")
+        print("Claims:")
+        for claim in payload.get("claims", []):
+            print(f"  - {claim.get('claim_id')}: {claim.get('title')} [{', '.join(claim.get('fact_classes', []))}]")
+        for claim in payload.get("revised_claims", []):
+            print(f"  - {claim.get('claim_id')} (revised: {claim.get('semantic_declaration')})")
+        print("Operations:")
+        for operation in payload.get("operations", []):
+            print(f"  - {operation.get('operation_type')} {operation.get('operation_id')}")
+        print("Staged authority refs:")
+        for ref in payload.get("authority_refs", []):
+            print(f"  - {ref.get('authority_ref_id')}: {ref.get('path')} ({ref.get('role')}) claims={ref.get('claim_ids')}")
+        preview = payload.get("closeout_preview", {})
+        print(f"Closeout health: {preview.get('health')} (affected authority refs: {preview.get('authority_ref_counts', {}).get('affected', 0)})")
+        for ref in preview.get("affected_authority_refs", []):
+            print(f"  * {ref.get('change')} {ref.get('authority_ref_id')}: {ref.get('path')}")
     elif not payload.get("ok"):
         for error in payload.get("errors", []):
             print(f"ERROR [{error.get('code', 'ERROR')}] {error.get('path', '.')}: {error.get('message', '')}")
@@ -2173,6 +2193,8 @@ def parser_build() -> argparse.ArgumentParser:
     plan_check = plan_command("check"); plan_check.add_argument("plan_id"); plan_check.add_argument("--mode", choices=("delta",), required=True)
     plan_finalize = plan_command("finalize"); plan_finalize.add_argument("plan_id")
     plan_inspect = plan_command("inspect"); plan_inspect.add_argument("plan_id")
+    plan_rebase = plan_command("rebase"); plan_rebase.add_argument("plan_id")
+    plan_rebase.add_argument("--reason", required=True)
     plan_abandon = plan_command("abandon"); plan_abandon.add_argument("plan_id")
     plan_abandon.add_argument("--reason", required=True)
     return parser

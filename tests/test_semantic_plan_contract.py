@@ -3,6 +3,7 @@ from __future__ import annotations
 import argparse
 import base64
 import contextlib
+import datetime as dt
 import hashlib
 import io
 import json
@@ -913,7 +914,7 @@ class SemanticPlanContractTests(unittest.TestCase):
         refs = json.loads((self.root / "data/store/authority-refs.json").read_text())["refs"]
         current = next(ref for ref in refs if ref["id"] == original["authority_ref_id"])
         self.assertEqual(current["approved_hash"], refreshed["new_approved_hash"])
-        events = [json.loads(line) for line in (self.root / "data/store/proposals/2026-07-owner-channel.jsonl").read_text().splitlines() if line]
+        events = [json.loads(line) for line in (self.root / "data/store/proposals" / f"{dt.datetime.now():%Y-%m}-owner-channel.jsonl").read_text().splitlines() if line]
         event = next(item for item in events if item["event_type"] == "authority_ref_refreshed")
         self.assertEqual((event["old_approved_hash"], event["new_approved_hash"]),
                          (refreshed["old_approved_hash"], refreshed["new_approved_hash"]))
@@ -1001,7 +1002,7 @@ class SemanticPlanContractTests(unittest.TestCase):
         self.cli("bundle-apply", finalized["bundle_id"], "--content-hash", finalized["content_hash"], "--apply")
         refs = json.loads((self.root / "data/store/authority-refs.json").read_text())["refs"]
         self.assertNotIn(retiring["authority_ref_id"], {ref["id"] for ref in refs})
-        events = [json.loads(line) for line in (self.root / "data/store/proposals/2026-07-owner-channel.jsonl").read_text().splitlines() if line]
+        events = [json.loads(line) for line in (self.root / "data/store/proposals" / f"{dt.datetime.now():%Y-%m}-owner-channel.jsonl").read_text().splitlines() if line]
         event = next(item for item in events if item["event_type"] == "authority_ref_retired")
         self.assertEqual(event["replacement_authority_ref_id"], replacement["authority_ref_id"])
 
@@ -1016,6 +1017,134 @@ class SemanticPlanContractTests(unittest.TestCase):
         allowed = self.cli("bundle-create", "--manifest", "manifest.json", "--compatibility-mode")
         self.assertFalse(allowed["applied"])
         self.assertEqual(self.formal_authority(), self.authority_before)
+
+    def test_rebase_recovers_stale_baseline_without_replay(self):
+        plan_id = self.init()["plan_id"]
+        added = self.add_claim(plan_id, "schema", "Schema input is explicit", "The schema parser accepts explicit versioned fields.",
+                               ("documented_contract",))
+        (self.root / "docs").mkdir(exist_ok=True)
+        (self.root / "docs" / "note.md").write_text("Committed after init.\n", encoding="utf-8")
+        subprocess.run(["git", "add", "docs/note.md"], cwd=self.root, check=True)
+        subprocess.run(["git", "commit", "-qm", "unrelated docs commit"], cwd=self.root, check=True)
+        stale = self.cli("knowledge-plan", "add-claim", plan_id, "--node", "software-core", "--topic-id", "topic-schema",
+                         "--title", "Blocked by staleness", "--statement", "This must not land.", "--boundary", "Neutral fixture only.",
+                         "--fact-class", "documented_contract", expected=1)
+        self.assertEqual(stale["errors"][0]["code"], "PLAN_STALE_BASELINE")
+        self.assertIn("rebase", stale["errors"][0]["message"])
+        rebased = self.cli("knowledge-plan", "rebase", plan_id, "--reason", "Unrelated docs commit moved HEAD")
+        self.assertEqual(rebased["plan_id"], plan_id)
+        self.assertEqual(rebased["baseline_commit"],
+                         subprocess.run(["git", "rev-parse", "HEAD"], cwd=self.root, text=True, capture_output=True).stdout.strip())
+        self.assertEqual(rebased["rebase_count"], 1)
+        plan_value = json.loads((self.root / ".local/pkc/semantic-plans" / f"{plan_id}.json").read_text(encoding="utf-8"))
+        self.assertEqual(plan_value["rebase_history"][0]["from"], rebased["old_baseline_commit"])
+        self.assertEqual(plan_value["delta"], None)
+        self.add_ref(plan_id, added["claim_id"], "schema", "authority/schema-contract.md", "documented_contract", "documented_contract")
+        noop = self.cli("knowledge-plan", "rebase", plan_id, "--reason", "Already current.", expected=1)
+        self.assertEqual(noop["errors"][0]["code"], "PLAN_REBASE_NOOP")
+        self.assertTrue(self.cli("knowledge-plan", "check", plan_id, "--mode", "delta")["can_finalize"])
+
+    def test_rebase_rejects_plan_referenced_authority_changes(self):
+        plan_id = self.init()["plan_id"]
+        claim = self.add_claim(plan_id, "schema", "Schema input is explicit", "The schema parser accepts explicit versioned fields.",
+                               ("documented_contract",))["claim_id"]
+        self.add_ref(plan_id, claim, "schema", "authority/schema-contract.md", "documented_contract", "documented_contract")
+        authority = self.root / "authority/schema-contract.md"
+        authority.write_text(authority.read_text(encoding="utf-8") + "\nChanged after ref.\n", encoding="utf-8")
+        subprocess.run(["git", "add", "authority/schema-contract.md"], cwd=self.root, check=True)
+        subprocess.run(["git", "commit", "-qm", "change referenced authority"], cwd=self.root, check=True)
+        failed = self.cli("knowledge-plan", "rebase", plan_id, "--reason", "Try anyway.", expected=1)
+        self.assertEqual(failed["errors"][0]["code"], "PLAN_REBASE_CONFLICT")
+        self.assertIn("authority/schema-contract.md", failed["errors"][0]["message"])
+        self.assertEqual(self.formal_authority(), self.authority_before)
+
+    def test_rebase_rejects_finalized_and_missing_reason(self):
+        plan_id = self.init()["plan_id"]
+        missing = self.cli("knowledge-plan", "rebase", plan_id, "--reason", "", expected=1)
+        self.assertEqual(missing["errors"][0]["code"], "PLAN_INPUT_INVALID")
+        claim = self.add_claim(plan_id, "schema", "Schema input is explicit", "The schema parser accepts explicit versioned fields.",
+                               ("documented_contract",))["claim_id"]
+        self.add_ref(plan_id, claim, "schema", "authority/schema-contract.md", "documented_contract", "documented_contract")
+        self.assertTrue(self.cli("knowledge-plan", "check", plan_id, "--mode", "delta")["can_finalize"])
+        finalized = self.cli("knowledge-plan", "finalize", plan_id)
+        failed = self.cli("knowledge-plan", "rebase", finalized["plan_id"], "--reason", "Too late.", expected=1)
+        self.assertEqual(failed["errors"][0]["code"], "PLAN_FINALIZED_IMMUTABLE")
+
+    def test_add_authority_ref_distinguishes_revised_from_missing_claim(self):
+        first_plan = self.init()["plan_id"]
+        first = self.add_claim(first_plan, "schema", "Schema input is explicit", "The schema parser accepts explicit versioned fields.",
+                               ("documented_contract",))
+        self.add_ref(first_plan, first["claim_id"], "schema", "authority/schema-contract.md", "documented_contract", "documented_contract")
+        self.assertTrue(self.cli("knowledge-plan", "check", first_plan, "--mode", "delta")["can_finalize"])
+        finalized = self.cli("knowledge-plan", "finalize", first_plan)
+        self.cli("bundle-approve", finalized["bundle_id"], "--content-hash", finalized["content_hash"], "--apply")
+        self.cli("bundle-apply", finalized["bundle_id"], "--content-hash", finalized["content_hash"], "--apply")
+        subprocess.run(["git", "add", "data/store", "domain", "authority"], cwd=self.root, check=True)
+        subprocess.run(["git", "commit", "-qm", "apply first plan"], cwd=self.root, check=True)
+        plan_id = self.init()["plan_id"]
+        self.cli("knowledge-plan", "revise-claim", plan_id, "--claim-id", first["claim_id"],
+                 "--title", "Schema input is explicit and versioned",
+                 "--statement", "The schema parser accepts explicit versioned fields.",
+                 "--boundary", "Only the committed neutral fixture is in scope.",
+                 "--semantic-declaration", "clarify", "--reason", "Sharpen the title.")
+        revised_hint = self.cli("knowledge-plan", "add-authority-ref", plan_id, "--claim-id", first["claim_id"],
+                                "--path", "authority/schema-contract.md", "--locator", "schema contract",
+                                "--role", "documented_contract", "--change-policy", "invalidate_on_change",
+                                "--fact-class", "documented_contract", expected=1)
+        self.assertEqual(revised_hint["errors"][0]["code"], "PLAN_CLAIM_REVISED_NEEDS_REFRESH")
+        self.assertIn("refresh-authority-ref", revised_hint["errors"][0]["message"])
+        missing = self.cli("knowledge-plan", "add-authority-ref", plan_id, "--claim-id", "clm_ABSENT",
+                           "--path", "authority/schema-contract.md", "--locator", "schema contract",
+                           "--role", "documented_contract", "--change-policy", "invalidate_on_change",
+                           "--fact-class", "documented_contract", expected=1)
+        self.assertEqual(missing["errors"][0]["code"], "PLAN_CLAIM_MISSING")
+
+    def test_inspect_preview_lists_externally_invalidated_refs(self):
+        refs_path = self.root / "data/store/authority-refs.json"
+        refs = json.loads(refs_path.read_text(encoding="utf-8"))
+        refs["refs"].append({"id": "aref_external_stale", "path": "authority/schema-contract.md", "locator": "fixture",
+                             "role": "documented_contract", "baseline_state": "committed_baseline",
+                             "change_policy": "invalidate_on_change", "approved_hash": "0" * 64,
+                             "claim_ids": [], "supports_fact_classes": []})
+        refs_path.write_text(json.dumps(refs, indent=2) + "\n", encoding="utf-8")
+        subprocess.run(["git", "add", refs_path.relative_to(self.root).as_posix()], cwd=self.root, check=True)
+        subprocess.run(["git", "commit", "-qm", "add externally stale fixture ref"], cwd=self.root, check=True)
+        self.authority_before = self.formal_authority()
+        plan_id = self.init()["plan_id"]
+        inspected = self.cli_process("knowledge-plan", "inspect", plan_id)
+        affected = inspected["closeout_preview"]["affected_authority_refs"]
+        external = next(item for item in affected if item["authority_ref_id"] == "aref_external_stale")
+        self.assertEqual(external["change"], "external_invalidated")
+        self.assertEqual(external["old_hash"], "0" * 64)
+        self.assertEqual(len(external["new_hash"]), 64)
+        self.assertIn("outside this plan", external["human_review_reason"])
+
+    def test_inspect_summary_and_text_output(self):
+        plan_id = self.init()["plan_id"]
+        claim = self.add_claim(plan_id, "schema", "Schema input is explicit", "The schema parser accepts explicit versioned fields.",
+                               ("documented_contract",))["claim_id"]
+        self.add_ref(plan_id, claim, "schema", "authority/schema-contract.md", "documented_contract", "documented_contract")
+        inspected = self.cli("knowledge-plan", "inspect", plan_id)
+        self.assertEqual([item["claim_id"] for item in inspected["claims"]], [claim])
+        self.assertEqual(inspected["claims"][0]["title"], "Schema input is explicit")
+        self.assertEqual(inspected["operations"][0]["operation_type"], "add_claim")
+        self.assertEqual(inspected["authority_refs"][0]["path"], "authority/schema-contract.md")
+        text = self.cli_text("knowledge-plan", "inspect", plan_id)
+        self.assertIn("Claims:", text)
+        self.assertIn("Baseline:", text)
+        self.assertIn(claim, text)
+        self.assertIn("add_authority_ref", text)
+        self.assertIn("Closeout health:", text)
+
+    def test_fact_class_enum_is_surfaced_in_cli_help(self):
+        env = os.environ.copy()
+        env["PYTHONPATH"] = str(PACKAGE / "src")
+        help_text = subprocess.run([sys.executable, "-m", "portable_knowledge.cli", "--root", str(self.root),
+                                    "knowledge-plan", "add-claim", "--help"], cwd=PACKAGE, env=env,
+                                   text=True, encoding="utf-8", capture_output=True).stdout
+        for value in ("runtime_behavior", "public_type_surface", "cli_behavior", "documented_contract",
+                      "external_game_evidence", "transform_defaults", "writeback_behavior", "evidence_scope"):
+            self.assertIn(value, help_text)
 
 
 if __name__ == "__main__":
