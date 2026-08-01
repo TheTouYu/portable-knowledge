@@ -61,3 +61,15 @@ bundle-inspect 保持 bundles 数组输出形状，并在每个 Bundle 记录的
 指定单个 Bundle ID 时记录仍位于 bundles[0]；该字段不改变 Bundle 内容哈希、action 目标或审批与应用分离。
 
 <!-- CLAIM:END clm_FEA9677C7712F21ACDD64C4212 -->
+
+<!-- CLAIM:START clm_A8BA119B3C73E21DEB488EE768 -->
+
+### Adapter 提案保持只读并等待独立评测
+
+pkc-project-operator 的 plan-adapter 会针对配置中的项目 Adapter 生成确定、可审查的外部提案，静态核对声明的 Context、Node、Topic 和项目路径、canonical wrapper 与直接 mutation 禁令；它不修改目标项目，提案状态固定为 not_evaluated，且 apply-plan 不接受该提案类型。
+
+#### 适用边界
+
+这只描述 first-use 后 Adapter 候选的静态提案和人工审查边界；不表示候选已被应用、已通过 isolated task evaluation，也不证明真实项目、生产、游戏或编译器行为。
+
+<!-- CLAIM:END clm_A8BA119B3C73E21DEB488EE768 -->

@@ -47,6 +47,21 @@
       ]
     },
     {
+      "id": "aref_32bfce0d44101a5760df210e74",
+      "path": "skills/pkc-project-operator/references/MODES.md",
+      "locator": "section:Adapter proposal after first use",
+      "role": "documented_contract",
+      "baseline_state": "committed_baseline",
+      "change_policy": "invalidate_on_change",
+      "approved_hash": "0ef885259aacef531269a846a11448e8fc4433eff9ddbc040dd80da3f0ff5515",
+      "claim_ids": [
+        "clm_A8BA119B3C73E21DEB488EE768"
+      ],
+      "supports_fact_classes": [
+        "documented_contract"
+      ]
+    },
+    {
       "id": "aref_41d07ba256b5098ed924d4fb94",
       "path": "src/portable_knowledge/federation.py",
       "locator": "load_registry and search",
@@ -119,6 +134,21 @@
       ],
       "supports_fact_classes": [
         "documented_contract"
+      ]
+    },
+    {
+      "id": "aref_9d9b36db0643ae55ad05503f6c",
+      "path": "skills/pkc-project-operator/scripts/pkc_operator.py",
+      "locator": "function:command_plan_adapter",
+      "role": "current_implementation",
+      "baseline_state": "committed_baseline",
+      "change_policy": "invalidate_on_change",
+      "approved_hash": "b3f6755ce1c1b6c4fd74077c2bda225abbfb887b9bbb0b4c51133be4049183f1",
+      "claim_ids": [
+        "clm_A8BA119B3C73E21DEB488EE768"
+      ],
+      "supports_fact_classes": [
+        "cli_behavior"
       ]
     },
     {

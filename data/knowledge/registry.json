@@ -73,6 +73,12 @@
         "documented_contract",
         "runtime_behavior"
       ]
+    },
+    "clm_A8BA119B3C73E21DEB488EE768": {
+      "fact_classes": [
+        "cli_behavior",
+        "documented_contract"
+      ]
     }
   }
 }
