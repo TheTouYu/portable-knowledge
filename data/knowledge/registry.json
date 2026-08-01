@@ -25,6 +25,18 @@
         "lifecycle"
       ],
       "permission": "internal"
+    },
+    {
+      "id": "topic-read-only-federation",
+      "node_id": "node-pkc-workflows",
+      "title": "只读跨项目查询",
+      "path": "knowledge/pkc-workflows/read-only-federation.md",
+      "summary": "记录 PKC 如何在保持项目所有权和权限边界的前提下查询多个项目。",
+      "keywords": [
+        "cross-project",
+        "federation"
+      ],
+      "permission": "internal"
     }
   ],
   "relationships": [],
@@ -53,6 +65,13 @@
       "fact_classes": [
         "cli_behavior",
         "documented_contract"
+      ]
+    },
+    "clm_C28A0E89225EF8D21D34E5A379": {
+      "fact_classes": [
+        "cli_behavior",
+        "documented_contract",
+        "runtime_behavior"
       ]
     }
   }
