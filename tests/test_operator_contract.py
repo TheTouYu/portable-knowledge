@@ -192,6 +192,110 @@ class OperatorContractTests(unittest.TestCase):
         with self.assertRaisesRegex(operator.OperatorError, "does not support plan kind"):
             operator.command_apply(args)
 
+    def test_apply_adapter_writes_only_reviewed_target_and_stays_not_evaluated(self):
+        self.configure_adapter_fixture()
+        candidate = Path(self.temp.name) / "candidate.md"
+        candidate.write_text("name: existing-project-knowledge-adapter\nUse python tools/pkc.py for build.\n", encoding="utf-8")
+        proposal = Path(self.temp.name) / "adapter-plan.json"
+        plan_args = type("Args", (), {"target": self.root, "candidate": candidate, "output": proposal,
+                                        "context": ["build"], "node": [], "topic": [], "path": []})()
+        planned = operator.command_plan_adapter(plan_args)
+        before = {p.relative_to(self.root): p.read_bytes() for p in self.root.rglob("*")
+                  if p.is_file() and ".git" not in p.relative_to(self.root).parts}
+        args = type("Args", (), {"plan": proposal, "plan_hash": planned["plan_hash"],
+                                  "human_reviewed": True})()
+
+        result = operator.command_apply_adapter(args)
+
+        target = Path(json.loads(proposal.read_text())["target_path"])
+        after = {p.relative_to(self.root): p.read_bytes() for p in self.root.rglob("*")
+                 if p.is_file() and ".git" not in p.relative_to(self.root).parts}
+        self.assertEqual(after[target], candidate.read_bytes())
+        self.assertEqual({path for path in after if after[path] != before[path]}, {target})
+        self.assertEqual(result["evaluation_status"], "not_evaluated")
+        self.assertEqual(result["git_status"], [f" M {target.as_posix()}"])
+        self.assertEqual(subprocess.run(["git", "rev-list", "--count", "HEAD"], cwd=self.root,
+                                        check=True, text=True, stdout=subprocess.PIPE).stdout.strip(), "2")
+
+    def test_apply_adapter_requires_human_review_before_writing(self):
+        self.configure_adapter_fixture()
+        candidate = Path(self.temp.name) / "candidate.md"
+        candidate.write_text("name: existing-project-knowledge-adapter\nUse python tools/pkc.py.\n", encoding="utf-8")
+        proposal = Path(self.temp.name) / "adapter-plan.json"
+        plan_args = type("Args", (), {"target": self.root, "candidate": candidate, "output": proposal,
+                                        "context": [], "node": [], "topic": [], "path": []})()
+        planned = operator.command_plan_adapter(plan_args)
+        target = self.root / "skills/existing-project-knowledge-adapter/SKILL.md"
+        before = target.read_bytes()
+        args = type("Args", (), {"plan": proposal, "plan_hash": planned["plan_hash"],
+                                  "human_reviewed": False})()
+
+        with self.assertRaisesRegex(operator.OperatorError, "real human"):
+            operator.command_apply_adapter(args)
+        self.assertEqual(target.read_bytes(), before)
+        self.assertEqual(subprocess.run(["git", "status", "--porcelain"], cwd=self.root,
+                                        check=True, text=True, stdout=subprocess.PIPE).stdout, "")
+
+    def test_apply_adapter_rejects_plan_git_adapter_and_config_drift(self):
+        self.configure_adapter_fixture()
+        candidate = Path(self.temp.name) / "candidate.md"
+        candidate.write_text("name: existing-project-knowledge-adapter\nUse python tools/pkc.py.\n", encoding="utf-8")
+        proposal = Path(self.temp.name) / "adapter-plan.json"
+        plan_args = type("Args", (), {"target": self.root, "candidate": candidate, "output": proposal,
+                                        "context": [], "node": [], "topic": [], "path": []})()
+        planned = operator.command_plan_adapter(plan_args)
+        plan = json.loads(proposal.read_text())
+        target = self.root / plan["target_path"]
+        before = target.read_bytes()
+
+        args = type("Args", (), {"plan": proposal, "plan_hash": "wrong", "human_reviewed": True})()
+        with self.assertRaisesRegex(operator.OperatorError, "plan hash mismatch"):
+            operator.command_apply_adapter(args)
+
+        args.plan_hash = planned["plan_hash"]
+        (self.root / "dirty.txt").write_text("dirty", encoding="utf-8")
+        with self.assertRaisesRegex(operator.OperatorError, "Git state changed"):
+            operator.command_apply_adapter(args)
+        (self.root / "dirty.txt").unlink()
+
+        state = plan["created_from"]
+        target.write_text("changed", encoding="utf-8")
+        with mock.patch.object(operator, "git_state", return_value=state), \
+             self.assertRaisesRegex(operator.OperatorError, "Adapter changed"):
+            operator.command_apply_adapter(args)
+        target.write_bytes(before)
+
+        config = json.loads((self.root / "project-intelligence.json").read_text())
+        config["adapter"]["skill"] = "skills/other/SKILL.md"
+        (self.root / "project-intelligence.json").write_text(json.dumps(config), encoding="utf-8")
+        with mock.patch.object(operator, "git_state", return_value=state), \
+             self.assertRaisesRegex(operator.OperatorError, "Adapter path changed"):
+            operator.command_apply_adapter(args)
+        self.assertEqual(target.read_bytes(), before)
+
+    def test_apply_adapter_rejects_tampered_candidate_and_apply_plan_stays_separate(self):
+        self.configure_adapter_fixture()
+        candidate = Path(self.temp.name) / "candidate.md"
+        candidate.write_text("name: existing-project-knowledge-adapter\nUse python tools/pkc.py.\n", encoding="utf-8")
+        proposal = Path(self.temp.name) / "adapter-plan.json"
+        plan_args = type("Args", (), {"target": self.root, "candidate": candidate, "output": proposal,
+                                        "context": [], "node": [], "topic": [], "path": []})()
+        operator.command_plan_adapter(plan_args)
+        plan = json.loads(proposal.read_text())
+        plan["candidate_content"] += "tampered\n"
+        plan["plan_hash"] = operator.plan_hash(plan)
+        proposal.write_text(json.dumps(plan), encoding="utf-8")
+        args = type("Args", (), {"plan": proposal, "plan_hash": plan["plan_hash"], "human_reviewed": True})()
+        target = self.root / plan["target_path"]
+        before = target.read_bytes()
+
+        with self.assertRaisesRegex(operator.OperatorError, "candidate content hash mismatch"):
+            operator.command_apply_adapter(args)
+        with self.assertRaisesRegex(operator.OperatorError, "does not support plan kind"):
+            operator.command_apply(args)
+        self.assertEqual(target.read_bytes(), before)
+        self.assertIn("apply-adapter", operator.parser().format_help())
+
     def test_plan_upgrade_synchronizes_lock_and_declared_version_and_records_rollback(self):
         old_commit = "a" * 40
         new_commit = "b" * 40
@@ -536,7 +640,7 @@ class OperatorContractTests(unittest.TestCase):
 
     def test_documented_operator_commands_exist(self):
         choices = operator.parser()._subparsers._group_actions[0].choices
-        for command in ("plan-install", "plan-adopt", "plan-adapter", "plan-upgrade", "apply-plan"):
+        for command in ("plan-install", "plan-adopt", "plan-adapter", "plan-upgrade", "apply-plan", "apply-adapter"):
             self.assertIn(command, choices)
 
 

@@ -504,6 +504,52 @@ def command_plan_adapter(args: argparse.Namespace) -> dict[str, Any]:
             "next": "show the exact candidate diff and plan hash to a human; this command cannot apply it", "errors": []}
 
 
+def command_apply_adapter(args: argparse.Namespace) -> dict[str, Any]:
+    plan = json.loads(args.plan.read_text(encoding="utf-8"))
+    if plan.get("kind") != "pkc-adapter-proposal":
+        raise OperatorError(f"apply-adapter requires plan kind pkc-adapter-proposal: {plan.get('kind')}")
+    actual = plan_hash(plan)
+    if plan.get("plan_hash") != actual or args.plan_hash != actual:
+        raise OperatorError("plan hash mismatch")
+    if not args.human_reviewed:
+        raise OperatorError("a real human must review the displayed Adapter diff before apply")
+    if plan.get("evaluation_status") != "not_evaluated":
+        raise OperatorError("apply-adapter accepts only not_evaluated proposals")
+    root = Path(plan["target_root"]).resolve()
+    if git_root(root) != root:
+        raise OperatorError("target root is no longer the Git project root")
+    state = git_state(root)
+    if state["head"] != plan["created_from"]["head"] or state["status"] != plan["created_from"]["status"]:
+        raise OperatorError("target Git state changed after planning; create a new Adapter proposal")
+    config = json.loads((root / "project-intelligence.json").read_text(encoding="utf-8"))
+    target_rel = config.get("adapter", {}).get("skill")
+    if target_rel != plan.get("target_path"):
+        raise OperatorError("configured Adapter path changed after planning; create a new Adapter proposal")
+    target = (root / target_rel).resolve()
+    if not target.is_relative_to(root) or not target.is_file() or target.is_symlink():
+        raise OperatorError("configured Adapter is missing, linked, or outside the project")
+    if digest_file(target) != plan.get("current_sha256"):
+        raise OperatorError("configured Adapter changed after planning; create a new Adapter proposal")
+    content = plan.get("candidate_content")
+    if not isinstance(content, str) or digest_bytes(content.encode()) != plan.get("candidate_sha256"):
+        raise OperatorError("Adapter candidate content hash mismatch")
+    mode = target.stat().st_mode
+    temporary: Path | None = None
+    try:
+        with tempfile.NamedTemporaryFile("w", encoding="utf-8", dir=target.parent, delete=False) as stream:
+            stream.write(content)
+            temporary = Path(stream.name)
+        temporary.chmod(mode)
+        temporary.replace(target)
+    finally:
+        if temporary is not None:
+            temporary.unlink(missing_ok=True)
+    return {"ok": True, "command": "apply-adapter", "plan_hash": actual, "target": str(root),
+            "target_path": target_rel, "candidate_sha256": plan["candidate_sha256"],
+            "evaluation_status": "not_evaluated", "git_status": git_state(root)["status"],
+            "next": "human reviews the tracked diff; evaluation and Git commit/push remain separate", "errors": []}
+
+
 def command_plan_upgrade(args: argparse.Namespace) -> dict[str, Any]:
     root = git_root(args.target.resolve())
     existing = inspect_target(root)
@@ -794,6 +840,7 @@ def parser() -> argparse.ArgumentParser:
     upgrade.add_argument("--defer-knowledge-check-for-authority-maintenance", action="store_true",
                          help="defer configured retrieval evaluation only when the target runtime is needed to refresh invalidated Authority References")
     apply = sub.add_parser("apply-plan"); apply.add_argument("--plan", type=Path, required=True); apply.add_argument("--plan-hash", required=True); apply.add_argument("--human-reviewed", action="store_true")
+    adapter_apply = sub.add_parser("apply-adapter"); adapter_apply.add_argument("--plan", type=Path, required=True); adapter_apply.add_argument("--plan-hash", required=True); adapter_apply.add_argument("--human-reviewed", action="store_true")
     global_install = sub.add_parser("install-global"); global_install.add_argument("--source", type=Path, default=Path(__file__).resolve().parents[3]); global_install.add_argument("--skill-root", type=Path, action="append")
     return p
 
@@ -807,6 +854,7 @@ def main(argv: list[str] | None = None) -> int:
         elif args.command == "plan-adapter": payload = command_plan_adapter(args)
         elif args.command == "plan-upgrade": payload = command_plan_upgrade(args)
         elif args.command == "apply-plan": payload = command_apply(args)
+        elif args.command == "apply-adapter": payload = command_apply_adapter(args)
         elif args.command == "status": payload = command_status(args)
         elif args.command == "doctor": payload = command_status(args, True)
         elif args.command == "check-update": payload = command_update(args)

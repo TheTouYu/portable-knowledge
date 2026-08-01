@@ -68,7 +68,16 @@ python skills/pkc-project-operator/scripts/pkc_operator.py plan-adapter \
   --output /tmp/pkc-adapter-plan.json
 ```
 
-Repeat the reference options as needed. The command validates only declared concrete Context, Node, Topic, and project-path references, the configured Adapter identity, the canonical `python tools/pkc.py` wrapper, and direct mutation prohibitions. It writes only the requested proposal outside the target project. The proposal contains the complete candidate, current/candidate hashes, target Git baseline, `plan_hash`, and `evaluation_status: not_evaluated`; it does not embed a rendered diff. `apply-plan` deliberately rejects this proposal kind: render and show the exact diff between the configured Adapter and the proposal's complete candidate, show the plan hash to a human, then use the project's normal reviewed tracked-file workflow. Runtime/global-Skill upgrades never replace a project Adapter. Only separately agreed isolated tasks may change its status from not evaluated; static checks are not production, game, or compiler evidence.
+Repeat the reference options as needed. The command validates only declared concrete Context, Node, Topic, and project-path references, the configured Adapter identity, the canonical `python tools/pkc.py` wrapper, and direct mutation prohibitions. It writes only the requested proposal outside the target project. The proposal contains the complete candidate, current/candidate hashes, target Git baseline, `plan_hash`, and `evaluation_status: not_evaluated`; it does not embed a rendered diff. `apply-plan` deliberately rejects this proposal kind. Render and show the exact diff between the configured Adapter and the proposal's complete candidate, show the plan hash to a human, then apply only that reviewed proposal:
+
+```bash
+python skills/pkc-project-operator/scripts/pkc_operator.py apply-adapter \
+  --plan /tmp/pkc-adapter-plan.json \
+  --plan-hash EXACT_PLAN_HASH \
+  --human-reviewed
+```
+
+`apply-adapter` fails closed on proposal hash, Git state, configured path, current-file hash, or candidate hash drift and replaces only the configured Adapter file. It leaves `evaluation_status: not_evaluated`, evaluation, Git commit/push, Authority, Memory, runtime, and other files separate. Runtime/global-Skill upgrades never replace a project Adapter. Only separately agreed isolated tasks may change its status from not evaluated; static checks and successful application are not production, game, or compiler evidence.
 
 Do not add an Adapter DSL, infer project facts, update root `AGENTS.md`, mutate Authority or Memory, or run an evaluator as part of proposal generation.
 
