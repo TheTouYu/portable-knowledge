@@ -36,6 +36,23 @@ class OperatorContractTests(unittest.TestCase):
     def tearDown(self):
         self.temp.cleanup()
 
+    def configure_adapter_fixture(self):
+        config = {"adapter": {"skill": "skills/existing-project-knowledge-adapter/SKILL.md"},
+                  "authority": {"registry": "data/knowledge/registry.json"},
+                  "memory": {"contexts": [{"id": "build"}]}}
+        registry = {"nodes": [{"id": "node-runtime"}], "topics": [{"id": "topic-cli"}]}
+        files = {
+            "project-intelligence.json": json.dumps(config),
+            "data/knowledge/registry.json": json.dumps(registry),
+            "skills/existing-project-knowledge-adapter/SKILL.md": "name: existing-project-knowledge-adapter\nBootstrap\n",
+            "tools/pkc.py": "# wrapper\n",
+            "docs/OPERATING.md": "# Operating\n",
+        }
+        for relative, content in files.items():
+            path = self.root / relative; path.parent.mkdir(parents=True, exist_ok=True); path.write_text(content, encoding="utf-8")
+        subprocess.run(["git", "add", "."], cwd=self.root, check=True)
+        subprocess.run(["git", "commit", "-q", "-m", "configured Adapter"], cwd=self.root, check=True)
+
     def test_global_install_default_source_is_repository_root(self):
         args = operator.parser().parse_args(["install-global"])
         self.assertEqual(args.source.resolve(), ROOT)
@@ -111,6 +128,69 @@ class OperatorContractTests(unittest.TestCase):
         self.assertIn("configured authority and knowledge assets", plan["preserved"])
         self.assertEqual(json.loads(authority.read_text(encoding="utf-8"))["nodes"][0]["id"], "real")
         self.assertFalse((self.root / "tools").exists())
+
+    def test_plan_adapter_is_deterministic_review_only_and_does_not_mutate_target(self):
+        self.configure_adapter_fixture()
+        candidate = Path(self.temp.name) / "candidate.md"
+        candidate.write_text("name: existing-project-knowledge-adapter\nUse python tools/pkc.py with build, node-runtime, topic-cli, and docs/OPERATING.md.\n", encoding="utf-8")
+        output = Path(self.temp.name) / "adapter-plan.json"
+        args = type("Args", (), {"target": self.root, "candidate": candidate, "output": output,
+                                  "context": ["build"], "node": ["node-runtime"],
+                                  "topic": ["topic-cli"], "path": ["docs/OPERATING.md"]})()
+        before = {p.relative_to(self.root): p.read_bytes() for p in self.root.rglob("*") if p.is_file()}
+        first = operator.command_plan_adapter(args)
+        second = operator.command_plan_adapter(args)
+        plan = json.loads(output.read_text(encoding="utf-8"))
+        after = {p.relative_to(self.root): p.read_bytes() for p in self.root.rglob("*") if p.is_file()}
+        self.assertEqual(first["plan_hash"], second["plan_hash"])
+        self.assertEqual(before, after)
+        self.assertEqual(plan["evaluation_status"], "not_evaluated")
+        self.assertEqual(plan["target_path"], "skills/existing-project-knowledge-adapter/SKILL.md")
+        self.assertEqual(plan["candidate_content"], candidate.read_text(encoding="utf-8"))
+        self.assertEqual(plan["current_sha256"], operator.digest_file(self.root / plan["target_path"]))
+        self.assertEqual(plan["candidate_sha256"], operator.digest_file(candidate))
+
+    def test_plan_adapter_rejects_output_inside_target_project(self):
+        self.configure_adapter_fixture()
+        candidate = Path(self.temp.name) / "candidate.md"
+        candidate.write_text("name: existing-project-knowledge-adapter\nUse python tools/pkc.py.\n", encoding="utf-8")
+        args = type("Args", (), {"target": self.root, "candidate": candidate,
+                                  "output": self.root / "adapter-plan.json", "context": [],
+                                  "node": [], "topic": [], "path": []})()
+        with self.assertRaisesRegex(operator.OperatorError, "proposal output must stay outside"):
+            operator.command_plan_adapter(args)
+        self.assertFalse(args.output.exists())
+
+    def test_plan_adapter_reports_exact_invalid_references_and_rejects_mutation_commands(self):
+        self.configure_adapter_fixture()
+        candidate = Path(self.temp.name) / "candidate.md"
+        args = type("Args", (), {"target": self.root, "candidate": candidate,
+                                  "output": Path(self.temp.name) / "plan.json", "context": [],
+                                  "node": [], "topic": [], "path": []})()
+        for option, value, message in (
+            ("context", "missing-context", "context reference is missing: missing-context"),
+            ("node", "missing-node", "node reference is missing: missing-node"),
+            ("topic", "missing-topic", "topic reference is missing: missing-topic"),
+            ("path", "../outside", "path reference is missing or outside the project: ../outside"),
+        ):
+            setattr(args, option, [value])
+            candidate.write_text(f"name: existing-project-knowledge-adapter\nUse python tools/pkc.py with {value}.\n", encoding="utf-8")
+            with self.subTest(option=option), self.assertRaisesRegex(operator.OperatorError, re.escape(message)):
+                operator.command_plan_adapter(args)
+            setattr(args, option, [])
+        candidate.write_text("name: existing-project-knowledge-adapter\nUse python tools/pkc.py.\ngit push\n", encoding="utf-8")
+        with self.assertRaisesRegex(operator.OperatorError, "forbidden direct mutation command: git push"):
+            operator.command_plan_adapter(args)
+        candidate.write_text("name: existing-project-knowledge-adapter\nUse python tools/pkc.py. Never run git push or bundle-apply.\n", encoding="utf-8")
+        result = operator.command_plan_adapter(args)
+        self.assertTrue(result["ok"])
+
+    def test_apply_plan_cannot_apply_an_adapter_proposal(self):
+        plan = {"kind": "pkc-adapter-proposal"}
+        path = Path(self.temp.name) / "plan.json"; path.write_text(json.dumps(plan), encoding="utf-8")
+        args = type("Args", (), {"plan": path, "plan_hash": "unused", "human_reviewed": True})()
+        with self.assertRaisesRegex(operator.OperatorError, "does not support plan kind"):
+            operator.command_apply(args)
 
     def test_plan_upgrade_synchronizes_lock_and_declared_version_and_records_rollback(self):
         old_commit = "a" * 40
@@ -456,7 +536,7 @@ class OperatorContractTests(unittest.TestCase):
 
     def test_documented_operator_commands_exist(self):
         choices = operator.parser()._subparsers._group_actions[0].choices
-        for command in ("plan-install", "plan-adopt", "plan-upgrade", "apply-plan"):
+        for command in ("plan-install", "plan-adopt", "plan-adapter", "plan-upgrade", "apply-plan"):
             self.assertIn(command, choices)
 
 

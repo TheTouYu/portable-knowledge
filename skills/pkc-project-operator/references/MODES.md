@@ -55,6 +55,23 @@ The human does not need to name modes or PKC objects:
 
 Installation creates a minimal default Context and empty authority so it never guesses business facts. Guided first-use proposes 2–3 project-specific tree shapes from the goal, next task, committed truth sources, and privacy boundaries. After a shape is chosen, all real knowledge still enters through exact-hash governed capture. Once real Claims exist, propose 3–5 representative questions and configure retrieval evaluation through a separately reviewed project change; never use synthetic cases as real-project proof.
 
+## Adapter proposal after first use
+
+After first-use confirmation, prepare the project-specific Adapter as ordinary reviewed Markdown, then create a deterministic, read-only proposal:
+
+```bash
+python skills/pkc-project-operator/scripts/pkc_operator.py plan-adapter \
+  --target /path/to/project \
+  --candidate /tmp/reviewed-candidate-SKILL.md \
+  --context CONTEXT_ID --node NODE_ID --topic TOPIC_ID \
+  --path docs/OPERATING.md \
+  --output /tmp/pkc-adapter-plan.json
+```
+
+Repeat the reference options as needed. The command validates only declared concrete Context, Node, Topic, and project-path references, the configured Adapter identity, the canonical `python tools/pkc.py` wrapper, and direct mutation prohibitions. It writes only the requested proposal outside the target project. The proposal contains the complete candidate, current/candidate hashes, target Git baseline, `plan_hash`, and `evaluation_status: not_evaluated`; it does not embed a rendered diff. `apply-plan` deliberately rejects this proposal kind: render and show the exact diff between the configured Adapter and the proposal's complete candidate, show the plan hash to a human, then use the project's normal reviewed tracked-file workflow. Runtime/global-Skill upgrades never replace a project Adapter. Only separately agreed isolated tasks may change its status from not evaluated; static checks are not production, game, or compiler evidence.
+
+Do not add an Adapter DSL, infer project facts, update root `AGENTS.md`, mutate Authority or Memory, or run an evaluator as part of proposal generation.
+
 ## Project wrapper
 
 Only the tracked wrapper is canonical in a configured project:

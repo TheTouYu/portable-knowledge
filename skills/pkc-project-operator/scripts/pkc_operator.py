@@ -427,6 +427,83 @@ def command_plan_adopt(args: argparse.Namespace) -> dict[str, Any]:
             "next": "show this plan to a human; apply only after review", "errors": []}
 
 
+def _adapter_references(root: Path, config: dict[str, Any], args: argparse.Namespace) -> dict[str, list[str]]:
+    registry_path = root / config.get("authority", {}).get("registry", "")
+    if not registry_path.is_file():
+        raise OperatorError(f"Adapter reference registry is missing: {registry_path.relative_to(root)}")
+    registry = json.loads(registry_path.read_text(encoding="utf-8"))
+    known = {
+        "context": {item.get("id") for item in config.get("memory", {}).get("contexts", [])},
+        "node": {item.get("id") for item in registry.get("nodes", [])},
+        "topic": {item.get("id") for item in registry.get("topics", [])},
+    }
+    references = {"contexts": sorted(set(args.context)), "nodes": sorted(set(args.node)),
+                  "topics": sorted(set(args.topic)), "paths": sorted(set(args.path))}
+    for plural, singular in (("contexts", "context"), ("nodes", "node"), ("topics", "topic")):
+        for value in references[plural]:
+            if value not in known[singular]:
+                raise OperatorError(f"Adapter {singular} reference is missing: {value}")
+    for value in references["paths"]:
+        path = (root / value).resolve()
+        if not path.is_relative_to(root) or not path.exists():
+            raise OperatorError(f"Adapter path reference is missing or outside the project: {value}")
+    return references
+
+
+def command_plan_adapter(args: argparse.Namespace) -> dict[str, Any]:
+    root = git_root(args.target.resolve())
+    config_path = root / "project-intelligence.json"
+    if not config_path.is_file():
+        raise OperatorError("project-intelligence.json is missing")
+    config = json.loads(config_path.read_text(encoding="utf-8"))
+    target_rel = config.get("adapter", {}).get("skill")
+    if not isinstance(target_rel, str):
+        raise OperatorError("configured Adapter skill path is missing")
+    target = (root / target_rel).resolve()
+    if not target.is_relative_to(root) or not target.is_file():
+        raise OperatorError(f"configured Adapter is missing or outside the project: {target_rel}")
+    candidate = args.candidate.resolve()
+    if not candidate.is_file():
+        raise OperatorError(f"Adapter candidate is missing: {candidate}")
+    content = candidate.read_text(encoding="utf-8")
+    expected_name = Path(target_rel).parent.name
+    name = re.search(r"(?m)^name:\s*([^\s]+)\s*$", content)
+    if not name or name.group(1) != expected_name:
+        raise OperatorError(f"Adapter candidate name must be {expected_name}")
+    if "python tools/pkc.py" not in content:
+        raise OperatorError("Adapter candidate must use the canonical wrapper: python tools/pkc.py")
+    forbidden = re.search(
+        r"(?im)^[ \t]*(?:[-*]\s+|\$\s+)?(?:run\s+|execute\s+)?(?:python\s+tools/pkc\.py\s+)?"
+        r"(git\s+(?:commit|push)|knowledge-plan|bundle-(?:approve|apply))\b", content)
+    if forbidden:
+        raise OperatorError(f"Adapter candidate contains a forbidden direct mutation command: {forbidden.group(1)}")
+    references = _adapter_references(root, config, args)
+    for values in references.values():
+        for value in values:
+            if value not in content:
+                raise OperatorError(f"Adapter candidate does not contain declared reference: {value}")
+    output = args.output.resolve()
+    if output == root or output.is_relative_to(root):
+        raise OperatorError("Adapter proposal output must stay outside the target project")
+    state = git_state(root)
+    plan = {"schema_version": 1, "operator_contract": CONTRACT, "kind": "pkc-adapter-proposal",
+            "target_root": str(root), "target_path": target_rel,
+            "created_from": {"head": state["head"], "status": state["status"]},
+            "current_sha256": digest_file(target), "candidate_sha256": digest_bytes(content.encode()),
+            "candidate_content": content, "references": references, "evaluation_status": "not_evaluated",
+            "review_required": True,
+            "excluded": ["target project mutation", "Adapter application", "Authority or Memory changes",
+                         "root AGENTS.md changes", "Git commit/push", "isolated evaluation"]}
+    plan["plan_hash"] = plan_hash(plan)
+    output.parent.mkdir(parents=True, exist_ok=True)
+    output.write_text(json.dumps(plan, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
+    return {"ok": True, "command": "plan-adapter", "plan_file": str(output),
+            "plan_hash": plan["plan_hash"], "target": str(root), "target_path": target_rel,
+            "current_sha256": plan["current_sha256"], "candidate_sha256": plan["candidate_sha256"],
+            "references": references, "evaluation_status": "not_evaluated",
+            "next": "show the exact candidate diff and plan hash to a human; this command cannot apply it", "errors": []}
+
+
 def command_plan_upgrade(args: argparse.Namespace) -> dict[str, Any]:
     root = git_root(args.target.resolve())
     existing = inspect_target(root)
@@ -521,6 +598,8 @@ def quarantine_failed_runtime(root: Path, runtime: Path, plan_hash_value: str) -
 
 def command_apply(args: argparse.Namespace) -> dict[str, Any]:
     plan = json.loads(args.plan.read_text(encoding="utf-8"))
+    if plan.get("kind") not in {"pkc-install", "pkc-adopt", "pkc-upgrade"}:
+        raise OperatorError(f"apply-plan does not support plan kind: {plan.get('kind')}")
     actual = plan_hash(plan)
     if plan.get("plan_hash") != actual or args.plan_hash != actual:
         raise OperatorError("plan hash mismatch")
@@ -703,6 +782,10 @@ def parser() -> argparse.ArgumentParser:
     plan.add_argument("--remote", default=DEFAULT_REMOTE); plan.add_argument("--ref", default="main"); plan.add_argument("--project-id")
     adopt = sub.add_parser("plan-adopt"); adopt.add_argument("--target", type=Path, required=True); adopt.add_argument("--output", type=Path, required=True)
     adopt.add_argument("--remote", default=DEFAULT_REMOTE); adopt.add_argument("--ref", default="main")
+    adapter = sub.add_parser("plan-adapter"); adapter.add_argument("--target", type=Path, required=True)
+    adapter.add_argument("--candidate", type=Path, required=True); adapter.add_argument("--output", type=Path, required=True)
+    adapter.add_argument("--context", action="append", default=[]); adapter.add_argument("--node", action="append", default=[])
+    adapter.add_argument("--topic", action="append", default=[]); adapter.add_argument("--path", action="append", default=[])
     upgrade = sub.add_parser("plan-upgrade"); upgrade.add_argument("--target", type=Path, required=True)
     upgrade.add_argument("--source-repository", required=True); upgrade.add_argument("--source-commit", required=True)
     upgrade.add_argument("--output", type=Path, required=True)
@@ -721,6 +804,7 @@ def main(argv: list[str] | None = None) -> int:
         if args.command == "inspect": payload = inspect_target(args.target)
         elif args.command == "plan-install": payload = command_plan(args)
         elif args.command == "plan-adopt": payload = command_plan_adopt(args)
+        elif args.command == "plan-adapter": payload = command_plan_adapter(args)
         elif args.command == "plan-upgrade": payload = command_plan_upgrade(args)
         elif args.command == "apply-plan": payload = command_apply(args)
         elif args.command == "status": payload = command_status(args)
