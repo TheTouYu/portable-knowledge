@@ -64,12 +64,12 @@ bundle-inspect 保持 bundles 数组输出形状，并在每个 Bundle 记录的
 
 <!-- CLAIM:START clm_A8BA119B3C73E21DEB488EE768 -->
 
-### Adapter 提案保持只读并等待独立评测
+### Adapter 提案经精确审查后独立应用并等待评测
 
-pkc-project-operator 的 plan-adapter 会针对配置中的项目 Adapter 生成确定、可审查的外部提案，静态核对声明的 Context、Node、Topic 和项目路径、canonical wrapper 与直接 mutation 禁令；它不修改目标项目，提案状态固定为 not_evaluated，且 apply-plan 不接受该提案类型。
+pkc-project-operator 的 plan-adapter 会在目标项目外生成确定、可审查且状态为 not_evaluated 的 Adapter 提案；人工查看候选差异并确认完整 plan_hash 后，独立的 apply-adapter 会在 proposal hash、Git 状态、配置路径、当前文件 hash 和候选内容 hash 均未漂移时只替换配置的 Adapter 文件，而通用 apply-plan 仍不接受该提案类型。
 
 #### 适用边界
 
-这只描述 first-use 后 Adapter 候选的静态提案和人工审查边界；不表示候选已被应用、已通过 isolated task evaluation，也不证明真实项目、生产、游戏或编译器行为。
+这只描述 first-use 后 Adapter 候选的静态提案和人工审查后 tracked-file 应用边界；成功应用仍保持 not_evaluated，不运行 isolated task evaluation，不修改 Authority、Memory、runtime 或其他项目文件，也不证明真实项目、生产、游戏或编译器行为；Git commit/push 仍需单独人工决定。
 
 <!-- CLAIM:END clm_A8BA119B3C73E21DEB488EE768 -->
