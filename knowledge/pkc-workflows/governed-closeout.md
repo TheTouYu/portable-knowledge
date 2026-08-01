@@ -64,12 +64,14 @@ bundle-inspect 保持 bundles 数组输出形状，并在每个 Bundle 记录的
 
 <!-- CLAIM:START clm_A8BA119B3C73E21DEB488EE768 -->
 
-### Adapter 提案经精确审查后独立应用并等待评测
+### Adapter 经精确审查应用后按约定 isolated cases 评测
 
-pkc-project-operator 的 plan-adapter 会在目标项目外生成确定、可审查且状态为 not_evaluated 的 Adapter 提案；人工查看候选差异并确认完整 plan_hash 后，独立的 apply-adapter 会在 proposal hash、Git 状态、配置路径、当前文件 hash 和候选内容 hash 均未漂移时只替换配置的 Adapter 文件，而通用 apply-plan 仍不接受该提案类型。
+### Adapter 经精确审查应用后按约定 isolated cases 评测
+
+pkc-project-operator 的 plan-adapter 会在目标项目外生成确定、可审查且状态为 not_evaluated 的 Adapter 提案；人工查看完整候选差异并确认 plan_hash 后，apply-adapter 只应用该精确候选。随后，evaluate-adapter 仅对已经应用且 hash 匹配的 Adapter 运行人工预先确认、由 cases_hash 锁定的 capability 与 boundary isolated cases，逐项记录结果、tool errors、cost、latency 和 workspace-change status；只有全部约定 cases 的进程、runner、显式输出断言及只读门均通过时，独立 evaluation record 才标记 evaluated。
 
 #### 适用边界
 
-这只描述 first-use 后 Adapter 候选的静态提案和人工审查后 tracked-file 应用边界；成功应用仍保持 not_evaluated，不运行 isolated task evaluation，不修改 Authority、Memory、runtime 或其他项目文件，也不证明真实项目、生产、游戏或编译器行为；Git commit/push 仍需单独人工决定。
+原 Adapter proposal 保持 not_evaluated，评测记录只证明精确 Adapter hash、精确 cases hash 和精确 provider/model/thinking 组合通过了这些 isolated tasks。静态检查、应用成功、generic runner ok、synthetic fixture 或单次模型输出都不证明真实项目、生产、游戏、编译器或其他真实环境行为；评测不修改 Adapter、Authority、Memory、runtime 或 Git，也不 commit/push。
 
 <!-- CLAIM:END clm_A8BA119B3C73E21DEB488EE768 -->
