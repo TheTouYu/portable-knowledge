@@ -78,6 +78,27 @@ class BundleContractTests(unittest.TestCase):
             self.assertFalse((self.root/'data/knowledge/bundles').exists())
             self.assertFalse((self.root/'data/store/bundles').exists())
 
+    def test_bundle_inspect_human_review_contains_semantics_and_exact_hash(self):
+        shutil.copytree(PACKAGE/'tests/fixtures/minimal',self.root,dirs_exist_ok=True,ignore=shutil.ignore_patterns('.local'))
+        bundle=seal_preflight(build_bundle(self.root,self.manifest,IDENTITIES),[])
+        directory=self.root/'data/knowledge/bundles'; directory.mkdir(parents=True)
+        (directory/f"{bundle['bundle_id']}.json").write_text(json.dumps(bundle),encoding='utf-8')
+        stream=io.StringIO()
+        with contextlib.redirect_stdout(stream): result=main(['--root',str(self.root),'bundle-inspect',bundle['bundle_id'],'--format','text'])
+        output=stream.getvalue()
+        self.assertEqual(result,0)
+        self.assertIn(bundle['content_hash'],output)
+        self.assertIn('only approval credential',output)
+        self.assertIn('Semantic diff:',output)
+        self.assertIn('Permission effect: none',output)
+        self.assertIn('Operations: {"replace": 1}',output)
+        stream=io.StringIO()
+        with contextlib.redirect_stdout(stream): result=main(['--root',str(self.root),'bundle-status',bundle['bundle_id']])
+        status=json.loads(stream.getvalue())
+        self.assertEqual(result,0)
+        self.assertEqual(status['count'],1)
+        self.assertEqual(status['bundles'][0]['bundle_id'],bundle['bundle_id'])
+
     def test_bundle_lifecycle_projection_is_append_only_and_preserves_supersede(self):
         old=seal_preflight(build_bundle(self.root,self.manifest,IDENTITIES),[])
         revised={**self.manifest,'intent':'Correct the invalid draft'}

@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import math
 import re
+import shlex
 from typing import Any
 
 
@@ -145,7 +146,8 @@ def _dynamic_route(config: dict[str, Any], registry: dict[str, Any], *, context_
     if not candidates:
         failure = "out_of_context" if outside_candidates and outside_candidates[0]["confidence"] >= confidence_threshold else "coverage_gap"
         raise RetrievalError(f"dynamic retrieval {failure}: {intent}", "RETRIEVAL_CANDIDATE_UNKNOWN",
-                             details={"failure_type": failure, "candidate_topics": outside_candidates[:3] if failure == "out_of_context" else []})
+                             details={"failure_type": failure, "candidate_topics": outside_candidates[:3] if failure == "out_of_context" else [],
+                                      **({"recommended_commands": ["pkc tree --format text"]} if failure == "coverage_gap" else {})})
     confidence = float(candidates[0]["confidence"])
     second_raw = float(candidates[1]["raw_score"]) if len(candidates) > 1 else 0.0
     margin = float(candidates[0]["raw_score"]) - second_raw
@@ -155,7 +157,11 @@ def _dynamic_route(config: dict[str, Any], registry: dict[str, Any], *, context_
         item["score_ratio"] = round(ratio, 6) if math.isfinite(ratio) else None
     if confidence < confidence_threshold:
         raise RetrievalError(f"dynamic retrieval coverage gap: {intent}", "RETRIEVAL_CANDIDATE_UNKNOWN",
-                             details={"failure_type": "coverage_gap", "candidate_topics": candidates[:3], "confidence": confidence, "margin": margin})
+                             details={"failure_type": "coverage_gap", "candidate_topics": candidates[:3], "confidence": confidence, "margin": margin,
+                                      "recommended_commands": [
+                                          f"pkc query {shlex.quote(intent)} --level 2 --topic {shlex.quote(item['id'])} --format json"
+                                          for item in candidates[:3]
+                                      ]})
     top_topic = next(topic for topic in registry.get("topics", []) if topic.get("id") == candidates[0]["id"])
     top_identity = _topic_fields(top_topic, {node.get("id"): node for node in registry.get("nodes", [])}.get(top_topic.get("node_id"), {}), registry.get("claims", []))["identity"]
     has_distinctive_evidence = bool(candidates[0]["distinctive_terms"]) or len(_terms(intent).intersection(top_identity)) >= 2
@@ -189,7 +195,7 @@ def build_progressive_scope(config: dict[str, Any], registry: dict[str, Any], *,
     linked_nodes = {item.get("node_id") for item in config.get("relations", {}).get("context_nodes", []) if item.get("context_id") == context_id}
     if not linked_nodes:
         raise RetrievalError(f"context has no linked knowledge nodes: {context_id}", "RETRIEVAL_CANDIDATE_UNKNOWN",
-                             details={"failure_type": "coverage_gap"})
+                             details={"failure_type": "coverage_gap", "recommended_commands": ["pkc tree --format text"]})
 
     strategy, candidate_topics, confidence, margin = "explicit_route", [], 1.0, 1.0
     try:

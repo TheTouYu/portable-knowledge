@@ -204,10 +204,12 @@ pkc rebuild
 pkc validate
 pkc query "representative question" --level 2 --format json
 pkc bundle-inspect BUNDLE_ID --format json
-pkc bundle-status --format json
+pkc bundle-status BUNDLE_ID --format json
 ```
 
-`bundle-status` takes no positional Bundle ID. Use `bundle-inspect BUNDLE_ID` for one Bundle.
+`bundle-status [BUNDLE_ID]` supports either aggregate lifecycle listing or one Bundle. `bundle-inspect BUNDLE_ID` remains the richer semantic review surface.
+
+`knowledge-plan inspect` classifies non-current Authority References as `plan_affected` or `historical`. Historical debt remains blocking, but the preview lists those Ref IDs separately and recommends a dedicated `authority_maintenance` plan followed by `knowledge-plan rebase`; this keeps unrelated maintenance out of the current Bundle without weakening full preflight.
 
 ## Fail-closed outcomes
 

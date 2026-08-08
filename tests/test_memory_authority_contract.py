@@ -91,6 +91,11 @@ class MemoryAuthorityContractTests(unittest.TestCase):
   self.assertEqual(outside.exception.details["failure_type"],"out_of_context")
   with self.assertRaises(RetrievalError) as gap: build_progressive_scope(base,registry,context_id="static",intent="employee payroll vacation policy",limit=3)
   self.assertEqual(gap.exception.details["failure_type"],"coverage_gap")
+  self.assertEqual(gap.exception.details["recommended_commands"],["pkc tree --format text"])
+  strict={**base,"retrieval":{"dynamic":{"candidate_limit":5,"confidence_threshold":0.99},"intent_routes":[]}}
+  with self.assertRaises(RetrievalError) as low_confidence:
+   build_progressive_scope(strict,registry,context_id="static",intent="position detail",limit=3)
+  self.assertIn("--topic position",low_confidence.exception.details["recommended_commands"][0])
 
  def test_dynamic_retrieval_uses_raw_score_distinctive_terms_and_context_idf(self):
   config={"memory":{"contexts":[{"id":"composite","lifecycle":"active"},{"id":"other","lifecycle":"active"}]},"relations":{"context_nodes":[{"context_id":"composite","node_id":"composite-node"},{"context_id":"other","node_id":"outside"}]},"retrieval":{"dynamic":{"candidate_limit":5,"confidence_threshold":0.2,"margin_threshold":0.2,"ratio_threshold":1.2},"intent_routes":[]}}

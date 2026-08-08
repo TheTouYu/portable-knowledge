@@ -31,7 +31,7 @@ from typing import Any, Iterable, Iterator
 
 from .instance import Instance, InstanceError, load_instance, validate_project_memory
 from .bundle import BundleError, apply_bundle, approval, build_bundle, bundle_paths, canonical as bundle_json, capture_bundle_draft, enforce_production_provenance, lifecycle_path, lifecycle_projection, rollback_bundle, seal_preflight, verify_bundle
-from .authority import (FACT_CLASSES, AuthorityRegistryError, authority_refs_from_document, observe_authority_refs, validate_authority_conflicts, validate_authority_coverage, validate_authority_ref)
+from .authority import (FACT_CLASSES, POLICIES, AuthorityRegistryError, authority_refs_from_document, observe_authority_refs, validate_authority_conflicts, validate_authority_coverage, validate_authority_ref)
 from .retrieval import RetrievalError, build_progressive_scope
 from .experience import (ExperienceError, authorized_claims, build_vector_index, evaluate_cases,
                          freshness_markers, search_knowledge, upstream_freshness)
@@ -1708,6 +1708,11 @@ def bundle_inspect_command(root: Path, bundle_id: str | None, state: str | None 
         bundle = read_json(bundle_path); verify_bundle(bundle)
         projected = lifecycle_projection(bundle, approved=approval_path.is_file(), applied=receipt_path.is_file(), events=_lifecycle_events(root, value))
         item = {"bundle_id": value, "content_hash": bundle["content_hash"], "approved": approval_path.is_file(), "applied": receipt_path.is_file(),
+                "intent": bundle["intent"], "semantic_diff": bundle["semantic_diff"],
+                "evidence_refs": bundle["evidence_refs"], "authority_refs": bundle["authority_refs"],
+                "permission_effect": bundle["permission_effect"], "risk": bundle["risk"],
+                "operation_counts": {operation: sum(action["operation"] == operation for action in bundle["actions"])
+                                     for operation in sorted({action["operation"] for action in bundle["actions"]})},
                 "expected_changed_files": bundle["expected_changed_files"],
                 "lifecycle_files": {"bundle": relpath(root, bundle_path), "approval": relpath(root, approval_path),
                                     "applied": relpath(root, receipt_path)}, **projected}
@@ -1873,16 +1878,19 @@ def knowledge_check_command(root: Path, instance: Instance, semantic: bool) -> d
         status = item.get("effective_status")
         if status != "current":
             warnings.append(f"Authority {status}: {item.get('path')} ({item.get('id', 'unidentified')}); review linked Claims, do not auto-rewrite")
-    evaluation: dict[str, Any] = {"passed": 0, "total": 0, "rows": []}
-    try:
-        evaluation = evaluate_cases(root, instance, semantic,
-            lambda query, terms, permission, limit, use_semantic: knowledge_search_command(root, instance, query, terms, permission, limit, use_semantic))
-        failed = [row["id"] for row in evaluation["rows"] if not row["pass"]]
-        if failed: failures.append("retrieval regressions failed: " + ", ".join(failed))
-        for row in evaluation["rows"]:
-            warnings.extend(f"{row['id']}: {warning}" for warning in row["warnings"])
-    except ExperienceError as exc:
-        failures.append(f"retrieval evaluation unavailable: {exc}"); environment_failure = environment_failure or exc.environment
+    evaluation: dict[str, Any] = {"status": "NOT_CONFIGURED", "skipped": True, "passed": 0, "total": 0, "rows": []}
+    if (instance.raw.get("evaluation") or {}).get("cases_path"):
+        try:
+            evaluation = evaluate_cases(root, instance, semantic,
+                lambda query, terms, permission, limit, use_semantic: knowledge_search_command(root, instance, query, terms, permission, limit, use_semantic))
+            evaluation.update({"status": "PASS" if evaluation["passed"] == evaluation["total"] else "FAIL", "skipped": False})
+            failed = [row["id"] for row in evaluation["rows"] if not row["pass"]]
+            if failed: failures.append("retrieval regressions failed: " + ", ".join(failed))
+            for row in evaluation["rows"]:
+                warnings.extend(f"{row['id']}: {warning}" for warning in row["warnings"])
+        except ExperienceError as exc:
+            failures.append(f"retrieval evaluation unavailable: {exc}"); environment_failure = environment_failure or exc.environment
+            evaluation.update({"status": "UNAVAILABLE", "skipped": False})
     warnings = list(dict.fromkeys(warnings))
     proof = experience.get("proof_boundary", "This read-only check does not prove later external-system behavior.")
     return {"ok": not failures, "command": "knowledge-check", "status": "PASS" if not failures else "FAIL",
@@ -1912,7 +1920,8 @@ def output(payload: dict[str, Any], fmt: str) -> None:
         print(f"Runtime: {payload.get('runtime_version')} / Core: {payload.get('core_version')}")
         print(f"Nodes/Topics/Claims: {counts.get('nodes', 0)}/{counts.get('topics', 0)}/{counts.get('claims', 0)}")
         print(f"Memory freshness: {payload.get('memory_freshness')}")
-        print(f"Retrieval cases: {evaluation.get('passed', 0)}/{evaluation.get('total', 0)} (Topic@{evaluation.get('topic_top_n', 3)}, Claim@{evaluation.get('claim_top_n', 5)})")
+        print(f"Retrieval evaluation: {evaluation.get('status', 'UNKNOWN')}" +
+              ("" if evaluation.get("skipped") else f"; cases {evaluation.get('passed', 0)}/{evaluation.get('total', 0)} (Topic@{evaluation.get('topic_top_n', 3)}, Claim@{evaluation.get('claim_top_n', 5)})"))
         print(f"Authority refs current/pending: {authority.get('current', 0)}/{authority.get('pending_review', 0)}")
         for warning in payload.get("warnings", []): print(f"WARNING: {warning}")
         for failure in payload.get("failures", []): print(f"BLOCKING: {failure}")
@@ -1942,12 +1951,15 @@ def output(payload: dict[str, Any], fmt: str) -> None:
         for ref in payload.get("authority_refs", []):
             print(f"  - {ref.get('authority_ref_id')}: {ref.get('path')} ({ref.get('role')}) claims={ref.get('claim_ids')}")
         preview = payload.get("closeout_preview", {})
-        print(f"Closeout health: {preview.get('health')} (affected authority refs: {preview.get('authority_ref_counts', {}).get('affected', 0)})")
+        print(f"Closeout health: {preview.get('health')} (affected authority refs: {preview.get('authority_ref_counts', {}).get('affected', 0)}; "
+              f"plan affected: {preview.get('authority_ref_counts', {}).get('plan_affected', 0)}; historical: {preview.get('authority_ref_counts', {}).get('historical', 0)})")
         for ref in preview.get("affected_authority_refs", []):
-            print(f"  * {ref.get('change')} {ref.get('authority_ref_id')}: {ref.get('path')}")
+            print(f"  * {ref.get('change')} [{ref.get('scope', 'plan_affected')}] {ref.get('authority_ref_id')}: {ref.get('path')}")
     elif not payload.get("ok"):
         for error in payload.get("errors", []):
             print(f"ERROR [{error.get('code', 'ERROR')}] {error.get('path', '.')}: {error.get('message', '')}")
+            for recommendation in error.get("recommended_commands", []):
+                print(f"NEXT: {recommendation}")
     elif payload.get("command") == "tree":
         print("OK: tree")
         print("Knowledge tree")
@@ -1955,6 +1967,21 @@ def output(payload: dict[str, Any], fmt: str) -> None:
             print(f"{node.get('id')} — {node.get('name')}")
             for topic in node.get("topics", []):
                 print(f"  └─ {topic.get('id')} — {topic.get('title')} ({topic.get('claim_count', 0)} claims)")
+    elif payload.get("command") in {"bundle-inspect", "bundle-status"}:
+        print(f"OK: {payload.get('command')}")
+        print(f"count: {payload.get('count', 0)}")
+        for bundle in payload.get("bundles", []):
+            print(f"Bundle: {bundle['bundle_id']}")
+            print(f"  Content hash (only approval credential): {bundle['content_hash']}")
+            print(f"  State: {bundle['state']} (approved: {bundle['approved']}, applied: {bundle['applied']})")
+            print(f"  Intent: {bundle['intent']}")
+            print(f"  Semantic diff: {json.dumps(bundle['semantic_diff'], ensure_ascii=False, sort_keys=True)}")
+            print(f"  Evidence refs: {', '.join(bundle['evidence_refs']) or '(none)'}")
+            print(f"  Authority refs: {', '.join(bundle['authority_refs']) or '(none)'}")
+            print(f"  Permission effect: {bundle['permission_effect']}")
+            print(f"  Risk: {bundle['risk']}")
+            print(f"  Operations: {json.dumps(bundle['operation_counts'], sort_keys=True)}")
+            print(f"  Expected changed files: {', '.join(bundle['expected_changed_files']) or '(none)'}")
     elif payload.get("command") == "progressive-query":
         print(f"Context: {payload.get('context', {}).get('id')}")
         print(f"Intent: {payload.get('intent') or '(dynamic)'}")
@@ -2150,6 +2177,7 @@ def parser_build() -> argparse.ArgumentParser:
     bundle_inspect = command("bundle-inspect")
     bundle_inspect.add_argument("bundle_id", nargs="?")
     bundle_status = command("bundle-status")
+    bundle_status.add_argument("bundle_id", nargs="?", help="optional Bundle ID for a single lifecycle status")
     bundle_status.add_argument("--state", choices=("draft", "approved", "applied", "failed", "abandoned", "superseded", "rolled_back"))
     bundle_supersede = mutation("bundle-supersede")
     bundle_supersede.add_argument("bundle_id")
@@ -2204,7 +2232,7 @@ def parser_build() -> argparse.ArgumentParser:
     plan_ref = plan_command("add-authority-ref")
     plan_ref.add_argument("plan_id"); plan_ref.add_argument("--claim-id", required=True)
     plan_ref.add_argument("--path", required=True); plan_ref.add_argument("--locator", required=True)
-    plan_ref.add_argument("--role", required=True); plan_ref.add_argument("--change-policy", required=True)
+    plan_ref.add_argument("--role", required=True); plan_ref.add_argument("--change-policy", choices=tuple(sorted(POLICIES)), required=True)
     plan_ref.add_argument("--fact-class", choices=FACT_CLASSES, action="append", default=[])
     plan_ref.add_argument("--diagnostic-hash")
     plan_refresh_ref = plan_command("refresh-authority-ref")
@@ -2299,7 +2327,7 @@ def main(argv: list[str] | None = None) -> int:
         elif args.command == "bundle-approve": payload = bundle_approve_command(root, args, instance)
         elif args.command == "bundle-apply": payload = bundle_apply_command(root, args, instance)
         elif args.command == "bundle-inspect": payload = bundle_inspect_command(root, args.bundle_id)
-        elif args.command == "bundle-status": payload = {**bundle_inspect_command(root, None, args.state), "command": "bundle-status"}
+        elif args.command == "bundle-status": payload = {**bundle_inspect_command(root, args.bundle_id, args.state), "command": "bundle-status"}
         elif args.command == "bundle-supersede": payload = bundle_supersede_command(root, args)
         elif args.command == "bundle-recover": payload = bundle_recover_command(root, args.bundle_id, instance)
         elif args.command == "bundle-rollback": payload = bundle_rollback_command(root, args, instance)

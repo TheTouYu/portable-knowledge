@@ -123,6 +123,8 @@ Run the single offline, read-only check:
 pkc knowledge-check --format text
 ```
 
+When `evaluation.cases_path` is absent, retrieval evaluation is reported as `NOT_CONFIGURED`/skipped while Authority, Memory, tree, and freshness checks still receive their own verdict. An invalid configured evaluation remains a failure.
+
 It never rebuilds, modifies authority, creates a Bundle, or accesses the network. Stable outcomes are `0` pass, `1` project knowledge/regression failure, and `2` unavailable environment/configuration. Authority or upstream changes produce review warnings and never auto-rewrite Claims.
 
 Optional embeddings use only `VECTORENGINE_API_KEY`, `VECTORENGINE_BASE_URL`, and `VECTORENGINE_EMBEDDING_MODEL` from the process environment or ignored project `.env`:

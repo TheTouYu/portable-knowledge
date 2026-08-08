@@ -736,14 +736,18 @@ def finalize(root: Path, instance: Instance, args: argparse.Namespace) -> dict[s
                       "evaluator_contract_version": contract["contract_version"], "runtime_version": _runtime_version()}
                      for case_id in records["failed_case_ids"]]
         changed_paths = set(plan.get("writes", {}))
+        changed_claim_ids = _plan_affected_claim_ids(plan)
         for ref in records["authority_records"]:
             status = ref.get("effective_status", ref.get("status"))
             if status in {"current", "fresh"}:
                 continue
+            authority_scope = "plan_affected" if (ref.get("path") in changed_paths or changed_claim_ids.intersection(ref.get("claim_ids", []))) else "historical"
             findings.append({"code": "PLAN_AUTHORITY_STAGED_DRIFT" if ref.get("path") in changed_paths else "PLAN_FULL_AUTHORITY_NOT_CURRENT",
                              "path": ref.get("path", "authority_ref"),
-                             "message": f"Authority Reference {ref.get('id', 'unknown')} is not current during full staged preflight: {status}",
-                             "authority_ref_id": ref.get("id"), "claim_ids": ref.get("claim_ids", []),
+                             "message": f"Authority Reference {ref.get('id', 'unknown')} is not current during full staged preflight: {status} ({authority_scope})",
+                             "authority_ref_id": ref.get("id"), "claim_ids": ref.get("claim_ids", []), "authority_scope": authority_scope,
+                             "blocking": True,
+                             "recommended_action": "Review and refresh or retire this Ref; historical refs may use a separate authority-maintenance plan, then rebase this open plan.",
                              "baseline_status": ref.get("baseline_status"), "working_tree_status": ref.get("working_tree_status"),
                              "effective_status": status, "expected_hash": ref.get("expected_hash", ref.get("approved_hash")),
                              "observed_hash": ref.get("observed_hash"), "staged_by_current_plan": ref.get("path") in changed_paths})
@@ -810,6 +814,12 @@ def record_post_apply_full_check(root: Path, instance: Instance, bundle: dict[st
     return receipt
 
 
+def _plan_affected_claim_ids(plan: dict[str, Any]) -> set[str]:
+    return (set(plan.get("claims", {})) | set(plan.get("existing_claim_changes", {})) |
+            {claim_id for operation in plan.get("operations", []) if operation.get("operation_type") == "move_topic"
+             for claim_id in operation.get("claim_ids", [])})
+
+
 def _affected_authority_refs(root: Path, instance: Instance, plan: dict[str, Any], required_paths: set[str] | None = None) -> list[dict[str, Any]]:
     report = []
     for ref in plan.get("authority_refs", []):
@@ -838,6 +848,7 @@ def _affected_authority_refs(root: Path, instance: Instance, plan: dict[str, Any
         reported = {item["authority_ref_id"] for item in report}
         writes = _decode_writes(plan)
         required_paths = required_paths or set()
+        changed_claim_ids = _plan_affected_claim_ids(plan)
         for ref in existing:
             if ref.get("id") in reported or ref.get("path") not in set(writes) | required_paths:
                 continue
@@ -853,9 +864,12 @@ def _affected_authority_refs(root: Path, instance: Instance, plan: dict[str, Any
             status = ref.get("effective_status")
             if status in {"current", "fresh"} or ref.get("id") in reported:
                 continue
-            report.append({"authority_ref_id": ref["id"], "change": "external_invalidated", "path": ref["path"],
+            report.append({"authority_ref_id": ref["id"], "change": "external_invalidated", "scope": "plan_affected" if
+                           (ref.get("path") in set(writes) | required_paths or changed_claim_ids.intersection(ref.get("claim_ids", []))) else "historical",
+                           "blocking": True, "path": ref["path"],
                            "old_hash": ref.get("expected_hash"), "new_hash": ref.get("observed_hash"),
                            "linked_claim_ids": ref.get("claim_ids", []),
+                           "recommended_action": "Review and add refresh-authority-ref or retire-authority-ref; use a separate authority-maintenance plan when unrelated to this change.",
                            "human_review_reason": f"Committed Authority changed outside this plan ({status}); refresh the reference before finalize."})
     return sorted(report, key=lambda item: (item["path"] or "", item["authority_ref_id"]))
 
@@ -889,14 +903,20 @@ def _closeout_preview(root: Path, instance: Instance, plan: dict[str, Any]) -> d
          "read_only": True, "mutation_required": False,
          "reason": "Current delta validation permits finalize" if delta.get("ok") and delta.get("delta_digest") == _content_digest(plan) else "A current successful delta check is required before finalize"},
     ]
-    counts = {"added": 0, "refreshed": 0, "retired": 0, "affected": len(affected_authority_refs)}
+    counts = {"added": 0, "refreshed": 0, "retired": 0, "affected": len(affected_authority_refs),
+              "plan_affected": sum(item.get("scope", "plan_affected") == "plan_affected" for item in affected_authority_refs),
+              "historical": sum(item.get("scope") == "historical" for item in affected_authority_refs)}
     for item in affected_authority_refs:
         if item["change"] in counts:
             counts[item["change"]] += 1
     delta_ready = bool(delta.get("ok") and delta.get("delta_digest") == _content_digest(plan))
     health = "PASS_WITH_REVIEW" if delta_ready and affected_authority_refs else "PASS" if delta_ready else "FAIL"
+    historical_ref_ids = [item["authority_ref_id"] for item in affected_authority_refs if item.get("scope") == "historical"]
     return {"read_only": True, "phases": phases, "affected_authority_refs": affected_authority_refs,
-            "authority_ref_counts": counts, "health": health}
+            "authority_ref_counts": counts,
+            "authority_maintenance": {"historical_ref_ids": historical_ref_ids, "blocking": bool(historical_ref_ids),
+                                      "recommended_action": "Review historical refs in a separate authority-maintenance plan, apply it with exact-hash approval, then rebase this open plan."},
+            "health": health}
 
 
 def inspect(root: Path, instance: Instance, args: argparse.Namespace) -> dict[str, Any]:

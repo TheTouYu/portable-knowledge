@@ -51,6 +51,10 @@ def plan_hash(plan: dict[str, Any]) -> str:
     return digest_bytes(canonical({k: v for k, v in plan.items() if k != "plan_hash"}).encode())
 
 
+def proposal_hash(proposal: dict[str, Any]) -> str:
+    return digest_bytes(canonical({k: v for k, v in proposal.items() if k != "proposal_hash"}).encode())
+
+
 def emit(payload: dict[str, Any]) -> int:
     print(json.dumps(payload, ensure_ascii=False, indent=2))
     return 0 if payload.get("ok") else 1
@@ -504,6 +508,62 @@ def command_plan_adapter(args: argparse.Namespace) -> dict[str, Any]:
             "next": "show the exact candidate diff and plan hash to a human; this command cannot apply it", "errors": []}
 
 
+def command_propose_evaluation_case(args: argparse.Namespace) -> dict[str, Any]:
+    root = git_root(args.target.resolve())
+    feedback_path = args.feedback.resolve()
+    if not feedback_path.is_file():
+        raise OperatorError(f"feedback gap file is missing: {feedback_path}")
+    try:
+        feedback = json.loads(feedback_path.read_text(encoding="utf-8"))
+    except (OSError, UnicodeDecodeError, json.JSONDecodeError) as exc:
+        raise OperatorError(f"feedback gap must be valid UTF-8 JSON: {exc}") from exc
+    if not isinstance(feedback, dict) or feedback.get("schema_version") != 1:
+        raise OperatorError("feedback gap must be a schema_version 1 object")
+    gap_id, query = feedback.get("gap_id"), feedback.get("query")
+    if not isinstance(gap_id, str) or not gap_id.strip() or not isinstance(query, str) or not query.strip():
+        raise OperatorError("feedback gap needs non-empty gap_id and query")
+    dimensions = ("expected_topic_ids", "expected_claim_ids", "forbidden_claim_ids")
+    case = {"id": gap_id.strip(), "query": query.strip()}
+    for field in dimensions:
+        value = feedback.get(field)
+        if value is not None:
+            if not isinstance(value, list) or any(not isinstance(item, str) or not item for item in value):
+                raise OperatorError(f"feedback gap {field} must be a list of non-empty strings")
+            case[field] = sorted(set(value))
+    if not any(field in case for field in dimensions):
+        raise OperatorError("feedback gap needs at least one bounded expected or forbidden assertion")
+    evidence_boundary = feedback.get("evidence_boundary", "mechanism_only")
+    if evidence_boundary not in {"mechanism_only", "synthetic_fixture", "real_project_feedback"}:
+        raise OperatorError("evidence_boundary must be mechanism_only, synthetic_fixture, or real_project_feedback")
+    outputs = (args.output.resolve(), args.review_output.resolve())
+    if any(path == root or path.is_relative_to(root) for path in outputs):
+        raise OperatorError("evaluation-case proposal outputs must stay outside the target project")
+    proposal = {
+        "schema_version": 1, "operator_contract": CONTRACT, "kind": "pkc-evaluation-case-proposal",
+        "gap_id": case["id"], "case": case, "source_feedback": str(feedback_path),
+        "feedback_summary": feedback.get("feedback", ""), "evidence_boundary": evidence_boundary,
+        "evaluation_status": "not_evaluated", "project_write": False, "review_required": True,
+        "excluded": ["project evaluation-case mutation", "Claims, Authority, Memory, Adapter, or runtime mutation",
+                     "retrieval ranking changes", "Bundle approval or application", "evaluator execution"],
+    }
+    proposal["proposal_hash"] = proposal_hash(proposal)
+    review = [
+        "Evaluation-case proposal (human review required)", f"Gap: {case['id']}", f"Query: {case['query']}",
+        *[f"{field}: {', '.join(case.get(field, [])) or '(none)'}" for field in dimensions],
+        f"Evidence boundary: {evidence_boundary}", "Project write: no", "Evaluation status: not_evaluated",
+        "Synthetic fixtures prove mechanism only; they are not real-project or production evidence.",
+        f"Proposal hash (not a Bundle approval credential): {proposal['proposal_hash']}",
+    ]
+    for path in outputs:
+        path.parent.mkdir(parents=True, exist_ok=True)
+    outputs[0].write_text(json.dumps(proposal, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
+    outputs[1].write_text("\n".join(review) + "\n", encoding="utf-8")
+    return {"ok": True, "command": "propose-evaluation-case", "proposal_file": str(outputs[0]),
+            "review_file": str(outputs[1]), "proposal_hash": proposal["proposal_hash"],
+            "evaluation_status": "not_evaluated", "project_write": False,
+            "next": "a human may separately choose whether to add this case to the owning project", "errors": []}
+
+
 def command_apply_adapter(args: argparse.Namespace) -> dict[str, Any]:
     plan = json.loads(args.plan.read_text(encoding="utf-8"))
     if plan.get("kind") != "pkc-adapter-proposal":
@@ -949,6 +1009,9 @@ def parser() -> argparse.ArgumentParser:
     adapter.add_argument("--candidate", type=Path, required=True); adapter.add_argument("--output", type=Path, required=True)
     adapter.add_argument("--context", action="append", default=[]); adapter.add_argument("--node", action="append", default=[])
     adapter.add_argument("--topic", action="append", default=[]); adapter.add_argument("--path", action="append", default=[])
+    evaluation_case = sub.add_parser("propose-evaluation-case"); evaluation_case.add_argument("--target", type=Path, required=True)
+    evaluation_case.add_argument("--feedback", type=Path, required=True); evaluation_case.add_argument("--output", type=Path, required=True)
+    evaluation_case.add_argument("--review-output", type=Path, required=True)
     upgrade = sub.add_parser("plan-upgrade"); upgrade.add_argument("--target", type=Path, required=True)
     upgrade.add_argument("--source-repository", required=True); upgrade.add_argument("--source-commit", required=True)
     upgrade.add_argument("--output", type=Path, required=True)
@@ -972,6 +1035,7 @@ def main(argv: list[str] | None = None) -> int:
         elif args.command == "plan-install": payload = command_plan(args)
         elif args.command == "plan-adopt": payload = command_plan_adopt(args)
         elif args.command == "plan-adapter": payload = command_plan_adapter(args)
+        elif args.command == "propose-evaluation-case": payload = command_propose_evaluation_case(args)
         elif args.command == "plan-upgrade": payload = command_plan_upgrade(args)
         elif args.command == "apply-plan": payload = command_apply(args)
         elif args.command == "apply-adapter": payload = command_apply_adapter(args)

@@ -79,6 +79,20 @@ python skills/pkc-project-operator/scripts/pkc_operator.py apply-adapter \
 
 `apply-adapter` fails closed on proposal hash, Git state, configured path, current-file hash, or candidate hash drift and replaces only the configured Adapter file. It leaves `evaluation_status: not_evaluated`, evaluation, Git commit/push, Authority, Memory, runtime, and other files separate. Runtime/global-Skill upgrades never replace a project Adapter.
 
+## Coverage-gap proposal after feedback
+
+Convert one explicit, reproducible feedback gap into an external review proposal without changing the owning project:
+
+```bash
+python skills/pkc-project-operator/scripts/pkc_operator.py propose-evaluation-case \
+  --target /path/to/project \
+  --feedback /tmp/feedback-gap.json \
+  --output /tmp/evaluation-case-proposal.json \
+  --review-output /tmp/evaluation-case-review.txt
+```
+
+The schema-version-1 feedback object supplies `gap_id`, `query`, at least one bounded `expected_topic_ids`, `expected_claim_ids`, or `forbidden_claim_ids` assertion, and an optional evidence boundary (`mechanism_only`, `synthetic_fixture`, or `real_project_feedback`). The deterministic proposal remains `not_evaluated`, stays outside the target project, and has no apply or evaluate command. Its proposal hash is a review aid, never a Bundle approval credential. A human separately decides whether to add the case to the owning project's configured evaluation cases. Synthetic fixtures prove mechanism only; proposal generation, static validation, or a generic runner success is not real-project, production, game, or compiler evidence.
+
 After application, a human may separately agree an exact case file containing at least one `capability` and one `boundary` case. Each case must define a task and explicit `final_contains` and/or `final_excludes` assertions. Run the cases in fresh contexts with the exact reviewed case hash:
 
 ```bash
@@ -177,7 +191,7 @@ Post-apply checks prove Bundle lifecycle, text authority, projection, routing, a
 
 Use `add-claim` for new knowledge, `revise-claim` for correction, and `move-topic` for ownership/path refactoring. Multi-Bundle orchestration (`bundle_migration_plan`, formerly the ambiguous `migration_plan`) is non-atomic across phases and is not structure migration.
 
-Valid Authority roles are `design_intent`, `current_implementation`, `documented_contract`, and `external_environment_behavior`. Valid fact classes are `runtime_behavior`, `public_type_surface`, `cli_behavior`, `documented_contract`, `external_game_evidence`, `transform_defaults`, `writeback_behavior`, and `evidence_scope`. A role and a fact class are different controlled vocabularies. `bundle-status` has no positional Bundle ID. Query text is positional; there is no `--text` option.
+Valid Authority roles are `design_intent`, `current_implementation`, `documented_contract`, and `external_environment_behavior`. Valid fact classes are `runtime_behavior`, `public_type_surface`, `cli_behavior`, `documented_contract`, `external_game_evidence`, `transform_defaults`, `writeback_behavior`, and `evidence_scope`. A role and a fact class are different controlled vocabularies. `bundle-status [bundle-id]` supports aggregate or single-Bundle status. Query text is positional; there is no `--text` option.
 
 ## Human review language
 

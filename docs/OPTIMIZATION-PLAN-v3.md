@@ -1,6 +1,6 @@
 # PKC Optimization Plan v3
 
-Status: implementation-ready
+Status: WS-G, WS-B closeout, WS-D D1-D3, and WS-E E1 implemented; WS-F active
 Updated: 2026-08-01
 Supersedes: `docs/OPTIMIZATION-PLAN-v2.md` (kept as historical record)
 
@@ -44,9 +44,9 @@ baseline is recoverable without replaying operations.
 
 ## 4. Workstreams
 
-### WS-G: Second-session recovery and inspect surface (new, from W7–W12)
+### WS-G: Second-session recovery and inspect surface (completed)
 
-Priority: P0. First implementation round. Bounded to `pkc knowledge-plan`
+Completed in `c9738e4`. Bounded to `pkc knowledge-plan`
 (`init`, `rebase`, `add-claim`, `add-authority-ref`, `refresh-authority-ref`,
 `finalize`, `inspect`) help texts, error messages, one new non-destructive
 command, and inspect output. Excludes governance rules, Bundle immutability,
@@ -106,17 +106,22 @@ knowledge files only and `bundle-inspect` `lifecycle_files` lists the full
 apply/approve artifact set; one test asserts the combination covers every
 artifact a successful apply creates.
 
-### WS-D: Adapter maturity (carried forward from v2, unchanged)
+### WS-D: Adapter maturity (D1-D3 completed)
 
-Priority: P1, after first-use inputs/evaluation contract stable. Bootstrap
-Adapter → reviewed/evaluated Adapter: deterministic tracked proposal after
-first-use confirmation, static checks of concrete references only, reviewed
-diff before replacing routing, isolated-task evaluation marked evaluated only
-when agreed cases pass. Not started; no change planned in this round.
+Completed across `3a63c6b`, `281c15e`, and `af67bf9`. `plan-adapter` creates a
+deterministic external `not_evaluated` proposal with concrete-reference static
+checks. `apply-adapter` applies only the exact human-reviewed proposal and fails
+closed on proposal, Git, configured-path, current-file, or candidate-file hash
+drift. `evaluate-adapter` runs only human-confirmed, `cases_hash`-locked isolated
+cases against the exact applied Adapter and records cases, results, tool errors,
+cost, latency, and workspace changes in a separate evaluation record. It marks
+the Adapter evaluated only when every agreed case passes. Synthetic fixtures,
+static checks, application success, generic runner success, and one model output
+are not real-project, production, game, or compiler evidence.
 
 ### WS-E: Read-only federation
 
-Priority: P1/P2. Started after owner confirmation on 2026-08-01.
+Priority: P1/P2. E1 completed in `f5c4853`; its knowledge boundary was recorded in `7270ad6`.
 
 The first real topology is a three-project loop: the game project and compiler
 project use PKC for long-term memory and retrieval, while this knowledge project
@@ -143,25 +148,31 @@ Confirmed v1 contract:
 - v1 has no cross-project writes, Git mutation, semantic plans, remote service,
   cache, relation graph traversal, or Context-level filtering.
 
-Implementation slice E1 is `federation-search` only. The earlier relation
+Implementation slice E1 is the completed `federation-search` only. The earlier relation
 vocabulary (`produces`, `consumed_by`, `verifies`, `documents`, `supersedes`)
 is deferred until direct project search proves that relation traversal is
 needed. Acceptance requires focused registry/scope/permission/partial-result
 contracts, grouped JSON/text output, the full test suite, and a fixture
 walkthrough proving no target project files or projections are changed.
 
-### WS-F: Coverage-gap regression and human-readable Bundle review (carried forward from v2, unchanged)
+### WS-F: Coverage-gap regression and human-readable Bundle review
 
-Priority: P2, after WS-B and relevant project boundary work. Not started; no
-change planned in this round.
+Priority: P2. WS-B and the relevant WS-D/WS-E boundaries are complete. The
+minimum slice converts one explicit, reproducible feedback gap into a
+deterministic evaluation-case proposal outside the target project and adds a
+bounded human-readable Bundle projection. It does not write project evaluation
+cases, modify Claims, Authority, Memory, Adapter, runtime, or retrieval ranking,
+or run an evaluator. A proposal hash is only a review aid; the exact Bundle
+`content_hash` remains the only Bundle approval credential. Synthetic fixture
+evidence proves mechanism only.
 
 ## 5. Priorities and dependencies
 
 ```text
-WS-G (P0) → WS-B remainder (P1)
-WS-D (P1) after first-use inputs stable
-WS-E (P1/P2) after ownership/permission contracts explicit
-WS-F (P2) after WS-B and project boundary work
+WS-G complete → WS-B closeout complete
+WS-D D1-D3 complete
+WS-E E1 complete; relation traversal deferred
+WS-F minimum proposal/review slice active
 ```
 
 Every workstream has two gates:
@@ -192,25 +203,23 @@ dry-run stays a dry run.
 
 ## 7. Next implementation slice
 
-WS-G pass 1: G1 (rebase + stale-baseline remedy) + G2 (claim-missing
-distinction) + G3 (external invalidated refs in preview) + G4 (inspect
-summary) + G6 (QUICKSTART authority-before-init). G5 is a contract test only
-(the code already landed in v2).
+WS-F minimum slice: `propose-evaluation-case` turns one schema-version-1 feedback
+gap into deterministic JSON and human-readable review files outside the target
+project. `bundle-inspect --format text` displays semantic diff, evidence and
+Authority references, permission effect, risk, operation counts, affected
+paths, lifecycle state, and the exact Bundle content hash.
 
-Scope: `semantic_plan.py`, `core.py` text rendering, `tests/`, `docs/QUICKSTART.md`.
-No Core semantic changes, no plan-id logic changes, no inspect shape changes
-beyond additive fields.
+Scope: Operator script/mode contract, additive Bundle inspect fields/text, focused
+tests, and this ordinary plan. No project evaluation-case write, Claim,
+Authority, Memory, Adapter, runtime, retrieval-ranking, UI, DSL, database,
+cache, telemetry, dependency, evaluator, commit, or push change.
 
-Evidence gate for this slice:
+Evidence gate:
 
-- focused tests assert rebase success/conflict/noop, the claim-missing
-  distinction, external invalidated refs in the preview, inspect summary
-  fields, and the fact-class enum in help;
-- `python3 -m unittest tests.test_semantic_plan_contract tests.test_repository_contract tests.test_feedback_protocol` passes
-  (including the month-hard-coding fix);
-- one manual walkthrough of a fixture plan (`init` → commit → `add-claim` →
-  `PLAN_STALE_BASELINE` → `rebase` → `check` → `inspect --format text`) shows
-  no read of PKC source or plan JSON needed;
-- `git diff --check` clean.
-
-Stop for review before WS-B remainder and before any WS-D/E/F implementation.
+- focused tests prove deterministic proposal hashes, changed-input hash drift,
+  bounded assertions, external-only outputs, `not_evaluated`, zero target
+  project writes, synthetic evidence labeling, and exact-hash Bundle review;
+- the full test suite passes;
+- a fully `/tmp` synthetic fixture walkthrough proves mechanism and target
+  project immutability, not real-project retrieval correctness;
+- `git diff --check` is clean.

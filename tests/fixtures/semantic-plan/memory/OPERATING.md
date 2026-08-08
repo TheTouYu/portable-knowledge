@@ -27,7 +27,7 @@ For an explicitly authorized lifecycle transaction, the stable shapes are:
 - inspect one immutable Bundle: positional Bundle ID with `bundle-inspect`;
 - approve: positional Bundle ID plus required named option `--content-hash <exact-64-char-hash>` and `--apply`; optional actor options are only needed when the task requires an override;
 - apply: positional Bundle ID plus required named option `--content-hash <same-exact-hash>` and `--apply`; omitting `--apply` is only a dry-run and does not satisfy an authorized transaction;
-- inspect aggregate lifecycle: `bundle-status` takes no positional Bundle ID; use `bundle-inspect <bundle-id>` for one Bundle.
+- inspect lifecycle: `bundle-status [bundle-id]` supports aggregate or single-Bundle status; use `bundle-inspect <bundle-id>` for richer semantic review.
 
 ## Semantic-plan execution contract
 

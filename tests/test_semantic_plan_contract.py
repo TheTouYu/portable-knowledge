@@ -185,7 +185,8 @@ class SemanticPlanContractTests(unittest.TestCase):
             "linked_claim_ids": [claim_id],
             "human_review_reason": "A new Authority Reference requires exact-hash human review.",
         }])
-        self.assertEqual(preview["authority_ref_counts"], {"added": 1, "refreshed": 0, "retired": 0, "affected": 1})
+        self.assertEqual(preview["authority_ref_counts"], {"added": 1, "refreshed": 0, "retired": 0, "affected": 1,
+                                                            "plan_affected": 1, "historical": 0})
         self.assertEqual(preview["health"], "FAIL")
         self.assertEqual(plan_path.read_bytes(), before)
         self.assertEqual(list((self.root / "data/knowledge/bundles").glob("bnd_*.json")), [])
@@ -442,9 +443,21 @@ class SemanticPlanContractTests(unittest.TestCase):
         self.assertEqual(finding["expected_hash"], "0" * 64)
         self.assertEqual(len(finding["observed_hash"]), 64)
         self.assertFalse(finding["staged_by_current_plan"])
+        self.assertEqual(finding["authority_scope"], "historical")
         inspected = self.cli_process("knowledge-plan", "inspect", plan_id)
         self.assertEqual((inspected["state"], inspected["cost_counters"]["candidate_bundles"]), ("open", 0))
         self.assertEqual(self.formal_authority(), self.authority_before)
+
+    def test_knowledge_check_skips_unconfigured_retrieval_evaluation(self):
+        config_path = self.root / "project-intelligence.json"
+        config = json.loads(config_path.read_text(encoding="utf-8"))
+        config.pop("evaluation")
+        config_path.write_text(json.dumps(config, indent=2) + "\n", encoding="utf-8")
+        self.cli("rebuild")
+        checked = self.cli("knowledge-check")
+        self.assertEqual(checked["status"], "PASS")
+        self.assertEqual(checked["retrieval"]["status"], "NOT_CONFIGURED")
+        self.assertTrue(checked["retrieval"]["skipped"])
 
     def test_semantic_plan_error_with_empty_findings_uses_top_level_cli_error(self):
         with mock.patch("portable_knowledge.semantic_plan.dispatch_plan_command",
@@ -1115,6 +1128,13 @@ class SemanticPlanContractTests(unittest.TestCase):
         affected = inspected["closeout_preview"]["affected_authority_refs"]
         external = next(item for item in affected if item["authority_ref_id"] == "aref_external_stale")
         self.assertEqual(external["change"], "external_invalidated")
+        self.assertEqual(external["scope"], "historical")
+        self.assertTrue(external["blocking"])
+        self.assertEqual(inspected["closeout_preview"]["authority_ref_counts"]["historical"], 1)
+        maintenance = inspected["closeout_preview"]["authority_maintenance"]
+        self.assertEqual(maintenance["historical_ref_ids"], ["aref_external_stale"])
+        self.assertTrue(maintenance["blocking"])
+        self.assertIn("separate authority-maintenance plan", maintenance["recommended_action"])
         self.assertEqual(external["old_hash"], "0" * 64)
         self.assertEqual(len(external["new_hash"]), 64)
         self.assertIn("outside this plan", external["human_review_reason"])
@@ -1145,6 +1165,11 @@ class SemanticPlanContractTests(unittest.TestCase):
         for value in ("runtime_behavior", "public_type_surface", "cli_behavior", "documented_contract",
                       "external_game_evidence", "transform_defaults", "writeback_behavior", "evidence_scope"):
             self.assertIn(value, help_text)
+        ref_help = subprocess.run([sys.executable, "-m", "portable_knowledge.cli", "--root", str(self.root),
+                                   "knowledge-plan", "add-authority-ref", "--help"], cwd=PACKAGE, env=env,
+                                  text=True, encoding="utf-8", capture_output=True).stdout
+        for value in ("existence_only", "review_on_change", "invalidate_on_change", "manual_review"):
+            self.assertIn(value, ref_help)
 
 
 if __name__ == "__main__":

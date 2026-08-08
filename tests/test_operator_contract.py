@@ -185,6 +185,42 @@ class OperatorContractTests(unittest.TestCase):
         result = operator.command_plan_adapter(args)
         self.assertTrue(result["ok"])
 
+    def test_evaluation_case_proposal_is_deterministic_external_and_review_only(self):
+        feedback = Path(self.temp.name) / "gap.json"
+        feedback.write_text(json.dumps({"schema_version": 1, "gap_id": "gap-runtime", "query": "runtime boundary",
+                                        "expected_claim_ids": ["clm-runtime"], "evidence_boundary": "synthetic_fixture"}), encoding="utf-8")
+        output = Path(self.temp.name) / "proposal.json"
+        review = Path(self.temp.name) / "review.txt"
+        args = type("Args", (), {"target": self.root, "feedback": feedback, "output": output, "review_output": review})()
+        before = subprocess.run(["git", "status", "--porcelain=v1"], cwd=self.root, text=True, capture_output=True, check=True).stdout
+
+        first = operator.command_propose_evaluation_case(args)
+        second = operator.command_propose_evaluation_case(args)
+        proposal = json.loads(output.read_text(encoding="utf-8"))
+
+        self.assertEqual(first["proposal_hash"], second["proposal_hash"])
+        self.assertEqual(proposal["evaluation_status"], "not_evaluated")
+        self.assertFalse(proposal["project_write"])
+        self.assertEqual(proposal["evidence_boundary"], "synthetic_fixture")
+        self.assertIn("not a Bundle approval credential", review.read_text(encoding="utf-8"))
+        self.assertIn("not real-project or production evidence", review.read_text(encoding="utf-8"))
+        self.assertEqual(before, subprocess.run(["git", "status", "--porcelain=v1"], cwd=self.root, text=True, capture_output=True, check=True).stdout)
+        feedback.write_text(feedback.read_text().replace("runtime boundary", "changed boundary"), encoding="utf-8")
+        self.assertNotEqual(first["proposal_hash"], operator.command_propose_evaluation_case(args)["proposal_hash"])
+
+    def test_evaluation_case_proposal_rejects_unbounded_or_internal_output(self):
+        feedback = Path(self.temp.name) / "gap.json"
+        feedback.write_text(json.dumps({"schema_version": 1, "gap_id": "gap", "query": "query"}), encoding="utf-8")
+        args = type("Args", (), {"target": self.root, "feedback": feedback,
+                                  "output": Path(self.temp.name) / "proposal.json", "review_output": Path(self.temp.name) / "review.txt"})()
+        with self.assertRaisesRegex(operator.OperatorError, "at least one bounded"):
+            operator.command_propose_evaluation_case(args)
+        feedback.write_text(json.dumps({"schema_version": 1, "gap_id": "gap", "query": "query",
+                                        "forbidden_claim_ids": ["clm-wrong"]}), encoding="utf-8")
+        args.output = self.root / "proposal.json"
+        with self.assertRaisesRegex(operator.OperatorError, "outputs must stay outside"):
+            operator.command_propose_evaluation_case(args)
+
     def test_apply_plan_cannot_apply_an_adapter_proposal(self):
         plan = {"kind": "pkc-adapter-proposal"}
         path = Path(self.temp.name) / "plan.json"; path.write_text(json.dumps(plan), encoding="utf-8")
