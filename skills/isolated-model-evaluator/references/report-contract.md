@@ -16,9 +16,9 @@ Top-level fields:
     "timed_out": false
   },
   "model": {
-    "provider": "aijws",
-    "model": "gpt-5.6-luna",
-    "thinking": "medium"
+    "provider": "deepseek",
+    "model": "deepseek-v4-flash",
+    "thinking": "max"
   },
   "trace": {
     "assistant_turns": 8,

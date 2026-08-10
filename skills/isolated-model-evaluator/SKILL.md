@@ -1,10 +1,59 @@
 ---
 name: isolated-model-evaluator
-description: Run a fresh isolated Pi model context to verify whether a project conclusion, workflow, Skill, CLI, or documentation can be understood and executed without hidden conversation context; retain a JSONL trace and summarize tool calls, tool errors, cost, final answer, and workspace changes. Use when testing PKC usability, retrieval quality, project intelligence, documentation, agent workflows, or model performance across iterations.
+description: 把具体任务委派给一个全新的隔离 Pi 模型上下文去执行（子代理/独立模型），或评估技能/文档/工作流在无隐藏上下文下是否可用。当任务确定型、有明确验收、可写成任务文件、想节省主会话上下文或并行推进时（如派活、委派、子代理、独立模型、技术评估、验证技能/CLI/文档可用性、测试检索质量、模型对比），使用本技能。它启动一个无会话、无上下文、无自动技能的干净 Pi 进程，只加载指定的技能/工具，保留 JSONL trace 并汇总工具调用、错误、成本、最终答案与工作区变化。
 compatibility: Project skill for Pi and other Agent Skills-compatible harnesses; the bundled runner requires Python 3 and the pi CLI.
 ---
 
 # Isolated Model Evaluator
+
+Two equally valid uses, same runner:
+
+1. **Delegation（派活/子代理）**：把确定型任务交给独立模型执行，主模型只校验结果——节省主会话上下文、并行推进、避免上下文污染。
+2. **Evaluation（评估）**：验证技能/CLI/文档/工作流在无隐藏上下文下能否被理解与执行（本技能的历史定位）。
+
+## Delegation（派活）
+
+### 什么时候适合派活
+
+满足多数条件时派：
+
+- 任务确定型：目标、输入、验收标准都能写清楚，不需要主会话的历史来理解；
+- 可形成独立任务文件：背景 + 精确目标 + 验收命令/标准 + 约束（哪些不能碰、只读还是允许候选）；
+- 任务自包含：不需要追问用户、不需要主会话的中间结论；
+- 收益明确：任务耗时长、工具调用多、或会塞爆上下文（如大范围搜索、批量分析、代码审查、独立验证）。
+
+不适合派活：需要用户拍板、需要主会话的未落盘结论、跨多个仓库的大改、有安全边界的写回决策。
+
+### 任务文件编写原则：给材料，不给答案
+
+调用子代理时**只给最关键的信息和原始信息**，不要给主模型推导好的详细方案：
+
+- **必须给**：任务目标、用户教学/设计依据（原文或精神）、工作基（副本/输入文件路径）、验收标准、安全边界（禁止项）、知识入口（规则文档位置 + 要加载的核心技能列表）
+- **不要给**：实现细节、具体步骤、坐标/ID/推导结论——这些让子代理自己从规则文档和技能里查出来
+- **为什么**：①详细方案是主模型从规则+技能推导的，子代理用同样的材料能自己推导，还给方案会限制它发挥（可能发现更好的做法）；②主模型方案若有错，子代理照做会把错误放大；③"告诉它规则文档在哪里、有哪些核心技能"比"告诉它怎么做"更有价值
+- **必须给的数据要标注来源**：任务文件里的规格/数值分两类标注——「真实样本确认」（子代理无需重验）vs「主模型推导」（**以真实样本/文档为准**，子代理落地前自行验证）。实测教训（2026-08-12 复盘）：任务文件 3 处错误前提（inflow 无 name 字段、node-add 参数顺序、param 类型大小写）导致子代理 6-8 回合"被迫自证→试错"；标注来源后这类浪费整体消失
+
+### 标准派活流程
+
+1. 按上述原则把关键信息写成任务文件（放 /tmp，不放项目里）；
+2. 运行：
+
+```bash
+python3 ~/.pi/agent/skills/isolated-model-evaluator/scripts/evaluate.py \
+  --root <项目根> \
+  --skill <显式技能路径> \
+  --task-file /tmp/<task>.md \
+  --output-dir /tmp/<eval-dir>
+```
+
+   默认 `deepseek / deepseek-v4-flash / thinking=max`（用户指定）；要改模型/思考级别时显式传 `--provider --model --thinking`；
+3. 子模型只产 /tmp 候选（执行类任务）或只读结论（验证类任务）；
+4. 主模型校验结果（候选 diff、报告、trace），通过后再向用户汇报或由用户授权写回；
+5. 汇报时附：子模型结论 + 主模型校验结论，区分两层。
+
+执行类任务不要带 `--assert-no-changes`（它要求只读）；只读验证类任务带上。
+
+## Evaluation（评估）
 
 This is the optional evaluation companion to `pkc-project-operator`, not a second operator. Humans use the Operator for all ordinary project installation, query, capture, maintenance, runtime upgrade, and approval/application work. Invoke this Evaluator only when fresh-context model usability is itself being tested—for example after a Skill, CLI, project Adapter, routing Context, or model-facing workflow changes. A normal knowledge Bundle, Authority refresh, or real-environment check does not require it.
 
@@ -59,13 +108,13 @@ python3 skills/isolated-model-evaluator/scripts/evaluate.py \
   --output-dir /tmp/pkc-isolated-eval
 ```
 
-The runner defaults to the cost-effective evaluation profile `aijws / gpt-5.6-luna / medium`. Keep this profile for normal Skill iteration unless the human explicitly chooses another model. For reproducible comparisons, continue to pin all three in recorded commands:
+The runner defaults to the user's delegation profile `deepseek / deepseek-v4-flash / thinking=max`. Keep this profile unless the human explicitly chooses another model. For reproducible comparisons, continue to pin all three in recorded commands:
 
 ```bash
 python3 skills/isolated-model-evaluator/scripts/evaluate.py \
   --provider PROVIDER \
   --model MODEL \
-  --thinking medium \
+  --thinking max \
   --skill skills/pkc-project-operator \
   --task-file /tmp/pkc-eval-task.md \
   --assert-no-changes \
