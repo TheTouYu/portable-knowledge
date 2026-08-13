@@ -14,6 +14,25 @@ from typing import Any
 
 SCHEMA_VERSION = 1
 DEFAULT_EXCLUDES = {".git", ".local", "__pycache__"}
+
+
+def load_dotenv(path: Path) -> None:
+    """把 ~/.env 的 KEY=VALUE 注入进程环境（供 models.json 的 $VAR 引用，如 DASHSCOPE_API_KEY）。"""
+    try:
+        for line in path.read_text(encoding="utf-8").splitlines():
+            line = line.strip()
+            if not line or line.startswith("#") or "=" not in line:
+                continue
+            key, _, value = line.partition("=")
+            key = key.strip()
+            value = value.strip().strip('"').strip("'")
+            if key and key not in os.environ:
+                os.environ[key] = value
+    except FileNotFoundError:
+        pass
+
+
+load_dotenv(Path.home() / ".env")
 SAFETY_SUFFIX = """
 EVALUATION SAFETY BOUNDARY:
 - This is an isolated project copy. Follow the task's requested workflow and normal review gates.

@@ -1,0 +1,38 @@
+{
+  "skillSwitches": {
+    "disabledSkills": [
+      "ask-matt",
+      "browser-harness",
+      "cloudflare-tunnel",
+      "code-review",
+      "codebase-design",
+      "deploy-to-vercel",
+      "diagnosing-bugs",
+      "find-skills",
+      "grill-me",
+      "grilling",
+      "implement",
+      "improve-codebase-architecture",
+      "model-build-test",
+      "prototype",
+      "qianwen-audio-tts",
+      "qianwen-image-generation",
+      "qianwen-model-selector",
+      "qianwen-ops-auth",
+      "qianwen-text",
+      "qianwen-update-check",
+      "qianwen-usage",
+      "qianwen-video-generation",
+      "qianwen-vision",
+      "research",
+      "resolving-merge-conflicts",
+      "setup-matt-pocock-skills",
+      "tdd",
+      "teach",
+      "to-spec",
+      "triage",
+      "wayfinder",
+      "writing-great-skills"
+    ]
+  }
+}

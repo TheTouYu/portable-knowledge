@@ -18,6 +18,20 @@ SPEC.loader.exec_module(evaluator)
 
 
 class IsolatedModelEvaluatorTests(unittest.TestCase):
+    def test_load_dotenv_parses_values_without_overwriting_environment(self):
+        with tempfile.TemporaryDirectory() as tmp, mock.patch.dict(
+                evaluator.os.environ, {"EXISTING": "keep"}, clear=True):
+            dotenv = Path(tmp) / ".env"
+            dotenv.write_text(
+                "# comment\nEXISTING=replace\nPLAIN=value\nQUOTED=\"quoted value\"\nEQUALS=a=b\n",
+                encoding="utf-8",
+            )
+            evaluator.load_dotenv(dotenv)
+            self.assertEqual(evaluator.os.environ["EXISTING"], "keep")
+            self.assertEqual(evaluator.os.environ["PLAIN"], "value")
+            self.assertEqual(evaluator.os.environ["QUOTED"], "quoted value")
+            self.assertEqual(evaluator.os.environ["EQUALS"], "a=b")
+
     def test_snapshot_detects_existing_file_change_and_ignores_local(self):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
