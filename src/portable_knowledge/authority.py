@@ -3,7 +3,7 @@ from __future__ import annotations
 import hashlib
 import subprocess
 from pathlib import Path, PurePosixPath
-from typing import Any
+from typing import Any, Iterable
 POLICIES={"existence_only","review_on_change","invalidate_on_change","manual_review"}
 STATES={"committed_baseline","working_tree_observation","released_baseline","external_environment"}
 ROLES={"design_intent","current_implementation","documented_contract","external_environment_behavior"}
@@ -114,6 +114,22 @@ def observe_authority_refs(root:Path,refs:list[dict[str,Any]])->list[dict[str,An
   results.append({**ref,'status':effective,'baseline_status':baseline_status,'working_tree_status':working_status,
                   'effective_status':effective,'expected_hash':expected,'observed_hash':observed_hash})
  return results
+
+def claim_authority_status(observations:list[dict[str,Any]],claim_id:str)->str:
+ """One shared Claim-level Authority status rule for every retrieval surface.
+
+ - ``not_registered``: no registered Authority Reference links this Claim.
+ - ``current``: every linked reference observes the committed baseline unchanged.
+ - ``pending_review``: at least one linked reference is not ``current``.
+ """
+ statuses=[ref.get('effective_status',ref.get('status','unknown')) for ref in observations if claim_id in ref.get('claim_ids',[])]
+ if not statuses: return 'not_registered'
+ return 'current' if all(status=='current' for status in statuses) else 'pending_review'
+
+
+def claim_authority_statuses(observations:list[dict[str,Any]],claim_ids:Iterable[str])->dict[str,str]:
+ return {claim_id:claim_authority_status(observations,claim_id) for claim_id in claim_ids}
+
 
 def queryable_claim_ids(claim_ids:set[str],observations:list[dict[str,Any]])->set[str]:
  blocked=set()

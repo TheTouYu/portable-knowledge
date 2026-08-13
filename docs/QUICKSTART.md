@@ -70,6 +70,35 @@ Levels:
 
 Start bounded. Escalate only when exact evidence or Authority boundaries are needed.
 
+### Claim identifiers and Authority status filtering
+
+Every retrieval result identifies its Claim by a stable Claim ID (`clm_…`).
+`knowledge-search` JSON exposes it explicitly as `claim_id`; the legacy `id`
+field remains for compatibility and holds the same value. The identifier is
+the same Claim ID used by `show-claim` and by Authority Reference `claim_ids`
+links — it is a stable identity, never evidence or a ranking guarantee.
+
+`pkc query` and `pkc knowledge-search` accept the same `--status` values,
+computed with the same Claim-level Authority status rule:
+
+- `any` (default): no Authority status filter; the result set and ordering
+  stay unchanged.
+- `current`: only Claims whose every linked Authority Reference observes the
+  committed baseline unchanged.
+- `pending_review`: only Claims with at least one linked Authority Reference
+  that is not `current`.
+- `not_registered`: only Claims with no linked Authority Reference.
+
+```bash
+pkc query "deterministic lookup" --level 2 --status current --format json
+pkc knowledge-search "bounded question" --status current --format json
+```
+
+The status filter runs after permission, lifecycle, and conflict checks and
+before pagination/limit, so a narrow filter never hides a Claim that a wider
+result would have shown. It can only narrow the Claims the caller is already
+authorized to see; it never reveals restricted Claims or their status.
+
 ## 5. Use PKC in another project
 
 Do not copy the neutral Claim as project knowledge. Instead:
@@ -206,6 +235,7 @@ normal filesystem and repository permissions.
 Use the operation that matches the semantic intent:
 
 - new knowledge: `knowledge-plan add-claim`;
+- reusable one-command batch intake of one or more new Claims with their Authority Refs: `knowledge-plan capture --file DRAFT.json` (see `docs/SEMANTIC-CHANGES.md` for the draft contract);
 - correct or clarify an existing proposition: `knowledge-plan revise-claim`;
 - change an existing Topic's ownership/path while preserving IDs and history: `knowledge-plan move-topic`;
 - re-approve an existing Ref against an exactly committed changed source while preserving its identity and links: `knowledge-plan refresh-authority-ref`;

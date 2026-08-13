@@ -164,6 +164,62 @@ pkc knowledge-plan inspect PLAN_ID
 
 Finalize performs full staged preflight and creates one immutable candidate Bundle only if all checks pass. Delta and full preflight share the configured evaluation normalizer and evaluator. Delta runs unscoped cases conservatively and may defer only explicitly scoped, non-intersecting cases; its JSON artifact records selected/deferred cases and reasons. Full preflight runs every case. Evaluation failures expose a bounded artifact path containing normalized inputs, ranked Topic/Claim results, limits, permission, forbidden hits, and failed assertion categories.
 
+## File-driven batch capture
+
+For reusable, one-command Claim intake, `knowledge-plan capture --file DRAFT.json` runs the exact same typed pipeline — `init`, every `add-claim` and `add-authority-ref`, one delta `check`, one `finalize` — and stops with an immutable draft Bundle for human review. It never approves, applies, or commits anything, and it never uses `bundle-create --manifest`, compatibility mode, or direct authority writes. One command covers any number of Claims and Authority Refs.
+
+Draft contract (`schema_version` must be `1`):
+
+```json
+{
+  "schema_version": 1,
+  "intent": "Describe the bounded semantic change",
+  "risk": "medium",
+  "claims": [
+    {
+      "id": "schema",
+      "node": "software-core",
+      "topic_id": "topic-schema",
+      "topic_path": "knowledge/software-core/schema.md",
+      "topic_title": "Schema Contract",
+      "topic_summary": "Bounded routing summary",
+      "topic_keywords": ["schema"],
+      "node_name": "Software Core", "node_path": "knowledge/software-core", "node_boundary": "...",
+      "node_keywords": ["core"],
+      "title": "Schema input is explicit",
+      "statement": "One stable, atomic assertion.",
+      "boundary": "When this claim applies and what it does not prove.",
+      "permission": "internal",
+      "duplicate_resolution": "cancel",
+      "fact_classes": ["documented_contract"],
+      "authority_refs": [
+        {
+          "claim_id": "schema",
+          "path": "src/module.py",
+          "locator": "function:run",
+          "role": "current_implementation",
+          "change_policy": "invalidate_on_change",
+          "fact_classes": ["runtime_behavior"]
+        }
+      ]
+    }
+  ]
+}
+```
+
+- `claims[].id` is an optional local alias used by `authority_refs[].claim_id`; without either, a Ref binds to its enclosing Claim. Duplicate ids and unknown `claim_id` references are draft errors.
+- Topic/Node metadata fields (`topic_path`, `topic_title`, `topic_summary`, `topic_keywords`, `node_name`, `node_path`, `node_boundary`, `node_keywords`) are optional and only valid when atomically creating that object, exactly as in `add-claim`.
+- Ref `fact_classes` must be declared by the target Claim; `role`, `change_policy`, `permission`, and `duplicate_resolution` use the same controlled vocabularies as the typed CLI. Unknown fields are rejected so typos fail loudly.
+- Authority documents must be committed before capture (same committed-baseline rule as `init`).
+
+Output (JSON and text) reports plan ID, Bundle ID, the exact 64-character content hash, semantic diff, expected changed files, risk, permission effect, and every validation failure. Draft errors name the exact field (`claims[2].authority_refs[0].role`). Any failure after plan creation abandons the plan with a stated reason and never leaves a partial Bundle; the `retained_plan` field reports the abandoned plan id, state, and reason. Re-running the same draft after a successful capture replays the identical Bundle.
+
+Inspect the Bundle and stop for exact-hash human review exactly as for interactive plans:
+
+```bash
+pkc bundle-inspect BUNDLE_ID --format json
+```
+
 ## Before approval
 
 Inspect the Bundle:
@@ -209,7 +265,7 @@ pkc bundle-status BUNDLE_ID --format json
 
 `bundle-status [BUNDLE_ID]` supports either aggregate lifecycle listing or one Bundle. `bundle-inspect BUNDLE_ID` remains the richer semantic review surface.
 
-`knowledge-plan inspect` classifies non-current Authority References as `plan_affected` or `historical`. Historical debt remains blocking, but the preview lists those Ref IDs separately and recommends a dedicated `authority_maintenance` plan followed by `knowledge-plan rebase`; this keeps unrelated maintenance out of the current Bundle without weakening full preflight.
+`knowledge-plan inspect` classifies non-current Authority References as `plan_affected` or `historical`. Refs affected by the current plan (staged paths or touched Claims) remain fail-closed blockers. Unrelated historical refs are reported as non-blocking maintenance warnings: finalize still completes while the preview lists their IDs, status, and hashes and recommends a dedicated `authority_maintenance` plan. After that Bundle is exact-hash approved and applied, a human must authorize committing the maintenance, then abandon and rebuild plans that depended on the old Authority snapshot; uncommitted maintenance is never accepted as a baseline.
 
 ## Fail-closed outcomes
 
@@ -219,7 +275,7 @@ Expected structured rejections include:
 - incomplete Claim fact-class coverage;
 - Authority path absent from the committed baseline;
 - Authority path also modified by the current plan (`PLAN_AUTHORITY_STAGED_DRIFT`);
-- non-current full-preflight Authority status with reference/path/hash diagnostics;
+- non-current full-preflight Authority status for plan-affected References (staged paths or touched Claims) with reference/path/hash diagnostics — unrelated historical non-current References are non-blocking warnings;
 - stale/tampered Bundle hash;
 - missing successful full preflight;
 - missing approval;

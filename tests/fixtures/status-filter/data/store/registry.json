@@ -1,0 +1,9 @@
+{
+  "schema_version": 1,
+  "nodes": [{"id": "software-core", "name": "Software Core", "path": "domain/topic", "boundary": "Neutral status filter concepts", "keywords": ["software"], "migration_status": "managed"}],
+  "topics": [
+    {"id": "topic-triage", "node_id": "software-core", "title": "Triage Contract", "path": "domain/topic/triage.md", "summary": "Neutral triage behavior", "keywords": ["triage"], "permission": "internal"},
+    {"id": "topic-restricted", "node_id": "software-core", "title": "Restricted Contract", "path": "domain/topic/restricted.md", "summary": "Neutral restricted behavior", "keywords": ["restricted"], "permission": "restricted"}
+  ],
+  "relationships": []
+}

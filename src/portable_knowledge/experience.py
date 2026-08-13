@@ -16,7 +16,8 @@ from pathlib import Path, PurePosixPath
 from typing import Any, Callable
 from urllib import error, request
 
-from .authority import authority_refs_from_document, observe_authority_refs
+from .authority import (authority_refs_from_document, claim_authority_statuses,
+                         observe_authority_refs)
 from .evaluation_contract import (EvaluationContractError, evaluate_normalized_cases,
                                   load_evaluation_contract)
 
@@ -163,17 +164,8 @@ def authorized_claims(root: Path, instance: Any, claims: list[dict[str, Any]]) -
     refs_path = instance.authority.get("authority_refs")
     refs = authority_refs_from_document(_read_json(root / refs_path)) if refs_path else []
     observations = observe_authority_refs(root, refs)
-    by_claim: dict[str, list[str]] = {}
-    for ref in observations:
-        status = ref.get("effective_status", ref.get("status", "unknown"))
-        for claim_id in ref.get("claim_ids", []):
-            by_claim.setdefault(claim_id, []).append(status)
-    output = []
-    for claim in claims:
-        statuses = by_claim.get(claim["id"], [])
-        authority_status = "not_registered" if not statuses else ("current" if all(value == "current" for value in statuses) else "pending_review")
-        output.append({**claim, "authority_status": authority_status})
-    return output
+    statuses = claim_authority_statuses(observations, (claim["id"] for claim in claims))
+    return [{**claim, "authority_status": statuses.get(claim["id"], "not_registered")} for claim in claims]
 
 
 def build_vector_index(root: Path, instance: Any, claims: list[dict[str, Any]], permission: str) -> dict[str, Any]:
@@ -205,7 +197,7 @@ def _cosine(left: list[float], right: list[float]) -> float:
 
 def search_knowledge(root: Path, instance: Any, query: str, terms: list[str], permission: str, limit: int,
                      semantic: bool, lexical_query: Callable[[str], dict[str, Any]],
-                     claim_detail: Callable[[str], dict[str, Any]]) -> dict[str, Any]:
+                     claim_detail: Callable[[str], dict[str, Any]], status: str = "any") -> dict[str, Any]:
     merged: dict[str, dict[str, Any]] = {}
     query_terms = list(dict.fromkeys([query, *terms]))
     for term_index, term in enumerate(query_terms):
@@ -224,6 +216,10 @@ def search_knowledge(root: Path, instance: Any, query: str, terms: list[str], pe
                                       "conflict": claim["conflict"], "authority_status": authority, "rank_score": score}
             else:
                 merged[item["id"]]["rank_score"] = max(merged[item["id"]]["rank_score"], score)
+    # Authority status filtering runs before sorting and the final limit slice, so a
+    # narrow status filter can never drop a qualifying Claim because truncation ran first.
+    if status != "any":
+        merged = {claim_id: item for claim_id, item in merged.items() if item["authority_status"] == status}
     candidates = list(merged.values())
     warnings: list[str] = []
     mode = "lexical"
@@ -247,9 +243,12 @@ def search_knowledge(root: Path, instance: Any, query: str, terms: list[str], pe
                     claim = detail["claim"]
                     if not _visible_claim(claim, permission):
                         continue
+                    authority = detail.get("authority_support", {}).get("status", "not_registered")
+                    if status != "any" and authority != status:
+                        continue
                     candidates.append({"id": claim["id"], "node_id": claim["node_id"], "topic_id": claim["topic_id"],
                                        "title": claim["title"], "permission": claim["permission"], "lifecycle": claim["lifecycle"],
-                                       "conflict": claim["conflict"], "authority_status": detail.get("authority_support", {}).get("status", "not_registered"),
+                                       "conflict": claim["conflict"], "authority_status": authority,
                                        "rank_score": 0.0})
             for item in candidates:
                 semantic_score = semantic_scores.get(item["id"], 0.0)
@@ -263,7 +262,8 @@ def search_knowledge(root: Path, instance: Any, query: str, terms: list[str], pe
         for item in candidates:
             item["score"] = item["rank_score"]
     candidates.sort(key=lambda item: (-item["score"], item["id"]))
-    results = [{"rank": rank, **{key: item[key] for key in ("id", "node_id", "topic_id", "title", "permission", "lifecycle", "conflict", "authority_status")},
+    results = [{"rank": rank, "claim_id": item["id"],
+                **{key: item[key] for key in ("id", "node_id", "topic_id", "title", "permission", "lifecycle", "conflict", "authority_status")},
                 "score": round(item["score"], 6), **({"semantic_score": round(item["semantic_score"], 6)} if mode == "hybrid" else {})}
                for rank, item in enumerate(candidates[:max(1, min(limit, 20))], 1)]
     return {"ok": True, "command": "knowledge-search", "query": query, "mode": mode, "warnings": warnings,

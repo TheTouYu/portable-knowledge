@@ -1,0 +1,49 @@
+{
+  "schema_version": 1,
+  "refs": [
+    {
+      "id": "aref_current",
+      "path": "authority/current-doc.md",
+      "locator": "current contract",
+      "role": "documented_contract",
+      "baseline_state": "committed_baseline",
+      "change_policy": "invalidate_on_change",
+      "approved_hash": "386593d9aa330485fcbb24b1bc554e7f685e9b4b7ce49c018002104638bb3543",
+      "claim_ids": ["clm_00000000000000000000000001"],
+      "supports_fact_classes": []
+    },
+    {
+      "id": "aref_current2",
+      "path": "authority/current-doc.md",
+      "locator": "second current contract",
+      "role": "documented_contract",
+      "baseline_state": "committed_baseline",
+      "change_policy": "invalidate_on_change",
+      "approved_hash": "386593d9aa330485fcbb24b1bc554e7f685e9b4b7ce49c018002104638bb3543",
+      "claim_ids": ["clm_00000000000000000000000005"],
+      "supports_fact_classes": []
+    },
+    {
+      "id": "aref_pending",
+      "path": "authority/pending-doc.md",
+      "locator": "pending contract",
+      "role": "documented_contract",
+      "baseline_state": "committed_baseline",
+      "change_policy": "invalidate_on_change",
+      "approved_hash": "0000000000000000000000000000000000000000000000000000000000000000",
+      "claim_ids": ["clm_00000000000000000000000002"],
+      "supports_fact_classes": []
+    },
+    {
+      "id": "aref_restricted",
+      "path": "authority/restricted-doc.md",
+      "locator": "restricted contract",
+      "role": "documented_contract",
+      "baseline_state": "committed_baseline",
+      "change_policy": "invalidate_on_change",
+      "approved_hash": "0000000000000000000000000000000000000000000000000000000000000000",
+      "claim_ids": ["clm_00000000000000000000000004"],
+      "supports_fact_classes": []
+    }
+  ]
+}

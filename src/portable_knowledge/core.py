@@ -31,7 +31,9 @@ from typing import Any, Iterable, Iterator
 
 from .instance import Instance, InstanceError, load_instance, validate_project_memory
 from .bundle import BundleError, apply_bundle, approval, build_bundle, bundle_paths, canonical as bundle_json, capture_bundle_draft, enforce_production_provenance, lifecycle_path, lifecycle_projection, rollback_bundle, seal_preflight, verify_bundle
-from .authority import (FACT_CLASSES, POLICIES, AuthorityRegistryError, authority_refs_from_document, observe_authority_refs, validate_authority_conflicts, validate_authority_coverage, validate_authority_ref)
+from .authority import (FACT_CLASSES, POLICIES, ROLES, AuthorityRegistryError, authority_refs_from_document,
+                        claim_authority_status, claim_authority_statuses, observe_authority_refs,
+                        validate_authority_conflicts, validate_authority_coverage, validate_authority_ref)
 from .retrieval import RetrievalError, build_progressive_scope
 from .experience import (ExperienceError, authorized_claims, build_vector_index, evaluate_cases,
                          freshness_markers, search_knowledge, upstream_freshness)
@@ -58,6 +60,7 @@ SOURCE_RESULTS = {"existing_source", "new_representation", "new_version", "new_s
 SUPPORT_TYPES = {"supports", "contradicts", "qualifies"}
 PERMISSIONS = {"restricted", "internal", "public_redacted", "public"}
 SENSITIVITIES = {"generalized", "restricted"}
+STATUS_FILTERS = ("any", "current", "pending_review", "not_registered")
 EVENT_TYPES = {
     "sources": {"source_registered", "source_corrected", "source_retracted", "processed_as_duplicate"},
     "evidence": {"evidence_added", "evidence_corrected", "evidence_retracted"},
@@ -69,6 +72,11 @@ EVENT_TYPES = {
 }
 LIFECYCLES = {"draft", "active", "superseded", "deprecated", "rejected"}
 CONFIRMATIONS = {"unconfirmed", "confirmed", "confirmed_with_limits"}
+CONTENT_HASH_HELP = (
+    "REQUIRED: the Bundle's exact immutable content hash; obtain it from "
+    "`bundle-status <bundle_id>` or `bundle-inspect <bundle_id>`, and approve and apply "
+    "with the same hash"
+)
 QUERY_BUDGETS = {1: 4_000, 2: 8_000, 3: 20_000}
 AUTHORIZED_REVIEW_ROLES = {"business_reviewer", "owner"}
 WINDOWS_RESERVED = {"CON", "PRN", "AUX", "NUL", *(f"COM{i}" for i in range(1, 10)), *(f"LPT{i}" for i in range(1, 10))}
@@ -666,7 +674,8 @@ def _apply_budget(results: list[dict[str, Any]], budget: int) -> tuple[list[dict
 
 
 def query_command(root: Path, query: str, level: int, limit: int, cursor: int, permission: str,
-                  node: str | None = None, topic: str | None = None) -> dict[str, Any]:
+                  node: str | None = None, topic: str | None = None, status: str = "any",
+                  instance: Instance | None = None) -> dict[str, Any]:
     maximum = {1: 5, 2: 12, 3: 3}[level]
     limit = min(max(1, limit), maximum)
     connection = ensure_projection(root)
@@ -677,14 +686,22 @@ def query_command(root: Path, query: str, level: int, limit: int, cursor: int, p
     fts_query = " AND ".join(f'"{token.replace(chr(34), chr(34)*2)}"' for token in tokens)
     kinds = {1: ("node", "topic"), 2: ("claim",), 3: ("claim",)}[level]
     placeholders = ",".join("?" for _ in kinds)
-    fetch_limit = max(limit + 1, 100)
-    rows = connection.execute(f"SELECT kind, object_id, title, snippet(search, 3, '', '', '…', 24), bm25(search) FROM search WHERE search MATCH ? AND kind IN ({placeholders}) ORDER BY bm25(search), kind, object_id LIMIT ?", (fts_query, *kinds, fetch_limit)).fetchall()
+    observations: list[dict[str, Any]] = []
+    if status != "any":
+        refs_instance = instance or load_instance(root)
+        refs_path = refs_instance.authority.get("authority_refs")
+        if refs_path:
+            observations = observe_authority_refs(root, authority_refs_from_document(read_json(root / refs_path)))
+    fetch_limit: int | None = None if status != "any" else max(limit + 1, 100)
+    limit_sql = "" if fetch_limit is None else " LIMIT ?"
+    fetch_params = () if fetch_limit is None else (fetch_limit,)
+    rows = connection.execute(f"SELECT kind, object_id, title, snippet(search, 3, '', '', '…', 24), bm25(search) FROM search WHERE search MATCH ? AND kind IN ({placeholders}) ORDER BY bm25(search), kind, object_id{limit_sql}", (fts_query, *kinds, *fetch_params)).fetchall()
     used_ngram_fallback = False
     if not rows:
         used_ngram_fallback = True
         grams = ngrams(query)
         if grams:
-            rows = connection.execute(f"SELECT s.kind,s.object_id,s.title,substr(s.body,1,500),-count(*) FROM search_ngrams n JOIN search s ON s.kind=n.kind AND s.object_id=n.object_id WHERE n.gram IN ({','.join('?' for _ in grams)}) AND s.kind IN ({placeholders}) GROUP BY s.kind,s.object_id ORDER BY count(*) DESC,s.kind,s.object_id LIMIT ?", (*grams, *kinds, fetch_limit)).fetchall()
+            rows = connection.execute(f"SELECT s.kind,s.object_id,s.title,substr(s.body,1,500),-count(*) FROM search_ngrams n JOIN search s ON s.kind=n.kind AND s.object_id=n.object_id WHERE n.gram IN ({','.join('?' for _ in grams)}) AND s.kind IN ({placeholders}) GROUP BY s.kind,s.object_id ORDER BY count(*) DESC,s.kind,s.object_id{limit_sql}", (*grams, *kinds, *fetch_params)).fetchall()
     allowed = {"restricted": 0, "internal": 1, "public_redacted": 2, "public": 3}
     results = []
     for kind, object_id, title, snippet, score in rows:
@@ -714,6 +731,9 @@ def query_command(root: Path, query: str, level: int, limit: int, cursor: int, p
             if kind == "topic":
                 item["node_id"] = connection.execute("SELECT node_id FROM topics WHERE id=?", (object_id,)).fetchone()[0]
         results.append(item)
+    if status != "any":
+        statuses = claim_authority_statuses(observations, (item["id"] for item in results if item["kind"] == "claim"))
+        results = [item for item in results if item["kind"] != "claim" or statuses[item["id"]] == status]
     visible = results[cursor:cursor + limit + 1]
     count_truncated = len(visible) > limit
     visible = visible[:limit]
@@ -923,10 +943,10 @@ def show_claim(root: Path, claim_id: str, evidence_limit: int, cursor: int, perm
     refs = authority_refs_from_document(read_json(root / refs_path)) if refs_path else []
     matching_refs = [ref for ref in refs if claim_id in ref.get("claim_ids", [])]
     observations = observe_authority_refs(root, matching_refs) if matching_refs else []
-    effective = [ref.get("effective_status", ref.get("status", "current")) for ref in observations]
-    authority_status = "not_registered" if not matching_refs else ("pending_review" if any(status != "current" for status in effective) else "current")
+    authority_status = claim_authority_status(observations, claim_id)
     supporting_kinds = sorted({row["evidence_kind"] for row in visible_rows if row["support_type"] == "supports"})
-    authority_support = {"status": authority_status, "ref_count": len(matching_refs), "pending_review_count": sum(status != "current" for status in effective)}
+    authority_support = {"status": authority_status, "ref_count": len(matching_refs),
+                         "pending_review_count": sum(ref.get("effective_status", ref.get("status", "unknown")) != "current" for ref in observations)}
     event_evidence = {"status": "not_registered" if not visible_rows else evidence_status, "supporting_kinds": supporting_kinds}
     support_summary = "authority_backed_no_separate_events" if authority_status == "current" and not visible_rows else ("authority_and_event_evidence" if matching_refs and visible_rows else "event_evidence_only" if visible_rows else "support_not_registered")
     limit = min(evidence_limit, 10)
@@ -1826,12 +1846,12 @@ def validate_merge_command(root: Path, base: str) -> dict[str, Any]:
 
 
 def knowledge_search_command(root: Path, instance: Instance, query: str, terms: list[str], permission: str,
-                             limit: int, semantic: bool) -> dict[str, Any]:
+                             limit: int, semantic: bool, status: str = "any") -> dict[str, Any]:
     def lexical(term: str) -> dict[str, Any]:
-        return query_command(root, term, 2, 12, 0, permission)
+        return query_command(root, term, 2, 12, 0, permission, status=status, instance=instance)
     def detail(claim_id: str) -> dict[str, Any]:
         return show_claim(root, claim_id, 1, 0, permission)
-    return search_knowledge(root, instance, query, terms, permission, limit, semantic, lexical, detail)
+    return search_knowledge(root, instance, query, terms, permission, limit, semantic, lexical, detail, status=status)
 
 
 def federation_search_command(registry: Path, projects: list[str], query: str, limit: int) -> dict[str, Any]:
@@ -1955,8 +1975,31 @@ def output(payload: dict[str, Any], fmt: str) -> None:
               f"plan affected: {preview.get('authority_ref_counts', {}).get('plan_affected', 0)}; historical: {preview.get('authority_ref_counts', {}).get('historical', 0)})")
         for ref in preview.get("affected_authority_refs", []):
             print(f"  * {ref.get('change')} [{ref.get('scope', 'plan_affected')}] {ref.get('authority_ref_id')}: {ref.get('path')}")
+    elif payload.get("command") == "knowledge-plan capture":
+        if payload.get("ok"):
+            print("OK: knowledge-plan capture (file-driven)")
+            print(f"Draft: {payload.get('draft_path')}")
+            print(f"Plan: {payload.get('plan_id')} (finalized, {payload.get('operation_count', 0)} operations)")
+            print(f"Bundle: {payload.get('bundle_id')}")
+            print(f"Content hash (exact; only approval credential): {payload.get('content_hash')}")
+            print(f"Risk: {payload.get('risk')}  Permission effect: {payload.get('permission_effect')}")
+            print(f"Expected changed files: {', '.join(payload.get('expected_changed_files', [])) or '(none)'}")
+            print(f"Semantic diff: {json.dumps(payload.get('semantic_diff'), ensure_ascii=False, sort_keys=True)}")
+            print("Review: pkc bundle-inspect <bundle_id> --format json; approval requires the exact content hash")
+        else:
+            for error in payload.get("errors", []):
+                field = error.get("draft_field")
+                print(f"ERROR [{error.get('code', 'ERROR')}] {error.get('path', '.')}" +
+                      (f" field={field}" if field else "") + f": {error.get('message', '')}")
+            retained = payload.get("retained_plan")
+            if retained:
+                print(f"Retained plan: {retained.get('plan_id')} ({retained.get('state')})")
+                print(f"Reason: {retained.get('reason')}")
     elif not payload.get("ok"):
         for error in payload.get("errors", []):
+            if error.get("blocking") is False:
+                print(f"WARNING [{error.get('code', 'WARNING')}] {error.get('path', '.')}: {error.get('message', '')}")
+                continue
             print(f"ERROR [{error.get('code', 'ERROR')}] {error.get('path', '.')}: {error.get('message', '')}")
             for recommendation in error.get("recommended_commands", []):
                 print(f"NEXT: {recommendation}")
@@ -1982,6 +2025,12 @@ def output(payload: dict[str, Any], fmt: str) -> None:
             print(f"  Risk: {bundle['risk']}")
             print(f"  Operations: {json.dumps(bundle['operation_counts'], sort_keys=True)}")
             print(f"  Expected changed files: {', '.join(bundle['expected_changed_files']) or '(none)'}")
+    elif payload.get("command") == "knowledge-search":
+        print(f"OK: knowledge-search ({payload.get('mode', 'lexical')})")
+        print(f"Query: {payload.get('query')}")
+        for item in payload.get("results", []):
+            print(f"  - {item.get('claim_id', item.get('id'))}: {item.get('title')} [{item.get('authority_status')}]")
+        for warning in payload.get("warnings", []): print(f"WARNING: {warning}")
     elif payload.get("command") == "progressive-query":
         print(f"Context: {payload.get('context', {}).get('id')}")
         print(f"Intent: {payload.get('intent') or '(dynamic)'}")
@@ -2007,6 +2056,17 @@ def output(payload: dict[str, Any], fmt: str) -> None:
         print(f"Event evidence: {events.get('status', payload.get('evidence_status'))}")
         print(f"Evidence strength (deprecated): {payload.get('evidence_status')}")
         print(f"Evidence: {len(payload.get('evidence', []))}/{payload.get('evidence_total', 0)}")
+    elif payload.get("command") == "knowledge-plan finalize":
+        print(f"OK: {payload.get('command')}")
+        if payload.get("bundle_id"): print(f"Bundle: {payload['bundle_id']}")
+        if payload.get("content_hash"): print(f"Content hash (only approval credential): {payload['content_hash']}")
+        maintenance = payload.get("authority_maintenance") or {}
+        historical_ids = maintenance.get("historical_ref_ids") or []
+        if historical_ids:
+            print(f"Historical Authority refs (non-blocking): {maintenance.get('historical_count', len(historical_ids))} — {', '.join(historical_ids)}")
+            print(f"Maintenance: {maintenance.get('recommended_action') or 'Review the listed historical refs separately.'}")
+        for warning in payload.get("warnings", []):
+            print(f"WARNING [{warning.get('code', 'WARNING')}] {warning.get('authority_ref_id') or warning.get('path', '.')}: {warning.get('message', '')}")
     else:
         print(f"OK: {payload.get('command')}")
         if "count" in payload: print(f"count: {payload['count']}")
@@ -2029,10 +2089,16 @@ def capabilities_command() -> dict[str, Any]:
                              "authority_ref_retirement_plan": True, "routes": False, "evaluation_cases": True,
                              "knowledge_health": True, "hybrid_retrieval": True, "vector_cache": True,
                              "upstream_freshness": True, "read_only_federation": True,
-                             "manifest_compatibility_mode": True}, "errors": []}
+                             "claim_status_filter": True, "manifest_compatibility_mode": True,
+                             "file_driven_capture": True}, "errors": []}
 
 
 def parser_build() -> argparse.ArgumentParser:
+    from .semantic_plan import CHECK_MODES
+
+    def enum_help(label: str, values: Iterable[str]) -> str:
+        return f"{label}; legal values: {', '.join(sorted(values))}"
+
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--root", type=Path, default=root_default())
     parser.add_argument("--config", type=Path)
@@ -2057,6 +2123,8 @@ def parser_build() -> argparse.ArgumentParser:
     search.add_argument("query")
     search.add_argument("--term", action="append", default=[])
     search.add_argument("--permission", choices=tuple(PERMISSIONS), default="internal")
+    search.add_argument("--status", choices=STATUS_FILTERS, default="any",
+                        help="Authority status filter applied before pagination/limit")
     search.add_argument("--semantic", action="store_true")
     search.add_argument("--limit", type=int, default=8)
     federation = command("federation-search", help="search explicitly selected registered PKC projects without modifying them")
@@ -2070,6 +2138,8 @@ def parser_build() -> argparse.ArgumentParser:
     query.add_argument("--limit", type=int, default=5)
     query.add_argument("--cursor", type=int, default=0)
     query.add_argument("--permission", choices=tuple(PERMISSIONS), default="internal")
+    query.add_argument("--status", choices=STATUS_FILTERS, default="any",
+                        help="Authority status filter applied before pagination/limit")
     query.add_argument("--node")
     query.add_argument("--topic")
     progressive = command("progressive-query", aliases=["query-context"])
@@ -2170,14 +2240,14 @@ def parser_build() -> argparse.ArgumentParser:
     bundle_create.add_argument("--compatibility-mode", action="store_true", help="explicit maintainer/fixture compatibility boundary; never for normal production intake")
     bundle_approve = mutation("bundle-approve")
     bundle_approve.add_argument("bundle_id")
-    bundle_approve.add_argument("--content-hash", required=True, help="exact immutable Bundle content hash shown for approval")
+    bundle_approve.add_argument("--content-hash", required=True, help=CONTENT_HASH_HELP)
     bundle_apply = mutation("bundle-apply")
     bundle_apply.add_argument("bundle_id")
-    bundle_apply.add_argument("--content-hash", required=True, help="exact approved immutable Bundle content hash")
+    bundle_apply.add_argument("--content-hash", required=True, help=CONTENT_HASH_HELP)
     bundle_inspect = command("bundle-inspect")
-    bundle_inspect.add_argument("bundle_id", nargs="?")
+    bundle_inspect.add_argument("bundle_id", nargs="?", help="inspect one Bundle (or all when omitted) including its exact immutable content hash")
     bundle_status = command("bundle-status")
-    bundle_status.add_argument("bundle_id", nargs="?", help="optional Bundle ID for a single lifecycle status")
+    bundle_status.add_argument("bundle_id", nargs="?", help="optional Bundle ID for a single lifecycle status including its exact immutable content hash")
     bundle_status.add_argument("--state", choices=("draft", "approved", "applied", "failed", "abandoned", "superseded", "rolled_back"))
     bundle_supersede = mutation("bundle-supersede")
     bundle_supersede.add_argument("bundle_id")
@@ -2218,7 +2288,8 @@ def parser_build() -> argparse.ArgumentParser:
     plan_claim.add_argument("--boundary", required=True)
     plan_claim.add_argument("--permission", choices=tuple(PERMISSIONS), default="internal")
     plan_claim.add_argument("--duplicate-resolution", choices=("create_distinct_with_boundary", "cancel"), default="cancel")
-    plan_claim.add_argument("--fact-class", choices=FACT_CLASSES, action="append", default=[])
+    plan_claim.add_argument("--fact-class", choices=tuple(sorted(FACT_CLASSES)), action="append", default=[],
+                            help=enum_help("repeatable Claim fact class", FACT_CLASSES))
     plan_revise = plan_command("revise-claim")
     plan_revise.add_argument("plan_id"); plan_revise.add_argument("--claim-id", required=True)
     plan_revise.add_argument("--title"); plan_revise.add_argument("--statement", required=True); plan_revise.add_argument("--boundary", required=True)
@@ -2232,8 +2303,12 @@ def parser_build() -> argparse.ArgumentParser:
     plan_ref = plan_command("add-authority-ref")
     plan_ref.add_argument("plan_id"); plan_ref.add_argument("--claim-id", required=True)
     plan_ref.add_argument("--path", required=True); plan_ref.add_argument("--locator", required=True)
-    plan_ref.add_argument("--role", required=True); plan_ref.add_argument("--change-policy", choices=tuple(sorted(POLICIES)), required=True)
-    plan_ref.add_argument("--fact-class", choices=FACT_CLASSES, action="append", default=[])
+    plan_ref.add_argument("--role", choices=tuple(sorted(ROLES)), required=True,
+                          help=enum_help("Authority Reference role", ROLES))
+    plan_ref.add_argument("--change-policy", choices=tuple(sorted(POLICIES)), required=True,
+                          help=enum_help("Authority Reference change policy", POLICIES))
+    plan_ref.add_argument("--fact-class", choices=tuple(sorted(FACT_CLASSES)), action="append", default=[],
+                          help=enum_help("repeatable fact class covered by this Reference", FACT_CLASSES))
     plan_ref.add_argument("--diagnostic-hash")
     plan_refresh_ref = plan_command("refresh-authority-ref")
     plan_refresh_ref.add_argument("plan_id"); plan_refresh_ref.add_argument("--authority-ref-id", required=True)
@@ -2243,13 +2318,17 @@ def parser_build() -> argparse.ArgumentParser:
     replacement = plan_retire_ref.add_mutually_exclusive_group()
     replacement.add_argument("--replacement-authority-ref-id"); replacement.add_argument("--replacement-claim-id")
     plan_retire_ref.add_argument("--reason", required=True)
-    plan_check = plan_command("check"); plan_check.add_argument("plan_id"); plan_check.add_argument("--mode", choices=("delta",), required=True)
+    plan_check = plan_command("check"); plan_check.add_argument("plan_id")
+    plan_check.add_argument("--mode", choices=CHECK_MODES, required=True,
+                            help=f"check mode; legal values: {', '.join(CHECK_MODES)} (staged delta validation; run once after all operations, before finalize)")
     plan_finalize = plan_command("finalize"); plan_finalize.add_argument("plan_id")
     plan_inspect = plan_command("inspect"); plan_inspect.add_argument("plan_id")
     plan_rebase = plan_command("rebase"); plan_rebase.add_argument("plan_id")
     plan_rebase.add_argument("--reason", required=True)
     plan_abandon = plan_command("abandon"); plan_abandon.add_argument("plan_id")
     plan_abandon.add_argument("--reason", required=True)
+    plan_capture = plan_command("capture")
+    plan_capture.add_argument("--file", required=True)
     return parser
 
 
@@ -2307,8 +2386,8 @@ def main(argv: list[str] | None = None) -> int:
         elif args.command == "tree": payload = tree_command(root)
         elif args.command == "knowledge-check": payload = knowledge_check_command(root, instance, args.semantic)
         elif args.command == "knowledge-index": payload = knowledge_index_command(root, instance, args.permission)
-        elif args.command == "knowledge-search": payload = knowledge_search_command(root, instance, args.query, args.term, args.permission, args.limit, args.semantic)
-        elif args.command == "query": payload = query_command(root, args.query, args.level, args.limit, args.cursor, args.permission, args.node, args.topic)
+        elif args.command == "knowledge-search": payload = knowledge_search_command(root, instance, args.query, args.term, args.permission, args.limit, args.semantic, args.status)
+        elif args.command == "query": payload = query_command(root, args.query, args.level, args.limit, args.cursor, args.permission, args.node, args.topic, args.status, instance)
         elif args.command in {"progressive-query", "query-context"}: payload = progressive_query_command(root, instance, args.context, args.intent, args.max_level, args.limit, args.permission, args.check_authority, args.cursor)
         elif args.command == "show-claim": payload = show_claim(root, args.claim_id, args.evidence_limit, args.cursor, args.permission)
         elif args.command == "register-source": payload = register_source_command(root, args)

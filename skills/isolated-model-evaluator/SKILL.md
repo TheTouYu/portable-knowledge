@@ -53,6 +53,14 @@ python3 ~/.pi/agent/skills/isolated-model-evaluator/scripts/evaluate.py \
 
 执行类任务不要带 `--assert-no-changes`（它要求只读）；只读验证类任务带上。
 
+### 代码仓派活清单（2026-08-13 PKC 五 Issue 横向复盘）
+
+- **给真实开发入口**：任务文件必须区分 production wrapper 与源码入口。若 detached worktree 不含被 `.gitignore` 排除的 runtime，直接给 `PYTHONPATH=src python3 -m <package>.cli ...`，不要把依赖缺失 runtime 的 wrapper 列为可用命令。
+- **写清权限矩阵**：分别说明真实工作树和一次性 fixture/copy 允许什么。只有任务明确授权时，才可在 disposable fixture 内 `git commit` 或执行 approve/apply；该授权不外溢到真实工作树。
+- **复用现有测试资产**：先定位已有 tempfile fixture、测试基类和 CLI helper；优先在现有测试中补一个聚焦回归。确需 smoke 时只保留一个一次性副本流程，不重复写多份内联脚本或新增通用 helper。
+- **让探测命令表达预期**：允许“无匹配”的存在性探测写成 `rg ... || true`；预期必须命中的搜索保留非零退出，让 evaluator 能区分正常缺席与真实失败。
+- **控制验证节奏**：任务文件写明基线命令、耗时和已知失败。实现期跑受影响的测试类，最终只跑一次全量；新增 CLI 文件参数必须至少走一次真实 CLI 入口。
+
 ## Evaluation（评估）
 
 This is the optional evaluation companion to `pkc-project-operator`, not a second operator. Humans use the Operator for all ordinary project installation, query, capture, maintenance, runtime upgrade, and approval/application work. Invoke this Evaluator only when fresh-context model usability is itself being tested—for example after a Skill, CLI, project Adapter, routing Context, or model-facing workflow changes. A normal knowledge Bundle, Authority refresh, or real-environment check does not require it.

@@ -142,4 +142,28 @@ class BundleContractTests(unittest.TestCase):
             manifest=dict(self.manifest); manifest['bundle_type']=kind
             self.assertEqual(build_bundle(self.root,manifest,IDENTITIES)['bundle_type'],kind)
 
+    def test_bundle_approve_and_apply_help_require_exact_content_hash(self):
+        for command in ('bundle-approve','bundle-apply'):
+            stream=io.StringIO()
+            with contextlib.redirect_stdout(stream):
+                with self.assertRaises(SystemExit) as raised:
+                    main([command,'--help'])
+            self.assertEqual(raised.exception.code,0)
+            help_output=stream.getvalue()
+            flat=' '.join(help_output.split())
+            compact=''.join(help_output.split())
+            self.assertIn('REQUIRED',flat)
+            self.assertIn('bundle-status',compact)
+            self.assertIn('bundle-inspect',compact)
+            self.assertIn('same hash',flat)
+
+    def test_bundle_status_and_inspect_help_surface_the_exact_hash(self):
+        for command in ('bundle-status','bundle-inspect'):
+            stream=io.StringIO()
+            with contextlib.redirect_stdout(stream):
+                with self.assertRaises(SystemExit) as raised:
+                    main([command,'--help'])
+            self.assertEqual(raised.exception.code,0)
+            self.assertIn('content hash',stream.getvalue())
+
 if __name__=='__main__': unittest.main()

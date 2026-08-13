@@ -416,16 +416,20 @@ class SemanticPlanContractTests(unittest.TestCase):
         self.assertEqual((inspected["state"], inspected["cost_counters"]["candidate_bundles"]), ("open", 0))
         self.assertEqual(self.formal_authority(), self.authority_before)
 
-    def test_cli_finalize_reports_non_current_authority_with_status_and_hashes(self):
+    def test_cli_finalize_warns_on_historical_stale_refs_and_completes(self):
         refs_path = self.root / "data/store/authority-refs.json"
         refs = json.loads(refs_path.read_text(encoding="utf-8"))
         refs["refs"].append({"id": "aref_stale_fixture", "path": "authority/schema-contract.md", "locator": "fixture",
                              "role": "documented_contract", "baseline_state": "committed_baseline",
                              "change_policy": "invalidate_on_change", "approved_hash": "0" * 64,
                              "claim_ids": [], "supports_fact_classes": []})
+        refs["refs"].append({"id": "aref_stale_fixture_2", "path": "authority/validation-contract.md", "locator": "fixture",
+                             "role": "documented_contract", "baseline_state": "committed_baseline",
+                             "change_policy": "invalidate_on_change", "approved_hash": "1" * 64,
+                             "claim_ids": [], "supports_fact_classes": []})
         refs_path.write_text(json.dumps(refs, indent=2) + "\n", encoding="utf-8")
         subprocess.run(["git", "add", refs_path.relative_to(self.root).as_posix()], cwd=self.root, check=True)
-        subprocess.run(["git", "commit", "-qm", "add stale authority fixture"], cwd=self.root, check=True)
+        subprocess.run(["git", "commit", "-qm", "add stale authority fixtures"], cwd=self.root, check=True)
         self.authority_before = self.formal_authority()
         plan_id = self.cli_process("knowledge-plan", "init", "--intent", "Expose Authority diagnostics", "--risk", "medium")["plan_id"]
         added = self.cli_process("knowledge-plan", "add-claim", plan_id, "--node", "software-core", "--topic-id", "topic-schema",
@@ -436,16 +440,94 @@ class SemanticPlanContractTests(unittest.TestCase):
                          "--role", "documented_contract", "--change-policy", "invalidate_on_change",
                          "--fact-class", "documented_contract")
         self.assertTrue(self.cli_process("knowledge-plan", "check", plan_id, "--mode", "delta")["can_finalize"])
-        failed = self.cli_process("knowledge-plan", "finalize", plan_id, expected=1)
-        finding = next(item for item in failed["errors"] if item["authority_ref_id"] == "aref_stale_fixture")
-        self.assertEqual(finding["code"], "PLAN_FULL_AUTHORITY_NOT_CURRENT")
-        self.assertEqual(finding["effective_status"], "invalidated")
-        self.assertEqual(finding["expected_hash"], "0" * 64)
-        self.assertEqual(len(finding["observed_hash"]), 64)
-        self.assertFalse(finding["staged_by_current_plan"])
-        self.assertEqual(finding["authority_scope"], "historical")
+        finalized = self.cli_process("knowledge-plan", "finalize", plan_id)
+        self.assertTrue(finalized["summary"]["finalized"])
+        warnings = finalized["warnings"]
+        self.assertEqual(len(warnings), 2)
+        warning = next(item for item in warnings if item["authority_ref_id"] == "aref_stale_fixture")
+        self.assertEqual(warning["code"], "PLAN_FULL_AUTHORITY_NOT_CURRENT")
+        self.assertEqual(warning["effective_status"], "invalidated")
+        self.assertEqual(warning["expected_hash"], "0" * 64)
+        self.assertEqual(len(warning["observed_hash"]), 64)
+        self.assertFalse(warning["staged_by_current_plan"])
+        self.assertEqual(warning["authority_scope"], "historical")
+        self.assertFalse(warning["blocking"])
+        self.assertIn("separate authority-maintenance plan", warning["recommended_action"])
+        maintenance = finalized["authority_maintenance"]
+        self.assertEqual(maintenance["historical_count"], 2)
+        self.assertEqual(sorted(maintenance["historical_ref_ids"]), ["aref_stale_fixture", "aref_stale_fixture_2"])
+        self.assertFalse(maintenance["blocking"])
+        self.assertIn("separate authority-maintenance plan", maintenance["recommended_action"])
+        full = json.loads((self.root / finalized["artifact_path"]).read_text(encoding="utf-8"))
+        self.assertTrue(full["ok"])
+        self.assertEqual(len(full["authority_warnings"]), 2)
+        self.assertEqual(len(list((self.root / "data/knowledge/bundles").glob("bnd_*.json"))), 1)
+        replay = self.cli_process("knowledge-plan", "finalize", plan_id)
+        self.assertTrue(replay["summary"]["replayed"])
+        self.assertEqual(len(replay["warnings"]), 2)
         inspected = self.cli_process("knowledge-plan", "inspect", plan_id)
-        self.assertEqual((inspected["state"], inspected["cost_counters"]["candidate_bundles"]), ("open", 0))
+        self.assertEqual((inspected["state"], inspected["cost_counters"]["candidate_bundles"]), ("finalized", 1))
+        self.assertFalse(inspected["closeout_preview"]["authority_maintenance"]["blocking"])
+        self.assertEqual(self.formal_authority(), self.authority_before)
+
+    def test_historical_stale_refs_warn_but_plan_affected_stale_ref_still_blocks_finalize(self):
+        # Establish a governed Claim + Ref, apply it, and commit the applied authority as baseline.
+        initial = self.init()["plan_id"]
+        added = self.add_claim(initial, "schema", "Schema input is explicit", "The schema parser accepts explicit versioned fields.",
+                               ("documented_contract",))
+        original = self.add_ref(initial, added["claim_id"], "schema", "authority/schema-contract.md",
+                                "documented_contract", "documented_contract")
+        self.cli("knowledge-plan", "check", initial, "--mode", "delta")
+        first = self.cli("knowledge-plan", "finalize", initial)
+        self.cli("bundle-approve", first["bundle_id"], "--content-hash", first["content_hash"], "--apply")
+        self.cli("bundle-apply", first["bundle_id"], "--content-hash", first["content_hash"], "--apply")
+        subprocess.run(["git", "add", "data/store", "domain/topics/schema.md"], cwd=self.root, check=True)
+        subprocess.run(["git", "commit", "-qm", "governed schema baseline"], cwd=self.root, check=True)
+
+        # Two unrelated historical stale refs and one stale ref linked to the plan's revised Claim.
+        refs_path = self.root / "data/store/authority-refs.json"
+        refs = json.loads(refs_path.read_text(encoding="utf-8"))
+        refs["refs"].append({"id": "aref_historical_a", "path": "authority/validation-contract.md", "locator": "fixture",
+                             "role": "documented_contract", "baseline_state": "committed_baseline",
+                             "change_policy": "invalidate_on_change", "approved_hash": "0" * 64,
+                             "claim_ids": [], "supports_fact_classes": []})
+        refs["refs"].append({"id": "aref_historical_b", "path": "authority/runtime-contract.md", "locator": "fixture",
+                             "role": "documented_contract", "baseline_state": "committed_baseline",
+                             "change_policy": "invalidate_on_change", "approved_hash": "1" * 64,
+                             "claim_ids": [], "supports_fact_classes": []})
+        refs_path.write_text(json.dumps(refs, indent=2) + "\n", encoding="utf-8")
+        subprocess.run(["git", "add", refs_path.relative_to(self.root).as_posix()], cwd=self.root, check=True)
+        subprocess.run(["git", "commit", "-qm", "add stale fixture refs"], cwd=self.root, check=True)
+
+        # The committed source of the plan-linked Ref changes, so that Ref is stale AND plan-affected.
+        authority = self.root / "authority/schema-contract.md"
+        authority.write_text(authority.read_text(encoding="utf-8") + "\nChanged source.\n", encoding="utf-8")
+        subprocess.run(["git", "add", "authority/schema-contract.md"], cwd=self.root, check=True)
+        subprocess.run(["git", "commit", "-qm", "change schema authority source"], cwd=self.root, check=True)
+        self.authority_before = self.formal_authority()
+
+        plan_id = self.init()["plan_id"]
+        unrelated = self.add_claim(plan_id, "validation", "Unrelated validation claim",
+                                   "This claim is unrelated to stale authority.", ("documented_contract",))["claim_id"]
+        self.add_ref(plan_id, unrelated, "validation", "authority/validation-contract.md", "documented_contract", "documented_contract")
+        self.cli("knowledge-plan", "revise-claim", plan_id, "--claim-id", added["claim_id"],
+                 "--title", "Schema input is explicit and versioned",
+                 "--statement", "The schema parser accepts explicit versioned fields with a version marker.",
+                 "--boundary", "Only the committed neutral fixture is in scope.",
+                 "--semantic-declaration", "clarify", "--reason", "Sharpen the statement.")
+        self.assertTrue(self.cli("knowledge-plan", "check", plan_id, "--mode", "delta")["can_finalize"])
+        failed = self.cli_process("knowledge-plan", "finalize", plan_id, expected=1)
+        affected = next(item for item in failed["errors"] if item["authority_ref_id"] == original["authority_ref_id"])
+        self.assertEqual(affected["code"], "PLAN_FULL_AUTHORITY_NOT_CURRENT")
+        self.assertEqual(affected["authority_scope"], "plan_affected")
+        self.assertTrue(affected["blocking"])
+        self.assertEqual(affected["effective_status"], "invalidated")
+        self.assertEqual(affected["claim_ids"], [added["claim_id"]])
+        historical = [item for item in failed["errors"] if item["authority_ref_id"].startswith("aref_historical_")]
+        self.assertEqual(len(historical), 2)
+        self.assertTrue(all(item["authority_scope"] == "historical" and not item["blocking"] for item in historical))
+        bundles = [path for path in (self.root / "data/knowledge/bundles").glob("bnd_*.json") if path.name.count(".") == 1]
+        self.assertEqual(len(bundles), 1)
         self.assertEqual(self.formal_authority(), self.authority_before)
 
     def test_knowledge_check_skips_unconfigured_retrieval_evaluation(self):
@@ -1083,6 +1165,182 @@ class SemanticPlanContractTests(unittest.TestCase):
         failed = self.cli("knowledge-plan", "rebase", finalized["plan_id"], "--reason", "Too late.", expected=1)
         self.assertEqual(failed["errors"][0]["code"], "PLAN_FINALIZED_IMMUTABLE")
 
+    def _establish_committed_ref(self, *, change_source: bool = True) -> dict:
+        """Commit one Authority Ref; optionally also commit a change of its source on a new
+        commit so the registry no longer approves the source hash. Returns the Ref summary."""
+        plan_a = self.cli("knowledge-plan", "init", "--intent", "Establish schema authority", "--risk", "medium")["plan_id"]
+        added = self.add_claim(plan_a, "schema", "Schema authority", "Schema contracts are authoritative.", ("documented_contract",))
+        original = self.add_ref(plan_a, added["claim_id"], "schema", "authority/schema-contract.md",
+                                "documented_contract", "documented_contract")
+        self.cli("knowledge-plan", "check", plan_a, "--mode", "delta")
+        first = self.cli("knowledge-plan", "finalize", plan_a)
+        self.cli("bundle-approve", first["bundle_id"], "--content-hash", first["content_hash"], "--apply")
+        self.cli("bundle-apply", first["bundle_id"], "--content-hash", first["content_hash"], "--apply")
+        subprocess.run(["git", "add", "data/store", "domain/topics/schema.md"], cwd=self.root, check=True)
+        subprocess.run(["git", "commit", "-qm", "establish schema authority"], cwd=self.root, check=True)
+        if change_source:
+            self._change_committed_authority_source()
+        return original
+
+    def _change_committed_authority_source(self) -> None:
+        authority = self.root / "authority/schema-contract.md"
+        authority.write_text(authority.read_text(encoding="utf-8") + "\nMaintained behavior.\n", encoding="utf-8")
+        subprocess.run(["git", "add", "authority/schema-contract.md"], cwd=self.root, check=True)
+        subprocess.run(["git", "commit", "-qm", "change schema authority source"], cwd=self.root, check=True)
+
+    def _apply_uncommitted_maintenance(self, ref: dict) -> dict:
+        """Finalize, approve, and apply a maintenance Bundle that refreshes the Ref, leaving the
+        working-tree registry modified WITHOUT a commit. Returns the refresh summary."""
+        maintenance = self.cli("knowledge-plan", "init", "--intent", "Refresh schema Authority", "--risk", "medium")["plan_id"]
+        refreshed = self.cli("knowledge-plan", "refresh-authority-ref", maintenance,
+                             "--authority-ref-id", ref["authority_ref_id"],
+                             "--reason", "Committed source changed and was reviewed.")
+        self.assertTrue(self.cli("knowledge-plan", "check", maintenance, "--mode", "delta")["can_finalize"])
+        finalized = self.cli("knowledge-plan", "finalize", maintenance)
+        self.cli("bundle-approve", finalized["bundle_id"], "--content-hash", finalized["content_hash"], "--apply")
+        self.cli("bundle-apply", finalized["bundle_id"], "--content-hash", finalized["content_hash"], "--apply")
+        status = subprocess.run(["git", "status", "--porcelain", "--", "data/store/authority-refs.json"],
+                                cwd=self.root, text=True, capture_output=True).stdout
+        self.assertTrue(status.startswith(" M "))
+        return refreshed
+
+    def test_maintenance_applied_uncommitted_rebase_finalize_and_inspect_diagnose_snapshot_expiry(self):
+        """Issue #2: with HEAD unchanged but the working-tree registry refreshed by an applied
+        (uncommitted) maintenance Bundle, rebase/check/finalize return the commit-then-abandon
+        recovery path instead of PLAN_REBASE_NOOP or refresh-advice, and inspect distinguishes
+        the worktree-refreshed state from never-refreshed debt."""
+        original = self._establish_committed_ref()
+        # The old open plan is created at the current HEAD and depends on the snapshot.
+        plan_id = self.cli("knowledge-plan", "init", "--intent", "Old snapshot dependent plan", "--risk", "medium")["plan_id"]
+        claim = self.add_claim(plan_id, "runtime", "Runtime contract", "Runtime follows the committed schema contract.",
+                               ("documented_contract",))["claim_id"]
+        self.add_ref(plan_id, claim, "runtime", "authority/schema-contract.md", "documented_contract", "documented_contract")
+        self.assertTrue(self.cli("knowledge-plan", "check", plan_id, "--mode", "delta")["can_finalize"])
+        plan_path = self.root / ".local/pkc/semantic-plans" / f"{plan_id}.json"
+        plan_value = json.loads(plan_path.read_text(encoding="utf-8"))
+        baseline = plan_value["baseline_commit"]
+
+        refreshed = self._apply_uncommitted_maintenance(original)
+        head = subprocess.run(["git", "rev-parse", "HEAD"], cwd=self.root, text=True, capture_output=True).stdout.strip()
+        self.assertEqual(head, baseline)
+        registry = json.loads((self.root / "data/store/authority-refs.json").read_text(encoding="utf-8"))
+        current = next(ref for ref in registry["refs"] if ref["id"] == original["authority_ref_id"])
+        self.assertEqual(current["approved_hash"], refreshed["new_approved_hash"])
+
+        # rebase must not answer with the context-less PLAN_REBASE_NOOP.
+        denied = self.cli("knowledge-plan", "rebase", plan_id, "--reason", "Maintenance was applied.", expected=1)
+        self.assertEqual(denied["errors"][0]["code"], "PLAN_AUTHORITY_MAINTENANCE_UNCOMMITTED")
+        message = denied["errors"][0]["message"]
+        for fragment in ("working tree", "plan snapshot", "commit", "knowledge-plan abandon", "abandon"):
+            self.assertIn(fragment, message)
+        self.assertEqual(denied["errors"][0]["uncommitted_paths"], ["data/store/authority-refs.json"])
+
+        # check and finalize fail with the same single recovery path.
+        for command in (("knowledge-plan", "check", plan_id, "--mode", "delta"),
+                        ("knowledge-plan", "finalize", plan_id)):
+            failed = self.cli(*command, expected=1)
+            self.assertEqual(failed["errors"][0]["code"], "PLAN_AUTHORITY_MAINTENANCE_UNCOMMITTED")
+            self.assertIn("abandon", failed["errors"][0]["message"])
+
+        # inspect distinguishes the worktree-refreshed state from never-refreshed debt.
+        inspected = self.cli("knowledge-plan", "inspect", plan_id)
+        affected = inspected["closeout_preview"]["affected_authority_refs"]
+        external = next(item for item in affected if item["authority_ref_id"] == original["authority_ref_id"])
+        self.assertEqual(external["change"], "worktree_refreshed_uncommitted")
+        self.assertIn("not committed", external["human_review_reason"])
+        maintenance_block = inspected["closeout_preview"]["authority_maintenance"]
+        self.assertEqual(maintenance_block["snapshot_state"], "maintenance_uncommitted")
+        self.assertEqual(maintenance_block["uncommitted_paths"], ["data/store/authority-refs.json"])
+        self.assertIn("abandon", maintenance_block["recommended_action"])
+
+        # The failed rebase did not mutate the snapshot, and the plan snapshot never absorbed
+        # the uncommitted working-tree registry content.
+        plan_value = json.loads(plan_path.read_text(encoding="utf-8"))
+        self.assertEqual(plan_value["baseline_commit"], baseline)
+        self.assertEqual(plan_value.get("rebase_history", []), [])
+        snapshot_refs = json.loads(base64.b64decode(plan_value["writes"]["data/store/authority-refs.json"]).decode("utf-8"))["refs"]
+        snapshot_ref = next(ref for ref in snapshot_refs if ref["id"] == original["authority_ref_id"])
+        self.assertEqual(snapshot_ref["approved_hash"], original["approved_hash"])
+
+        # The recovery path is executable without any further refresh: the human commits the
+        # maintenance, then abandons and rebuilds the old-snapshot plan.
+        subprocess.run(["git", "add", "data/store"], cwd=self.root, check=True)
+        subprocess.run(["git", "commit", "-qm", "authorize maintenance commit"], cwd=self.root, check=True)
+        conflict = self.cli("knowledge-plan", "rebase", plan_id, "--reason", "Maintenance committed.", expected=1)
+        self.assertEqual(conflict["errors"][0]["code"], "PLAN_REBASE_CONFLICT")
+        abandoned = self.cli("knowledge-plan", "abandon", plan_id, "--reason", "Snapshot is stale after maintenance.")
+        self.assertEqual(abandoned["state"], "abandoned")
+        rebuilt = self.cli("knowledge-plan", "init", "--intent", "Rebuild on the new committed baseline", "--risk", "medium")["plan_id"]
+        rebuilt_claim = self.add_claim(rebuilt, "schema", "Schema contract after maintenance",
+                                       "Schema contracts are authoritative after maintenance.", ("documented_contract",))["claim_id"]
+        self.add_ref(rebuilt, rebuilt_claim, "schema", "authority/schema-contract.md", "documented_contract", "documented_contract")
+        self.assertTrue(self.cli("knowledge-plan", "check", rebuilt, "--mode", "delta")["can_finalize"])
+
+    def test_maintenance_applied_uncommitted_with_moved_head_diagnoses_snapshot_expiry(self):
+        """Issue #2: when the old plan predates the committed source change, rebase and finalize
+        must name the uncommitted maintenance (commit then abandon/rebuild) instead of a generic
+        PLAN_STALE_BASELINE or a refresh-the-refs conflict, and inspect flips the same Ref from
+        never-refreshed to worktree-refreshed-uncommitted once the Bundle is applied."""
+        # The old open plan predates the source change: its Ref approves the old hash.
+        original = self._establish_committed_ref(change_source=False)
+        plan_id = self.cli("knowledge-plan", "init", "--intent", "Old snapshot dependent plan", "--risk", "medium")["plan_id"]
+        claim = self.add_claim(plan_id, "schema", "Schema input is explicit", "The schema parser accepts explicit versioned fields.",
+                               ("documented_contract",))["claim_id"]
+        self.add_ref(plan_id, claim, "schema", "authority/schema-contract.md", "documented_contract", "documented_contract")
+        self.assertTrue(self.cli("knowledge-plan", "check", plan_id, "--mode", "delta")["can_finalize"])
+        self._change_committed_authority_source()
+
+        # Before the maintenance is applied the committed debt reads as never-refreshed.
+        inspected = self.cli("knowledge-plan", "inspect", plan_id)
+        affected = inspected["closeout_preview"]["affected_authority_refs"]
+        external = next(item for item in affected if item["authority_ref_id"] == original["authority_ref_id"])
+        self.assertEqual(external["change"], "external_invalidated")
+        self.assertIn("refresh the reference", external["human_review_reason"])
+
+        # Apply the maintenance Bundle without committing: HEAD has moved since plan init and the
+        # registry is now drifted in the working tree.
+        self._apply_uncommitted_maintenance(original)
+        head = subprocess.run(["git", "rev-parse", "HEAD"], cwd=self.root, text=True, capture_output=True).stdout.strip()
+        plan_value = json.loads((self.root / ".local/pkc/semantic-plans" / f"{plan_id}.json").read_text(encoding="utf-8"))
+        self.assertNotEqual(head, plan_value["baseline_commit"])
+
+        # rebase previously answered PLAN_REBASE_CONFLICT / finalize answered PLAN_STALE_BASELINE;
+        # both now return the maintenance recovery path.
+        denied = self.cli("knowledge-plan", "rebase", plan_id, "--reason", "Maintenance was applied.", expected=1)
+        self.assertEqual(denied["errors"][0]["code"], "PLAN_AUTHORITY_MAINTENANCE_UNCOMMITTED")
+        self.assertIn("knowledge-plan abandon", denied["errors"][0]["message"])
+        failed = self.cli("knowledge-plan", "finalize", plan_id, expected=1)
+        self.assertEqual(failed["errors"][0]["code"], "PLAN_AUTHORITY_MAINTENANCE_UNCOMMITTED")
+
+        # The same Ref now reads as already refreshed in the working tree.
+        inspected = self.cli("knowledge-plan", "inspect", plan_id)
+        affected = inspected["closeout_preview"]["affected_authority_refs"]
+        external = next(item for item in affected if item["authority_ref_id"] == original["authority_ref_id"])
+        self.assertEqual(external["change"], "worktree_refreshed_uncommitted")
+        self.assertEqual(inspected["closeout_preview"]["authority_maintenance"]["snapshot_state"], "maintenance_uncommitted")
+
+    def test_finalized_plan_approval_is_blocked_while_maintenance_is_uncommitted(self):
+        """Issue #2 safety: an already-finalized old plan cannot be re-finalized, approved, or
+        applied while an uncommitted maintenance Bundle has refreshed the working-tree registry;
+        its baseline-derived registry write would otherwise silently revert the maintenance."""
+        original = self._establish_committed_ref(change_source=False)
+        plan_id = self.cli("knowledge-plan", "init", "--intent", "Old snapshot dependent plan", "--risk", "medium")["plan_id"]
+        claim = self.add_claim(plan_id, "runtime", "Runtime contract", "Runtime follows the committed schema contract.",
+                               ("documented_contract",))["claim_id"]
+        self.add_ref(plan_id, claim, "runtime", "authority/schema-contract.md", "documented_contract", "documented_contract")
+        self.assertTrue(self.cli("knowledge-plan", "check", plan_id, "--mode", "delta")["can_finalize"])
+        finalized = self.cli("knowledge-plan", "finalize", plan_id)
+        self._change_committed_authority_source()
+        self._apply_uncommitted_maintenance(original)
+
+        replay = self.cli("knowledge-plan", "finalize", plan_id, expected=1)
+        self.assertEqual(replay["errors"][0]["code"], "PLAN_AUTHORITY_MAINTENANCE_UNCOMMITTED")
+        for command in (("bundle-approve", finalized["bundle_id"], "--content-hash", finalized["content_hash"], "--apply"),
+                        ("bundle-apply", finalized["bundle_id"], "--content-hash", finalized["content_hash"], "--apply")):
+            denied = self.cli(*command, expected=1)
+            self.assertEqual(denied["errors"][0]["code"], "PLAN_AUTHORITY_MAINTENANCE_UNCOMMITTED")
+            self.assertIn("abandon", denied["errors"][0]["message"])
+
     def test_add_authority_ref_distinguishes_revised_from_missing_claim(self):
         first_plan = self.init()["plan_id"]
         first = self.add_claim(first_plan, "schema", "Schema input is explicit", "The schema parser accepts explicit versioned fields.",
@@ -1129,11 +1387,12 @@ class SemanticPlanContractTests(unittest.TestCase):
         external = next(item for item in affected if item["authority_ref_id"] == "aref_external_stale")
         self.assertEqual(external["change"], "external_invalidated")
         self.assertEqual(external["scope"], "historical")
-        self.assertTrue(external["blocking"])
+        self.assertFalse(external["blocking"])
         self.assertEqual(inspected["closeout_preview"]["authority_ref_counts"]["historical"], 1)
         maintenance = inspected["closeout_preview"]["authority_maintenance"]
         self.assertEqual(maintenance["historical_ref_ids"], ["aref_external_stale"])
-        self.assertTrue(maintenance["blocking"])
+        self.assertEqual(maintenance["historical_count"], 1)
+        self.assertFalse(maintenance["blocking"])
         self.assertIn("separate authority-maintenance plan", maintenance["recommended_action"])
         self.assertEqual(external["old_hash"], "0" * 64)
         self.assertEqual(len(external["new_hash"]), 64)
@@ -1170,6 +1429,302 @@ class SemanticPlanContractTests(unittest.TestCase):
                                   text=True, encoding="utf-8", capture_output=True).stdout
         for value in ("existence_only", "review_on_change", "invalidate_on_change", "manual_review"):
             self.assertIn(value, ref_help)
+
+    def test_authority_ref_role_enum_is_surfaced_in_cli_help(self):
+        env = os.environ.copy()
+        env["PYTHONPATH"] = str(PACKAGE / "src")
+        help_text = subprocess.run([sys.executable, "-m", "portable_knowledge.cli", "--root", str(self.root),
+                                    "knowledge-plan", "add-authority-ref", "--help"], cwd=PACKAGE, env=env,
+                                   text=True, encoding="utf-8", capture_output=True).stdout
+        for value in ("design_intent", "current_implementation", "documented_contract", "external_environment_behavior"):
+            self.assertIn(value, help_text)
+        self.assertIn("legal values", help_text)
+
+    def test_plan_check_help_lists_mode_values(self):
+        env = os.environ.copy()
+        env["PYTHONPATH"] = str(PACKAGE / "src")
+        help_text = subprocess.run([sys.executable, "-m", "portable_knowledge.cli", "--root", str(self.root),
+                                    "knowledge-plan", "check", "--help"], cwd=PACKAGE, env=env,
+                                   text=True, encoding="utf-8", capture_output=True).stdout
+        self.assertIn("--mode", help_text)
+        self.assertIn("delta", help_text)
+        self.assertIn("legal values", help_text)
+
+    def test_invalid_enum_values_are_rejected_at_cli_parse_time(self):
+        env = os.environ.copy()
+        env["PYTHONPATH"] = str(PACKAGE / "src")
+        base = [sys.executable, "-m", "portable_knowledge.cli", "--root", str(self.root),
+                "knowledge-plan", "add-authority-ref", "plan_x", "--claim-id", "clm_x",
+                "--path", "a.py", "--locator", "x"]
+        cases = (
+            base + ["--role", "not_a_role", "--change-policy", "existence_only", "--fact-class", "runtime_behavior"],
+            base + ["--role", "design_intent", "--change-policy", "not_a_policy", "--fact-class", "runtime_behavior"],
+            base + ["--role", "design_intent", "--change-policy", "existence_only", "--fact-class", "not_a_class"],
+            [sys.executable, "-m", "portable_knowledge.cli", "--root", str(self.root),
+             "knowledge-plan", "check", "plan_x", "--mode", "full"],
+        )
+        for argv in cases:
+            completed = subprocess.run(argv, cwd=PACKAGE, env=env, text=True, encoding="utf-8", capture_output=True)
+            self.assertEqual(completed.returncode, 2, completed.stderr)
+            self.assertIn("invalid choice", completed.stderr)
+
+class CaptureContractTests(unittest.TestCase):
+    """File-driven batch Claim capture: one command, typed semantics, fail-closed drafts."""
+
+    LONG_STATEMENT = ("The schema parser accepts explicit versioned fields and rejects ambiguous input "
+                      "deterministically while preserving stable identifiers across the committed neutral "
+                      "fixture so that repeated captures of identical drafts produce identical reviewable "
+                      "bundles without any automatic approval or application.")
+
+    def setUp(self):
+        self.temp = tempfile.TemporaryDirectory()
+        self.root = Path(self.temp.name) / "fixture"
+        shutil.copytree(FIXTURE, self.root)
+        subprocess.run(["git", "init", "-q"], cwd=self.root, check=True)
+        subprocess.run(["git", "config", "user.email", "fixture@example.invalid"], cwd=self.root, check=True)
+        subprocess.run(["git", "config", "user.name", "Fixture"], cwd=self.root, check=True)
+        subprocess.run(["git", "add", "."], cwd=self.root, check=True)
+        subprocess.run(["git", "commit", "-qm", "neutral baseline"], cwd=self.root, check=True)
+        self.authority_before = self.formal_authority()
+
+    def tearDown(self):
+        self.temp.cleanup()
+
+    def cli(self, *argv: str, expected: int = 0) -> dict:
+        stream = io.StringIO()
+        with contextlib.redirect_stdout(stream):
+            result = core.main(["--root", str(self.root), *argv])
+        payload = json.loads(stream.getvalue())
+        self.assertEqual(result, expected, payload)
+        return payload
+
+    def formal_authority(self) -> dict[str, bytes]:
+        return {path.relative_to(self.root).as_posix(): path.read_bytes()
+                for base in (self.root / "data", self.root / "domain")
+                for path in base.rglob("*") if path.is_file() and "data/knowledge/bundles/" not in path.relative_to(self.root).as_posix()}
+
+    def write_draft(self, name: str, intent: str, claims: list[dict], risk: str = "medium") -> Path:
+        draft = {"schema_version": 1, "intent": intent, "risk": risk, "claims": claims}
+        path = self.root / name
+        path.write_text(json.dumps(draft, indent=2) + "\n", encoding="utf-8")
+        return path
+
+    def schema_claim(self, statement: str | None = None) -> dict:
+        return {"id": "schema", "node": "software-core", "topic_id": "topic-schema",
+                "title": "Schema input is explicit",
+                "statement": statement or self.LONG_STATEMENT,
+                "boundary": "Only the committed neutral fixture is in scope.",
+                "fact_classes": ["documented_contract"],
+                "authority_refs": [{"path": "authority/schema-contract.md", "locator": "schema contract",
+                                    "role": "documented_contract", "change_policy": "invalidate_on_change",
+                                    "fact_classes": ["documented_contract"]}]}
+
+    def test_capture_long_claim_matches_interactive_plan_bundle(self):
+        self.assertGreaterEqual(len(self.LONG_STATEMENT), 200)
+        # The identical interactive typed sequence produces the same immutable Bundle.
+        plan_id = self.cli("knowledge-plan", "init", "--intent", "Capture equivalence draft", "--risk", "medium")["plan_id"]
+        added = self.cli("knowledge-plan", "add-claim", plan_id, "--node", "software-core", "--topic-id", "topic-schema",
+                         "--title", "Schema input is explicit", "--statement", self.LONG_STATEMENT,
+                         "--boundary", "Only the committed neutral fixture is in scope.", "--fact-class", "documented_contract")
+        self.cli("knowledge-plan", "add-authority-ref", plan_id, "--claim-id", added["claim_id"],
+                 "--path", "authority/schema-contract.md", "--locator", "schema contract",
+                 "--role", "documented_contract", "--change-policy", "invalidate_on_change",
+                 "--fact-class", "documented_contract")
+        self.cli("knowledge-plan", "check", plan_id, "--mode", "delta")
+        interactive = self.cli("knowledge-plan", "finalize", plan_id)
+        draft = self.write_draft("draft.json", "Capture equivalence draft", [self.schema_claim()])
+        captured = self.cli("knowledge-plan", "capture", "--file", draft.name)
+        self.assertEqual(captured["command"], "knowledge-plan capture")
+        self.assertEqual(captured["plan_state"], "finalized")
+        self.assertEqual(captured["plan_id"], plan_id)
+        self.assertTrue(captured["bundle_id"].startswith("bnd_"))
+        self.assertEqual(len(captured["content_hash"]), 64)
+        self.assertEqual(captured["risk"], "medium")
+        self.assertEqual(captured["permission_effect"], "none")
+        self.assertEqual(captured["operation_count"], 2)
+        self.assertEqual(len(captured["semantic_diff"]["claims_created"]), 1)
+        self.assertEqual(len(captured["semantic_diff"]["authority_refs_added"]), 1)
+        self.assertIn("data/store/authority-refs.json", captured["expected_changed_files"])
+        self.assertIn("data/store/registry.json", captured["expected_changed_files"])
+        self.assertIn("domain/topics/schema.md", captured["expected_changed_files"])
+        self.assertFalse(captured["approved"]); self.assertFalse(captured["applied"])
+        self.assertEqual(interactive["bundle_id"], captured["bundle_id"])
+        self.assertEqual(interactive["content_hash"], captured["content_hash"])
+        self.assertEqual(interactive["changed_files"], captured["expected_changed_files"])
+        # Only the immutable draft Bundle artifact exists; formal authority is untouched.
+        self.assertEqual(len(list((self.root / "data/knowledge/bundles").glob("bnd_*.json"))), 1)
+        self.assertFalse((self.root / "data/knowledge/bundles" / f"{captured['bundle_id']}.approval.json").exists())
+        self.assertEqual(self.formal_authority(), self.authority_before)
+        replay = self.cli("knowledge-plan", "capture", "--file", draft.name)
+        self.assertEqual((replay["bundle_id"], replay["content_hash"]), (captured["bundle_id"], captured["content_hash"]))
+        self.assertEqual(len(list((self.root / "data/knowledge/bundles").glob("bnd_*.json"))), 1)
+
+    def test_capture_batch_two_claims_single_command(self):
+        second = {"id": "runtime", "node": "software-core", "topic_id": "topic-runtime",
+                  "title": "Runtime selection is deterministic",
+                  "statement": "The runtime selects the same implementation for the same input under identical conditions.",
+                  "boundary": "Only the committed neutral fixture is in scope.",
+                  "fact_classes": ["runtime_behavior", "documented_contract"],
+                  "authority_refs": [
+                      {"path": "authority/runtime-contract.md", "locator": "runtime contract",
+                       "role": "current_implementation", "change_policy": "invalidate_on_change",
+                       "fact_classes": ["runtime_behavior"]},
+                      {"path": "authority/runtime-contract.md", "locator": "runtime contract",
+                       "role": "documented_contract", "change_policy": "invalidate_on_change",
+                       "fact_classes": ["documented_contract"]}]}
+        draft = self.write_draft("batch.json", "Batch capture draft", [self.schema_claim(), second])
+        captured = self.cli("knowledge-plan", "capture", "--file", draft.name)
+        self.assertEqual(captured["operation_count"], 5)
+        self.assertEqual(len(captured["semantic_diff"]["claims_created"]), 2)
+        self.assertEqual(len(captured["semantic_diff"]["authority_refs_added"]), 3)
+        self.assertEqual(captured["semantic_diff"]["operations"], 5)
+        self.assertEqual(len(captured["expected_changed_files"]), 4)
+        self.assertEqual(len(list((self.root / "data/knowledge/bundles").glob("bnd_*.json"))), 1)
+        bundle = json.loads((self.root / "data/knowledge/bundles" / f"{captured['bundle_id']}.json").read_text(encoding="utf-8"))
+        self.assertEqual(bundle["bundle_type"], "claim_create")
+        self.assertEqual(bundle["content_hash"], captured["content_hash"])
+        self.assertEqual(self.formal_authority(), self.authority_before)
+        stream = io.StringIO()
+        with contextlib.redirect_stdout(stream):
+            self.assertEqual(core.main(["--root", str(self.root), "knowledge-plan", "capture", "--file", draft.name, "--format", "text"]), 0)
+        text = stream.getvalue()
+        self.assertIn(captured["bundle_id"], text)
+        self.assertIn(captured["content_hash"], text)
+        self.assertIn("Risk: medium", text)
+
+    def test_capture_draft_schema_error_reports_field_and_creates_nothing(self):
+        claim = self.schema_claim()
+        claim["authority_refs"][0]["role"] = "not_a_role"
+        draft = self.write_draft("bad-role.json", "Invalid role draft", [claim])
+        failed = self.cli("knowledge-plan", "capture", "--file", draft.name, expected=1)
+        self.assertFalse(failed["ok"])
+        self.assertEqual(failed["plan_id"], None)
+        self.assertEqual(failed["retained_plan"], None)
+        error = failed["errors"][0]
+        self.assertEqual(error["code"], "PLAN_DRAFT_INVALID")
+        self.assertEqual(error["draft_field"], "claims[0].authority_refs[0].role")
+        self.assertEqual(len(list((self.root / "data/knowledge/bundles").glob("bnd_*.json"))), 0)
+        self.assertEqual(list((self.root / ".local/pkc/semantic-plans").glob("*.json")), [])
+        self.assertEqual(self.formal_authority(), self.authority_before)
+        typo = self.schema_claim(); typo["fact_class"] = typo.pop("fact_classes")
+        typo_draft = self.write_draft("typo.json", "Typo draft", [typo])
+        typo_failed = self.cli("knowledge-plan", "capture", "--file", typo_draft.name, expected=1)
+        self.assertEqual(typo_failed["errors"][0]["draft_field"], "claims[0].fact_class")
+        self.assertIn("unknown claim field", typo_failed["errors"][0]["message"])
+
+        target = self.schema_claim(); target["id"] = "target"
+        target["authority_refs"] = []
+        source = self.schema_claim(); source["id"] = "source"
+        source["fact_classes"] = ["runtime_behavior"]
+        source["authority_refs"][0]["claim_id"] = "target"
+        source["authority_refs"][0]["fact_classes"] = ["runtime_behavior"]
+        target_failed = self.cli("knowledge-plan", "capture", "--file",
+                                 self.write_draft("target-facts.json", "Target fact mismatch", [source, target]).name,
+                                 expected=1)
+        self.assertEqual(target_failed["errors"][-1]["draft_field"], "claims[0].authority_refs[0].fact_classes")
+        self.assertIn("target claim", target_failed["errors"][-1]["message"])
+
+    def test_capture_operation_failure_abandons_plan_and_reports_reason(self):
+        claim = self.schema_claim()
+        claim["authority_refs"][0]["path"] = "authority/not-committed.md"
+        draft = self.write_draft("bad-path.json", "Uncommitted authority draft", [claim])
+        failed = self.cli("knowledge-plan", "capture", "--file", draft.name, expected=1)
+        self.assertFalse(failed["ok"])
+        self.assertTrue(failed["plan_id"].startswith("pln_"))
+        self.assertEqual(failed["errors"][0]["code"], "PLAN_AUTHORITY_NOT_COMMITTED")
+        self.assertEqual(failed["errors"][0]["draft_field"], "claims[0].authority_refs[0]")
+        retained = failed["retained_plan"]
+        self.assertEqual(retained["plan_id"], failed["plan_id"])
+        self.assertEqual(retained["state"], "abandoned")
+        self.assertIn("PLAN_AUTHORITY_NOT_COMMITTED", retained["reason"])
+        plan = json.loads((self.root / ".local/pkc/semantic-plans" / f"{failed['plan_id']}.json").read_text(encoding="utf-8"))
+        self.assertEqual(plan["state"], "abandoned")
+        self.assertEqual(plan["writes"], {})
+        self.assertIn("capture failed", plan["abandon_reason"])
+        self.assertEqual(len(list((self.root / "data/knowledge/bundles").glob("bnd_*.json"))), 0)
+        denied = self.cli("knowledge-plan", "check", failed["plan_id"], "--mode", "delta", expected=1)
+        self.assertEqual(denied["errors"][0]["code"], "PLAN_NOT_OPEN")
+        self.assertEqual(self.formal_authority(), self.authority_before)
+
+    def test_capture_ref_can_target_claim_declared_later_in_draft(self):
+        first = {"id": "first", "node": "software-core", "topic_id": "topic-schema",
+                 "title": "Forward reference", "statement": "The first claim delegates its Authority to a later claim.",
+                 "boundary": "Only the committed neutral fixture is in scope.",
+                 "fact_classes": ["documented_contract"],
+                 "authority_refs": [{"claim_id": "later", "path": "authority/validation-contract.md",
+                                      "locator": "forward ref", "role": "documented_contract",
+                                      "change_policy": "invalidate_on_change",
+                                      "fact_classes": ["documented_contract"]},
+                                     {"path": "authority/validation-contract.md", "locator": "own ref",
+                                      "role": "documented_contract", "change_policy": "invalidate_on_change",
+                                      "fact_classes": ["documented_contract"]}]}
+        second = {"id": "later", "node": "software-core", "topic_id": "topic-validation",
+                  "title": "Validation fails closed",
+                  "statement": "Validation rejects incomplete semantic inputs before mutation.",
+                  "boundary": "Only the committed neutral fixture is in scope.",
+                  "fact_classes": ["cli_behavior", "documented_contract"],
+                  "authority_refs": [{"path": "authority/validation-contract.md", "locator": "validation contract",
+                                       "role": "current_implementation", "change_policy": "invalidate_on_change",
+                                       "fact_classes": ["cli_behavior"]},
+                                      {"path": "authority/validation-contract.md", "locator": "validation contract",
+                                       "role": "documented_contract", "change_policy": "invalidate_on_change",
+                                       "fact_classes": ["documented_contract"]}]}
+        draft = self.write_draft("forward.json", "Forward reference draft", [first, second])
+        captured = self.cli("knowledge-plan", "capture", "--file", draft.name)
+        self.assertEqual(captured["operation_count"], 6)
+        self.assertEqual(len(captured["semantic_diff"]["authority_refs_added"]), 4)
+        self.assertEqual(len(list((self.root / "data/knowledge/bundles").glob("bnd_*.json"))), 1)
+        self.assertEqual(self.formal_authority(), self.authority_before)
+
+    def test_capture_delta_failure_reports_findings_and_abandons_plan(self):
+        first = {"id": "a", "node": "software-core", "topic_id": "topic-schema",
+                 "title": "Schema input is explicit",
+                 "statement": "The schema parser accepts explicit versioned fields deterministically.",
+                 "boundary": "Only the committed neutral fixture is in scope.",
+                 "fact_classes": ["documented_contract"],
+                 "authority_refs": [{"claim_id": "b", "path": "authority/validation-contract.md",
+                                      "locator": "cross", "role": "documented_contract",
+                                      "change_policy": "invalidate_on_change",
+                                      "fact_classes": ["documented_contract"]}]}
+        second = {"id": "b", "node": "software-core", "topic_id": "topic-validation",
+                  "title": "Validation fails closed",
+                  "statement": "Validation rejects incomplete semantic inputs before mutation.",
+                  "boundary": "Only the committed neutral fixture is in scope.",
+                  "fact_classes": ["cli_behavior", "documented_contract"],
+                  "authority_refs": [{"path": "authority/validation-contract.md", "locator": "cli",
+                                       "role": "current_implementation", "change_policy": "invalidate_on_change",
+                                       "fact_classes": ["cli_behavior"]},
+                                      {"path": "authority/validation-contract.md", "locator": "doc",
+                                       "role": "documented_contract", "change_policy": "invalidate_on_change",
+                                       "fact_classes": ["documented_contract"]}]}
+        draft = self.write_draft("coverage.json", "Coverage failure draft", [first, second])
+        failed = self.cli("knowledge-plan", "capture", "--file", draft.name, expected=1)
+        self.assertEqual(failed["errors"][0]["code"], "AUTHORITY_FACT_COVERAGE")
+        self.assertEqual(failed["errors"][0]["draft_field"], "claims[0].a")
+        self.assertEqual(failed["errors"][0]["missing_fact_classes"], ["documented_contract"])
+        self.assertEqual(failed["retained_plan"]["state"], "abandoned")
+        self.assertIn("PLAN_DELTA_FAILED", failed["retained_plan"]["reason"])
+        self.assertEqual(len(list((self.root / "data/knowledge/bundles").glob("bnd_*.json"))), 0)
+        self.assertEqual(self.formal_authority(), self.authority_before)
+
+    def test_capture_full_preflight_failure_abandons_plan_without_bundle(self):
+        refs_path = self.root / "data/store/authority-refs.json"
+        refs = json.loads(refs_path.read_text(encoding="utf-8"))
+        refs["refs"].append({"id": "aref_stale_capture", "path": "data/store/registry.json", "locator": "fixture",
+                             "role": "documented_contract", "baseline_state": "committed_baseline",
+                             "change_policy": "invalidate_on_change", "approved_hash": "0" * 64,
+                             "claim_ids": [], "supports_fact_classes": []})
+        refs_path.write_text(json.dumps(refs, indent=2) + "\n", encoding="utf-8")
+        subprocess.run(["git", "add", "data/store/authority-refs.json"], cwd=self.root, check=True)
+        subprocess.run(["git", "commit", "-qm", "add stale authority fixture"], cwd=self.root, check=True)
+        self.authority_before = self.formal_authority()
+        draft = self.write_draft("stale.json", "Stale authority draft", [self.schema_claim()])
+        failed = self.cli("knowledge-plan", "capture", "--file", draft.name, expected=1)
+        self.assertTrue(any(error["code"] == "PLAN_AUTHORITY_STAGED_DRIFT" for error in failed["errors"]))
+        self.assertEqual(failed["retained_plan"]["state"], "abandoned")
+        self.assertIn("PLAN_FULL_PREFLIGHT_FAILED", failed["retained_plan"]["reason"])
+        self.assertEqual(len(list((self.root / "data/knowledge/bundles").glob("bnd_*.json"))), 0)
+        self.assertEqual(self.formal_authority(), self.authority_before)
 
 
 if __name__ == "__main__":
