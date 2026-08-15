@@ -1719,6 +1719,56 @@ def _lifecycle_events(root: Path, bundle_id: str) -> list[dict[str, Any]]:
     return events
 
 
+def bundle_health(root: Path, items: list[dict[str, Any]]) -> dict[str, Any]:
+    """Aggregate Bundle lifecycle health from a bundle-inspect listing.
+
+    Adds state counts, same-intent draft duplication hints, approved-pending-apply
+    next steps, and content-level approval/receipt validation so a single
+    ``bundle-status`` call surfaces the lifecycle panorama (R6/R7/R8).
+    """
+    counts: dict[str, int] = {}
+    by_intent: dict[str, list[dict[str, Any]]] = {}
+    pending_apply: list[dict[str, Any]] = []
+    anomalies: list[dict[str, Any]] = []
+    for item in items:
+        state = item.get("state", "draft")
+        counts[state] = counts.get(state, 0) + 1
+        if state == "draft":
+            key = str(item.get("intent", "")).strip()
+            by_intent.setdefault(key, []).append(item)
+        elif state == "approved":
+            pending_apply.append({"bundle_id": item["bundle_id"], "content_hash": item["content_hash"], "intent": item.get("intent"),
+                                  "next_step": "bundle-apply --apply --content-hash <this content_hash>"})
+        if item.get("approved"):
+            approval_path = root / "data/knowledge/bundles" / f"{item['bundle_id']}.approval.json"
+            if approval_path.is_file():
+                try:
+                    approval_value = json.loads(approval_path.read_text(encoding="utf-8"))
+                except (json.JSONDecodeError, OSError) as exc:
+                    anomalies.append({"kind": "approval_invalid", "bundle_id": item["bundle_id"], "detail": f"unparseable approval file: {exc}"})
+                    continue
+                # Lightweight content check only: schema fields present and bundle_id matches.
+                # Full semantic re-verification (verify_approval) would false-positive on
+                # pre-staged-preflight-era bundles whose approval predates the current validator.
+                if not isinstance(approval_value, dict) or approval_value.get("bundle_id") != item["bundle_id"] \
+                        or not approval_value.get("approval_hash") or not approval_value.get("content_hash"):
+                    anomalies.append({"kind": "approval_invalid", "bundle_id": item["bundle_id"],
+                                      "detail": "approval file missing schema fields or bundle_id mismatch"})
+            else:
+                anomalies.append({"kind": "approval_missing", "bundle_id": item["bundle_id"], "detail": "approved state but no approval file"})
+        if item.get("applied"):
+            receipt_path = root / "data/knowledge/bundles" / f"{item['bundle_id']}.applied.json"
+            if not receipt_path.is_file():
+                anomalies.append({"kind": "receipt_missing", "bundle_id": item["bundle_id"], "detail": "applied state but no applied receipt"})
+    duplicate_drafts = []
+    for intent, group in by_intent.items():
+        if len(group) > 1:
+            duplicate_drafts.append({"intent": intent or "(empty intent)", "draft_bundle_ids": sorted(item["bundle_id"] for item in group)})
+    return {"state_counts": counts, "duplicate_draft_intents": duplicate_drafts,
+            "approved_pending_apply": pending_apply, "anomalies": anomalies,
+            "total": len(items)}
+
+
 def bundle_inspect_command(root: Path, bundle_id: str | None, state: str | None = None) -> dict[str, Any]:
     directory = root / "data/knowledge/bundles"
     ids = [bundle_id] if bundle_id else sorted(path.stem for path in directory.glob("bnd_*.json") if not any(marker in path.name for marker in (".approval", ".applied", ".lifecycle")))
@@ -1738,7 +1788,10 @@ def bundle_inspect_command(root: Path, bundle_id: str | None, state: str | None 
                                     "applied": relpath(root, receipt_path)}, **projected}
         if state is None or item["state"] == state:
             items.append(item)
-    return {"ok": True, "command": "bundle-inspect", "count": len(items), "bundles": items, "errors": []}
+    payload: dict[str, Any] = {"ok": True, "command": "bundle-inspect", "count": len(items), "bundles": items, "errors": []}
+    if bundle_id is None:
+        payload["health"] = bundle_health(root, items)
+    return payload
 
 
 def bundle_supersede_command(root: Path, args: argparse.Namespace) -> dict[str, Any]:
@@ -2025,6 +2078,16 @@ def output(payload: dict[str, Any], fmt: str) -> None:
             print(f"  Risk: {bundle['risk']}")
             print(f"  Operations: {json.dumps(bundle['operation_counts'], sort_keys=True)}")
             print(f"  Expected changed files: {', '.join(bundle['expected_changed_files']) or '(none)'}")
+        health = payload.get("health")
+        if health:
+            print("Health:")
+            print(f"  State counts: {json.dumps(health['state_counts'], sort_keys=True)}")
+            for dup in health.get("duplicate_draft_intents", []):
+                print(f"  WARNING duplicate draft intent: {dup['intent']} -> {', '.join(dup['draft_bundle_ids'])}")
+            for pending in health.get("approved_pending_apply", []):
+                print(f"  PENDING APPLY: {pending['bundle_id']} ({pending.get('intent')}) -> {pending['next_step']}")
+            for anomaly in health.get("anomalies", []):
+                print(f"  ANOMALY [{anomaly['kind']}]: {anomaly['bundle_id']} — {anomaly['detail']}")
     elif payload.get("command") == "knowledge-search":
         print(f"OK: knowledge-search ({payload.get('mode', 'lexical')})")
         print(f"Query: {payload.get('query')}")
@@ -2276,6 +2339,8 @@ def parser_build() -> argparse.ArgumentParser:
     plan_init = plan_command("init")
     plan_init.add_argument("--intent", required=True)
     plan_init.add_argument("--risk", choices=("low", "medium", "high"), required=True)
+    plan_init.add_argument("--baseline", choices=("committed", "worktree"), default="committed",
+                          help="authority baseline mode: committed (default, git HEAD) or worktree (explicitly accept applied-but-uncommitted maintenance as baseline; use only when a just-applied Bundle is not yet committed and you accept that working tree as authority)")
     plan_claim = plan_command("add-claim")
     plan_claim.add_argument("plan_id")
     plan_claim.add_argument("--node", required=True)

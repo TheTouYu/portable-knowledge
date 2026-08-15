@@ -1468,6 +1468,58 @@ class SemanticPlanContractTests(unittest.TestCase):
             self.assertEqual(completed.returncode, 2, completed.stderr)
             self.assertIn("invalid choice", completed.stderr)
 
+    def test_init_worktree_baseline_accepts_uncommitted_authority_and_pins_snapshot(self):
+        """T1/R3: --baseline worktree pins the working-tree authority snapshot at init and refuses later drift,
+        while the snapshot itself reflects applied-but-uncommitted maintenance."""
+        self._configure_authority_refs()
+        plan_id = self.init()["plan_id"]
+        self.add_claim(plan_id, "schema", "Schema input is explicit", "The schema parser accepts explicit versioned fields.", ("documented_contract",))
+        self.add_ref(plan_id, self.cli("knowledge-plan", "inspect", plan_id)["claims"][0]["claim_id"],
+                     "schema", "authority/schema-contract.md", "documented_contract", "documented_contract")
+        self.cli("knowledge-plan", "check", plan_id, "--mode", "delta")
+        finalized = self.cli("knowledge-plan", "finalize", plan_id)
+        self.cli("bundle-approve", finalized["bundle_id"], "--content-hash", finalized["content_hash"], "--apply")
+        self.cli("bundle-apply", finalized["bundle_id"], "--content-hash", finalized["content_hash"], "--apply")
+        # authority registry is now modified in the working tree but not committed
+        plan2 = self.cli("knowledge-plan", "init", "--intent", "Second plan on uncommitted authority", "--risk", "low", "--baseline", "worktree")
+        self.assertEqual(plan2["baseline_mode"], "worktree")
+        self.assertIsNotNone(plan2.get("worktree_authority_hash"))
+        # a mutation on the worktree-baseline plan succeeds (snapshot pinned at init, no committed-drift guard needed)
+        self.add_claim(plan2["plan_id"], "runtime", "Runtime selection is deterministic", "The runtime selects the same implementation.", ("documented_contract",))
+
+    def test_worktree_baseline_drift_after_init_fails_closed(self):
+        """T1/R3: if the working-tree authority changes after a worktree-baseline plan is initialized, mutation is refused."""
+        self._configure_authority_refs()
+        plan_id = self.init()["plan_id"]
+        self.add_claim(plan_id, "schema", "Schema input is explicit", "The schema parser accepts explicit versioned fields.", ("documented_contract",))
+        self.add_ref(plan_id, self.cli("knowledge-plan", "inspect", plan_id)["claims"][0]["claim_id"],
+                     "schema", "authority/schema-contract.md", "documented_contract", "documented_contract")
+        self.cli("knowledge-plan", "check", plan_id, "--mode", "delta")
+        finalized = self.cli("knowledge-plan", "finalize", plan_id)
+        self.cli("bundle-approve", finalized["bundle_id"], "--content-hash", finalized["content_hash"], "--apply")
+        self.cli("bundle-apply", finalized["bundle_id"], "--content-hash", finalized["content_hash"], "--apply")
+        plan2 = self.cli("knowledge-plan", "init", "--intent", "Worktree baseline plan", "--risk", "low", "--baseline", "worktree")
+        # mutate the authority registry again after init (simulating another applied bundle)
+        refs_path = self.root / "data/store/authority-refs.json"
+        current = json.loads(refs_path.read_text(encoding="utf-8"))
+        refs_path.write_text(json.dumps(current, indent=1) + "\n", encoding="utf-8")
+        denied = self.cli("knowledge-plan", "add-claim", plan2["plan_id"], "--node", "software-core", "--topic-id", "topic-runtime",
+                          "--title", "Runtime selection is deterministic", "--statement", "The runtime selects the same implementation.",
+                          "--boundary", "Only the committed neutral fixture is in scope.", "--fact-class", "documented_contract",
+                          expected=1)
+        self.assertTrue(any(error["code"] == "PLAN_WORKTREE_SNAPSHOT_DRIFT" for error in denied["errors"]))
+
+    def _configure_authority_refs(self) -> None:
+        config_path = self.root / "project-intelligence.json"
+        config = json.loads(config_path.read_text(encoding="utf-8"))
+        config.setdefault("authority", {})["authority_refs"] = "data/store/authority-refs.json"
+        config_path.write_text(json.dumps(config, indent=2) + "\n", encoding="utf-8")
+        refs_path = self.root / "data/store/authority-refs.json"
+        refs_path.write_text('{"schema_version": 1, "refs": []}\n', encoding="utf-8")
+        subprocess.run(["git", "add", "project-intelligence.json", "data/store/authority-refs.json"], cwd=self.root, check=True)
+        subprocess.run(["git", "commit", "-qm", "configure authority refs"], cwd=self.root, check=True)
+        self.authority_before = self.formal_authority()
+
 class CaptureContractTests(unittest.TestCase):
     """File-driven batch Claim capture: one command, typed semantics, fail-closed drafts."""
 

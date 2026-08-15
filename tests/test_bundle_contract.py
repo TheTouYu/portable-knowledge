@@ -166,4 +166,34 @@ class BundleContractTests(unittest.TestCase):
             self.assertEqual(raised.exception.code,0)
             self.assertIn('content hash',stream.getvalue())
 
+    def test_bundle_health_counts_states_and_flags_duplicate_draft_intents(self):
+        from portable_knowledge.core import bundle_health
+        items=[
+            {'bundle_id':'bnd_AAA','state':'draft','intent':'same','approved':False,'applied':False,'content_hash':'h1'},
+            {'bundle_id':'bnd_BBB','state':'draft','intent':'same','approved':False,'applied':False,'content_hash':'h2'},
+            {'bundle_id':'bnd_CCC','state':'approved','intent':'other','approved':True,'applied':False,'content_hash':'h3'},
+            {'bundle_id':'bnd_DDD','state':'applied','intent':'done','approved':True,'applied':True,'content_hash':'h4'},
+        ]
+        health=bundle_health(self.root,items)
+        self.assertEqual(health['total'],4)
+        self.assertEqual(health['state_counts'],{'draft':2,'approved':1,'applied':1})
+        self.assertEqual(len(health['duplicate_draft_intents']),1)
+        self.assertEqual(health['duplicate_draft_intents'][0]['intent'],'same')
+        self.assertEqual(health['duplicate_draft_intents'][0]['draft_bundle_ids'],['bnd_AAA','bnd_BBB'])
+        self.assertEqual(len(health['approved_pending_apply']),1)
+        self.assertEqual(health['approved_pending_apply'][0]['bundle_id'],'bnd_CCC')
+        self.assertIn('bundle-apply',health['approved_pending_apply'][0]['next_step'])
+
+    def test_bundle_health_flags_approval_invalid_anomaly(self):
+        from portable_knowledge.core import bundle_health
+        from portable_knowledge.bundle import build_bundle, seal_preflight
+        bundles_dir=self.root/'data/knowledge/bundles'; bundles_dir.mkdir(parents=True,exist_ok=True)
+        bundle=seal_preflight(build_bundle(self.root,self.manifest,IDENTITIES),[])
+        (bundles_dir/f"{bundle['bundle_id']}.json").write_text(json.dumps(bundle)+'\n',encoding='utf-8')
+        (bundles_dir/f"{bundle['bundle_id']}.approval.json").write_text('{"bundle_id":"bnd_WRONG","content_hash":"bad"}\n',encoding='utf-8')
+        items=[{'bundle_id':bundle['bundle_id'],'state':'approved','intent':'x','approved':True,'applied':False,'content_hash':bundle['content_hash']}]
+        health=bundle_health(self.root,items)
+        self.assertEqual(len(health['anomalies']),1)
+        self.assertEqual(health['anomalies'][0]['kind'],'approval_invalid')
+
 if __name__=='__main__': unittest.main()

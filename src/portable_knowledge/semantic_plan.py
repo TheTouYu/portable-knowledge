@@ -173,9 +173,41 @@ def _assert_no_maintenance_drift(root: Path, plan: dict[str, Any], instance: Ins
           recommended_action="Review and commit the applied Authority maintenance, then abandon this plan and rebuild it on the new committed baseline.")
 
 
+def _authority_registry_worktree_snapshot(root: Path, instance: Instance) -> str | None:
+    """Hash of the current working-tree authority registry, or None when absent."""
+    refs_rel = instance.authority.get("authority_refs")
+    if not refs_rel:
+        return None
+    working_path = root / refs_rel
+    return hashlib.sha256(working_path.read_bytes()).hexdigest() if working_path.is_file() else None
+
+
+def _assert_worktree_snapshot_stable(root: Path, plan: dict[str, Any], instance: Instance) -> None:
+    """worktree-baseline plans pin their authority snapshot at init; refuse if the working tree drifted since."""
+    refs_rel = instance.authority.get("authority_refs")
+    if not refs_rel:
+        return
+    pinned = plan.get("worktree_authority_hash")
+    current = _authority_registry_worktree_snapshot(root, instance)
+    if pinned is not None and current is not None and pinned != current:
+        _fail("PLAN_WORKTREE_SNAPSHOT_DRIFT",
+              f"working-tree authority registry changed since this worktree-baseline plan was initialized ({refs_rel}); "
+              "abandon this plan and re-init on the current working tree: "
+              f"knowledge-plan abandon {plan['plan_id']} --reason ... then knowledge-plan init --baseline worktree",
+              path=refs_rel, plan_id=plan["plan_id"], plan_baseline_commit=plan["baseline_commit"], head_commit=_head(root),
+              uncommitted_paths=[refs_rel] if current != pinned else [],
+              recommended_action="Abandon this plan and re-initialize with --baseline worktree on the current working tree.")
+
+
 def _ensure_open(root: Path, instance: Instance, plan: dict[str, Any]) -> None:
     if plan.get("state") != "open":
         _fail("PLAN_NOT_OPEN", f"plan is {plan.get('state')}")
+    baseline_mode = plan.get("baseline_mode", "committed")
+    if baseline_mode == "worktree":
+        # Operator explicitly accepted the working-tree authority as baseline (applied-but-uncommitted maintenance).
+        # Skip the committed-baseline drift guards; still refuse if the working tree moved after init.
+        _assert_worktree_snapshot_stable(root, plan, instance)
+        return
     _assert_no_maintenance_drift(root, plan, instance)
     if _head(root) != plan["baseline_commit"]:
         _fail("PLAN_STALE_BASELINE",
@@ -256,8 +288,12 @@ def _assert_budget(plan: dict[str, Any], anticipated: dict[str, int] | None = No
 
 
 def init_plan(root: Path, instance: Instance, args: argparse.Namespace) -> dict[str, Any]:
+    baseline_mode = getattr(args, "baseline", "committed")
+    if baseline_mode not in {"committed", "worktree"}:
+        _fail("PLAN_INPUT_INVALID", "baseline must be committed or worktree")
     baseline = _head(root)
-    identity = {"instance_id": instance.identity["id"], "baseline_commit": baseline, "principal": instance.identities["principal"]["id"],
+    identity = {"instance_id": instance.identity["id"], "baseline_commit": baseline, "baseline_mode": baseline_mode,
+                "principal": instance.identities["principal"]["id"],
                 "executor": instance.identities["executor"]["id"], "workspace": instance.identities["workspace"]["id"],
                 "writer": instance.identities["writer"]["id"], "intent": args.intent.strip(), "risk": args.risk,
                 "core_version": _runtime_version()}
@@ -277,8 +313,12 @@ def init_plan(root: Path, instance: Instance, args: argparse.Namespace) -> dict[
             "affected_topics": [], "affected_nodes": [], "path_operations": {}, "delta": None,
             "finalized_bundle": None, "full_preflight_receipt": None, "post_apply_receipt": None,
             "budgets": dict(DEFAULT_BUDGETS), "counters": {key: 0 for key in COUNTER_KEYS}}
+    if baseline_mode == "worktree":
+        plan["worktree_authority_hash"] = _authority_registry_worktree_snapshot(root, instance)
     _save(path, plan)
-    return _summary(plan, "init", artifact_path=_local_base(instance).joinpath(path.name).as_posix())
+    return _summary(plan, "init", artifact_path=_local_base(instance).joinpath(path.name).as_posix(),
+                    baseline_mode=plan.get("baseline_mode", "committed"),
+                    worktree_authority_hash=plan.get("worktree_authority_hash"))
 
 
 def add_claim(root: Path, instance: Instance, args: argparse.Namespace) -> dict[str, Any]:
@@ -1102,7 +1142,10 @@ def rebase_plan(root: Path, instance: Instance, args: argparse.Namespace) -> dic
         _fail("PLAN_INPUT_INVALID", "rebase reason required")
     old_baseline = plan["baseline_commit"]
     head = _head(root)
-    _assert_no_maintenance_drift(root, plan, instance)
+    if plan.get("baseline_mode") == "worktree":
+        _assert_worktree_snapshot_stable(root, plan, instance)
+    else:
+        _assert_no_maintenance_drift(root, plan, instance)
     if head == old_baseline:
         _fail("PLAN_REBASE_NOOP", f"plan baseline {head} is already current")
     refs_rel = instance.authority.get("authority_refs")
@@ -1124,6 +1167,8 @@ def rebase_plan(root: Path, instance: Instance, args: argparse.Namespace) -> dic
               + ", ".join(conflicts)
               + ". Refresh or retire the affected refs in the plan, or abandon and re-init.", path=refs_rel or ".")
     plan["baseline_commit"] = head
+    if plan.get("baseline_mode") == "worktree":
+        plan["worktree_authority_hash"] = _authority_registry_worktree_snapshot(root, instance)
     plan.setdefault("rebase_history", []).append({"from": old_baseline, "to": head, "reason": reason,
                                                   "at": dt.datetime.now().astimezone().isoformat(timespec="seconds")})
     plan["delta"] = None
