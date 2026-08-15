@@ -1971,12 +1971,19 @@ def knowledge_check_command(root: Path, instance: Instance, semantic: bool) -> d
             evaluation.update({"status": "UNAVAILABLE", "skipped": False})
     warnings = list(dict.fromkeys(warnings))
     proof = experience.get("proof_boundary", "This read-only check does not prove later external-system behavior.")
+    bundle_health_value: dict[str, Any] = {}
+    try:
+        listing = bundle_inspect_command(root, None)
+        bundle_health_value = listing.get("health", {})
+    except (KnowledgeError, BundleError, OSError, ValueError):
+        bundle_health_value = {}
     return {"ok": not failures, "command": "knowledge-check", "status": "PASS" if not failures else "FAIL",
             "exit_code": 2 if environment_failure else (1 if failures else 0),
             "runtime_version": _runtime_version(), "core_version": _runtime_version(), "counts": counts,
             "memory_freshness": "PASS" if not any("memory/" in item or "stale marker" in item for item in failures) else "FAIL",
             "retrieval": evaluation, "authority": {"current": authority_current, "pending_review": authority_pending},
-            "warnings": warnings, "failures": failures, "elapsed_seconds": round(time.monotonic() - started, 3),
+            "bundle_health": bundle_health_value, "warnings": warnings, "failures": failures,
+            "elapsed_seconds": round(time.monotonic() - started, 3),
             "proof_boundary": proof, "read_only": True, "operation_authorized": False,
             "scope_note": "Offline by default; does not rebuild projections, access the network unless --semantic is requested, or change authority.",
             "errors": [{"code": "KNOWLEDGE_HEALTH", "path": ".", "message": item} for item in failures]}
@@ -2317,6 +2324,8 @@ def parser_build() -> argparse.ArgumentParser:
     bundle_status = command("bundle-status")
     bundle_status.add_argument("bundle_id", nargs="?", help="optional Bundle ID for a single lifecycle status including its exact immutable content hash")
     bundle_status.add_argument("--state", choices=("draft", "approved", "applied", "failed", "abandoned", "superseded", "rolled_back"))
+    bundle_status.add_argument("--health-only", action="store_true",
+                               help="print only the lifecycle health summary (state counts, duplicate draft intents, pending applies, anomalies) without the per-Bundle listing")
     bundle_supersede = mutation("bundle-supersede")
     bundle_supersede.add_argument("bundle_id")
     bundle_supersede.add_argument("--by", required=True)
@@ -2476,7 +2485,13 @@ def main(argv: list[str] | None = None) -> int:
         elif args.command == "bundle-approve": payload = bundle_approve_command(root, args, instance)
         elif args.command == "bundle-apply": payload = bundle_apply_command(root, args, instance)
         elif args.command == "bundle-inspect": payload = bundle_inspect_command(root, args.bundle_id)
-        elif args.command == "bundle-status": payload = {**bundle_inspect_command(root, args.bundle_id, args.state), "command": "bundle-status"}
+        elif args.command == "bundle-status":
+            payload = {**bundle_inspect_command(root, args.bundle_id, args.state), "command": "bundle-status"}
+            if getattr(args, "health_only", False):
+                if payload.get("bundle_id") is None:
+                    payload["bundles"] = []
+                else:
+                    payload["errors"] = payload.get("errors", []) + [{"code": "PLAN_INPUT_INVALID", "path": ".", "message": "--health-only is only valid without a bundle_id"}]
         elif args.command == "bundle-supersede": payload = bundle_supersede_command(root, args)
         elif args.command == "bundle-recover": payload = bundle_recover_command(root, args.bundle_id, instance)
         elif args.command == "bundle-rollback": payload = bundle_rollback_command(root, args, instance)

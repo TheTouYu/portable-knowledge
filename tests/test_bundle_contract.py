@@ -196,4 +196,34 @@ class BundleContractTests(unittest.TestCase):
         self.assertEqual(len(health['anomalies']),1)
         self.assertEqual(health['anomalies'][0]['kind'],'approval_invalid')
 
+    def test_bundle_status_health_only_suppresses_per_bundle_listing(self):
+        from portable_knowledge.bundle import seal_preflight
+        fixture=PACKAGE/'tests/fixtures/minimal'
+        tmp=tempfile.TemporaryDirectory(); fixture_root=Path(tmp.name)/'fixture'
+        shutil.copytree(fixture,fixture_root)
+        bundles_dir=fixture_root/'data/knowledge/bundles'; bundles_dir.mkdir(parents=True,exist_ok=True)
+        bundle=seal_preflight(build_bundle(fixture_root,self.manifest,IDENTITIES),[])
+        (bundles_dir/f"{bundle['bundle_id']}.json").write_text(json.dumps(bundle)+'\n',encoding='utf-8')
+        stream=io.StringIO()
+        with contextlib.redirect_stdout(stream):
+            main(['--root',str(fixture_root),'bundle-status','--health-only'])
+        payload=json.loads(stream.getvalue())
+        tmp.cleanup()
+        self.assertEqual(payload['command'],'bundle-status')
+        self.assertEqual(payload['bundles'],[])
+        self.assertIn('state_counts',payload['health'])
+        self.assertEqual(payload['health']['total'],1)
+
+    def test_knowledge_check_includes_bundle_health(self):
+        fixture=PACKAGE/'tests/fixtures/minimal'
+        tmp=tempfile.TemporaryDirectory(); fixture_root=Path(tmp.name)/'fixture'
+        shutil.copytree(fixture,fixture_root)
+        stream=io.StringIO()
+        with contextlib.redirect_stdout(stream):
+            main(['--root',str(fixture_root),'knowledge-check'])
+        payload=json.loads(stream.getvalue())
+        tmp.cleanup()
+        self.assertIn('bundle_health',payload)
+        self.assertIn('state_counts',payload['bundle_health'])
+
 if __name__=='__main__': unittest.main()
