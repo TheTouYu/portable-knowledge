@@ -1700,7 +1700,12 @@ def bundle_apply_command(root: Path, args: argparse.Namespace, instance: Instanc
     if semantic_plan is not None and validation["ok"] and projection["ok"]:
         from .semantic_plan import record_post_apply_full_check
         post_apply_receipt = record_post_apply_full_check(root, instance, bundle)
-    return {"ok": validation["ok"] and projection["ok"], "command": "bundle-apply", "bundle_id": args.bundle_id, "applied": True, "dry_run": False, "changed_files": changed, "validation": validation, "projection": projection, "post_apply_full_receipt": post_apply_receipt, "git_status": git_status(root), "errors": validation["errors"] + projection.get("errors", [])}
+    commit_suggestion = {
+        "note": "an applied Bundle is a commit unit; commit these tracked artifacts before the next plan (R3, 2026-08-16)",
+        "git_add": sorted(changed),
+        "git_commit_message": f"knowledge: apply {args.bundle_id} ({str(bundle.get('intent'))[:60]})",
+    }
+    return {"ok": validation["ok"] and projection["ok"], "command": "bundle-apply", "bundle_id": args.bundle_id, "applied": True, "dry_run": False, "changed_files": changed, "validation": validation, "projection": projection, "post_apply_full_receipt": post_apply_receipt, "git_status": git_status(root), "commit_suggestion": commit_suggestion, "errors": validation["errors"] + projection.get("errors", [])}
 
 
 def _lifecycle_events(root: Path, bundle_id: str) -> list[dict[str, Any]]:

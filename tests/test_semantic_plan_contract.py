@@ -1520,6 +1520,39 @@ class SemanticPlanContractTests(unittest.TestCase):
         subprocess.run(["git", "commit", "-qm", "configure authority refs"], cwd=self.root, check=True)
         self.authority_before = self.formal_authority()
 
+    def test_finalize_warns_on_same_intent_existing_bundle(self):
+        """T3/R6: finalize surfaces a non-blocking PLAN_INTENT_OVERLAP warning when another Bundle shares the intent."""
+        plan_id = self.init()["plan_id"]
+        self.add_claim(plan_id, "schema", "Schema input is explicit", "The schema parser accepts explicit versioned fields.", ("documented_contract",))
+        self.add_ref(plan_id, self.cli("knowledge-plan", "inspect", plan_id)["claims"][0]["claim_id"],
+                     "schema", "authority/schema-contract.md", "documented_contract", "documented_contract")
+        self.cli("knowledge-plan", "check", plan_id, "--mode", "delta")
+        finalized = self.cli("knowledge-plan", "finalize", plan_id)
+        # finalize a second plan with the same intent text but different risk (different plan_id, same intent)
+        plan2 = self.cli("knowledge-plan", "init", "--intent", "Add neutral software contracts", "--risk", "low")
+        self.add_claim(plan2["plan_id"], "runtime", "Runtime selection is deterministic", "The runtime selects the same implementation.", ("documented_contract",))
+        self.add_ref(plan2["plan_id"], self.cli("knowledge-plan", "inspect", plan2["plan_id"])["claims"][0]["claim_id"],
+                     "runtime", "authority/runtime-contract.md", "documented_contract", "documented_contract")
+        self.cli("knowledge-plan", "check", plan2["plan_id"], "--mode", "delta")
+        finalized2 = self.cli("knowledge-plan", "finalize", plan2["plan_id"])
+        self.assertTrue(any(warning.get("code") == "PLAN_INTENT_OVERLAP" for warning in finalized2.get("warnings", [])))
+
+    def test_bundle_apply_suggests_commit_unit(self):
+        """T2/R3: bundle-apply success returns a commit_suggestion (git add + message) so the operator commits before the next plan."""
+        plan_id = self.init()["plan_id"]
+        self.add_claim(plan_id, "schema", "Schema input is explicit", "The schema parser accepts explicit versioned fields.", ("documented_contract",))
+        self.add_ref(plan_id, self.cli("knowledge-plan", "inspect", plan_id)["claims"][0]["claim_id"],
+                     "schema", "authority/schema-contract.md", "documented_contract", "documented_contract")
+        self.cli("knowledge-plan", "check", plan_id, "--mode", "delta")
+        finalized = self.cli("knowledge-plan", "finalize", plan_id)
+        self.cli("bundle-approve", finalized["bundle_id"], "--content-hash", finalized["content_hash"], "--apply")
+        applied = self.cli("bundle-apply", finalized["bundle_id"], "--content-hash", finalized["content_hash"], "--apply")
+        suggestion = applied.get("commit_suggestion")
+        self.assertIsNotNone(suggestion)
+        self.assertIn("git_add", suggestion)
+        self.assertIn("commit unit", suggestion["note"])
+        self.assertIn("knowledge: apply", suggestion["git_commit_message"])
+
 class CaptureContractTests(unittest.TestCase):
     """File-driven batch Claim capture: one command, typed semantics, fail-closed drafts."""
 

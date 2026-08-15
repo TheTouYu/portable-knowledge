@@ -236,6 +236,39 @@ def _operation(plan_id: str, operation_type: str, canonical_input: dict[str, Any
     return {**content, "operation_id": f"op_{operation_digest[:26]}", "operation_digest": operation_digest}
 
 
+def _intent_overlap_warnings(root: Path, plan: dict[str, Any], bundle: dict[str, Any]) -> list[dict[str, Any]]:
+    """T3/R6: warn when another Bundle with the same intent already exists (applied or draft).
+
+    Non-blocking advisory only; it never auto-supersedes or refuses finalize. It helps the
+    operator notice orphan/duplicate drafts before applying (real hit: two near-duplicate
+    intent pairs in genshin-ts, 2026-08-15/16).
+    """
+    directory = root / "data/knowledge/bundles"
+    if not directory.is_dir():
+        return []
+    intent = plan.get("intent", "")
+    findings: list[dict[str, Any]] = []
+    for path in sorted(directory.glob("bnd_*.json")):
+        if any(marker in path.name for marker in (".approval", ".applied", ".lifecycle")):
+            continue
+        bundle_id = path.stem
+        if bundle_id == bundle.get("bundle_id"):
+            continue
+        try:
+            existing = json.loads(path.read_text(encoding="utf-8"))
+        except (ValueError, OSError):
+            continue
+        if existing.get("intent") != intent:
+            continue
+        _, approval_path, receipt_path = _core().bundle_paths(root, bundle_id)
+        state = "applied" if receipt_path.is_file() else ("approved" if approval_path.is_file() else "draft")
+        findings.append({"code": "PLAN_INTENT_OVERLAP", "path": "data/knowledge/bundles",
+                         "message": f"another Bundle with the same intent already exists: {bundle_id} (state={state}); "
+                                    "review whether this plan duplicates covered knowledge before applying",
+                         "bundle_id": bundle_id, "state": state})
+    return findings
+
+
 def _with_overlay(root: Path, plan: dict[str, Any]):
     temporary = tempfile.TemporaryDirectory()
     staging = Path(temporary.name)
@@ -856,6 +889,7 @@ def finalize(root: Path, instance: Instance, args: argparse.Namespace) -> dict[s
             raise _core().SemanticPlanError("PLAN_FULL_PREFLIGHT_FAILED", "full staged preflight failed", findings)
     else:
         historical_warnings = []
+    historical_warnings = historical_warnings + _intent_overlap_warnings(root, plan, bundle)
     plan["counters"]["full_checks"] += 1; plan["counters"]["full_preflight_checks"] += 1
     plan["counters"]["candidate_bundles"] += 1; _counters(plan); _assert_budget(plan)
     artifact = _artifact_rel(instance, content_digest, "full-preflight")
