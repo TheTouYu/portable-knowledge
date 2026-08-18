@@ -119,6 +119,16 @@ Never guess conventional paths such as `memory/OPERATING.md`, `memory/CURRENT.md
 
 Use the target project's configured canonical wrapper—normally the tracked `python tools/pkc.py ...` created by this Operator—never a global/system `pkc`. Confirm the entry from the target's operating contract, instance config, and lock/wrapper before the first command; do not guess a path or hand-type a variant. If a command fails, inspect the exact entry, subcommand help, argument order, and the preceding command result before retrying. Do not initialize a replacement plan or repeat a mutation merely because the entry or arguments were wrong. A bounded miss is not repository-wide absence. Ordinary mechanical work defaults to no query.
 
+### 检索使用技巧（提升召回，2026-08-19 实证）
+
+`knowledge-search`/`progressive-query` 是词法全文检索：**查询里并多个不同层面的关键词，召回与精准度显著高于单关键词**。
+
+- **并 3~5 个不同层面的词**：领域词 + 专有名词 + 中英混排。例：`knowledge-search "DTC 边界 bool 物理 pin 红灯基线"` 好过 `"DTC"`；中文 claim 用中文、英文 claim 用英文技术词，两者并上更稳。
+- **用 topic 自身 keywords 当查询词**：`pkc tree` 能看每个 topic 的 keywords（检索权重：title 1.7 / summary 1.2 / identity 含 keywords+aliases）——拿它们当查询词命中率最高。
+- **空结果先换词再判 coverage gap**：按顺序试 ①更短/更通用词 ②同义词 ③英文/官方术语 ④`--status any`（默认可能被 authority 过滤）⑤换 context；仍无才判定缺知识。**不要把一个 bounded miss 当成仓库级缺失。**
+- **`progressive-query` 用对 `--context`**：intent 按路由 keywords 逐条匹配（单 token 也能命中）；`--check-authority` 可顺带看 ref 时效。
+- **检索弱就调 topic 元数据，别改 claim 正文**：用 `update-topic` 加 keywords/aliases（检索调优的正确杠杆），见「大规模维护实操模式」。
+
 ## Intake and capture
 
 Before distillation: sensitive-data precheck → permission for save/internal reuse/remote processing/publication → deduplicate → preserve raw material or external locator → delegate to a project-declared handler → retrieve existing knowledge → classify exactly one primary result:
