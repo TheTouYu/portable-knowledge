@@ -142,7 +142,7 @@ class BundleContractTests(unittest.TestCase):
             manifest=dict(self.manifest); manifest['bundle_type']=kind
             self.assertEqual(build_bundle(self.root,manifest,IDENTITIES)['bundle_type'],kind)
 
-    def test_bundle_approve_and_apply_help_require_exact_content_hash(self):
+    def test_bundle_approve_and_apply_help_explain_auto_resolve_content_hash(self):
         for command in ('bundle-approve','bundle-apply'):
             stream=io.StringIO()
             with contextlib.redirect_stdout(stream):
@@ -152,10 +152,34 @@ class BundleContractTests(unittest.TestCase):
             help_output=stream.getvalue()
             flat=' '.join(help_output.split())
             compact=''.join(help_output.split())
-            self.assertIn('REQUIRED',flat)
+            # --content-hash is optional (auto-resolved from the verified immutable
+            # Bundle artifact); a supplied hash must still match exactly (fail closed).
+            self.assertNotIn('REQUIRED',flat)
+            self.assertIn('auto-resolve',compact)
+            self.assertIn('must match',flat)
             self.assertIn('bundle-status',compact)
             self.assertIn('bundle-inspect',compact)
-            self.assertIn('same hash',flat)
+
+    def test_bundle_approve_auto_resolves_hash_but_still_fails_closed_on_mismatch(self):
+        shutil.copytree(PACKAGE/'tests/fixtures/minimal',self.root,dirs_exist_ok=True,ignore=shutil.ignore_patterns('.local'))
+        bundle=seal_preflight(build_bundle(self.root,self.manifest,IDENTITIES),[])
+        directory=self.root/'data/knowledge/bundles'; directory.mkdir(parents=True)
+        (directory/f"{bundle['bundle_id']}.json").write_text(json.dumps(bundle),encoding='utf-8')
+        # Omitted --content-hash resolves from the immutable Bundle artifact (dry-run default).
+        stream=io.StringIO()
+        with contextlib.redirect_stdout(stream): result=main(['--root',str(self.root),'bundle-approve',bundle['bundle_id']])
+        payload=json.loads(stream.getvalue())
+        self.assertEqual(result,0)
+        self.assertTrue(payload['dry_run']); self.assertFalse(payload['applied'])
+        self.assertEqual(payload['content_hash'],bundle['content_hash'])
+        self.assertFalse((directory/f"{bundle['bundle_id']}.approval.json").exists())
+        # A supplied hash must still match exactly (fail closed; nothing written).
+        stream=io.StringIO()
+        with contextlib.redirect_stdout(stream): result=main(['--root',str(self.root),'bundle-approve',bundle['bundle_id'],'--content-hash','0'*64])
+        payload=json.loads(stream.getvalue())
+        self.assertEqual(result,1)
+        self.assertIn('exact content hash',payload['errors'][0]['message'])
+        self.assertFalse((directory/f"{bundle['bundle_id']}.approval.json").exists())
 
     def test_bundle_status_and_inspect_help_surface_the_exact_hash(self):
         for command in ('bundle-status','bundle-inspect'):

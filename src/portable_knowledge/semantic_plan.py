@@ -241,7 +241,8 @@ def _intent_overlap_warnings(root: Path, plan: dict[str, Any], bundle: dict[str,
 
     Non-blocking advisory only; it never auto-supersedes or refuses finalize. It helps the
     operator notice orphan/duplicate drafts before applying (real hit: two near-duplicate
-    intent pairs in genshin-ts, 2026-08-15/16).
+    intent pairs in a real project, 2026-08-15/16). When the same intent is already
+    APPLIED, the draft is an orphan supersede candidate rather than another apply candidate.
     """
     directory = root / "data/knowledge/bundles"
     if not directory.is_dir():
@@ -262,21 +263,92 @@ def _intent_overlap_warnings(root: Path, plan: dict[str, Any], bundle: dict[str,
             continue
         _, approval_path, receipt_path = _core().bundle_paths(root, bundle_id)
         state = "applied" if receipt_path.is_file() else ("approved" if approval_path.is_file() else "draft")
-        findings.append({"code": "PLAN_INTENT_OVERLAP", "path": "data/knowledge/bundles",
-                         "message": f"another Bundle with the same intent already exists: {bundle_id} (state={state}); "
-                                    "review whether this plan duplicates covered knowledge before applying",
-                         "bundle_id": bundle_id, "state": state})
+        if state == "applied":
+            findings.append({"code": "PLAN_INTENT_ALREADY_APPLIED", "path": "data/knowledge/bundles",
+                             "message": f"an applied Bundle already covers this intent: {bundle_id}; "
+                                        "verify this plan adds distinct value or abandon it; if a draft of the same "
+                                        "intent is an orphan, use bundle-supersede instead of applying it again",
+                             "bundle_id": bundle_id, "state": state,
+                             "recommended_action": f"bundle-supersede <orphan-draft> --by {bundle_id} --reason 'intent already applied'"})
+        else:
+            findings.append({"code": "PLAN_INTENT_OVERLAP", "path": "data/knowledge/bundles",
+                             "message": f"another Bundle with the same intent already exists: {bundle_id} (state={state}); "
+                                        "review whether this plan duplicates covered knowledge before applying",
+                             "bundle_id": bundle_id, "state": state})
     return findings
 
 
-def _with_overlay(root: Path, plan: dict[str, Any]):
+def _overlay_authority_rel_paths(root: Path, instance: Instance, plan: dict[str, Any]) -> set[str]:
+    """Relative paths a disposable staging overlay must contain.
+
+    Instead of duplicating the whole repository, staging only receives the
+    authority-related content that governed plan operations and staged
+    validation can observe: the configured config file, the registry/actors/
+    store/knowledge roots, the evaluation contract, and every Authority source
+    file registered in the (possibly planned) authority registry. Plan writes
+    are applied afterwards on top of this base copy, so read-side operations
+    see the same working set as a full-tree copy without copying unrelated,
+    possibly transient repository content.
+    """
+    rels: set[str] = set()
+
+    def add(rel: Any) -> None:
+        if not rel:
+            return
+        rels.add(Path(rel).as_posix())
+
+    try:
+        add(instance.config_path.relative_to(root).as_posix())
+    except ValueError:
+        # A config outside the project root cannot be projected into staging;
+        # the operations that need it will observe the missing file exactly as
+        # they did when it sat outside the copied tree before.
+        pass
+    authority = instance.authority
+    add(authority.get("registry"))
+    add(authority.get("actors"))
+    add(authority.get("store"))
+    add(authority.get("knowledge"))
+    add(authority.get("authority_refs"))
+    add((instance.raw.get("evaluation") or {}).get("cases_path"))
+
+    refs_rel = authority.get("authority_refs")
+    if refs_rel:
+        planned = _decode_writes(plan).get(refs_rel)
+        committed = planned if planned is not None else _committed_bytes(root, plan["baseline_commit"], refs_rel)
+        if committed is not None:
+            try:
+                registered = authority_refs_from_document(json.loads(committed.decode("utf-8")))
+            except (ValueError, UnicodeDecodeError, json.JSONDecodeError):
+                registered = []
+            for ref in registered:
+                add(ref.get("path"))
+    # This plan's own authority work, in case the registry has not been staged yet.
+    for ref in plan.get("authority_refs", []):
+        add(ref.get("path"))
+    for item in plan.get("authority_ref_refreshes", []):
+        add(item.get("path"))
+    for item in plan.get("authority_ref_retirements", []):
+        add(item.get("path"))
+    for item in plan.get("authority_ref_updates", []):
+        add(item.get("old_path"))
+        add(item.get("new_path"))
+    return rels
+
+
+def _with_overlay(root: Path, instance: Instance, plan: dict[str, Any]):
     temporary = tempfile.TemporaryDirectory()
     staging = Path(temporary.name)
-    for child in root.iterdir():
-        if child.name in {".git", ".local"}:
+    for rel in sorted(_overlay_authority_rel_paths(root, instance, plan)):
+        source = root / rel
+        if not source.exists():
             continue
-        destination = staging / child.name
-        shutil.copytree(child, destination) if child.is_dir() else shutil.copy2(child, destination)
+        target = staging / rel
+        if source.is_dir():
+            shutil.copytree(source, target)
+        else:
+            target.parent.mkdir(parents=True, exist_ok=True)
+            shutil.copy2(source, target)
     for rel, value in _decode_writes(plan).items():
         target = staging / rel
         if value is None:
@@ -367,7 +439,7 @@ def add_claim(root: Path, instance: Instance, args: argparse.Namespace) -> dict[
     claim_id = f"clm_{canonical_digest({'plan_id': plan['plan_id'], 'baseline': plan['baseline_commit'], 'operation_digest': operation['operation_digest']})[:26].upper()}"
     if any(item["operation_id"] == operation["operation_id"] for item in plan["operations"]):
         return _summary(plan, "add-claim", operation_id=operation["operation_id"], claim_id=claim_id, replayed=True)
-    temporary, staging = _with_overlay(root, plan)
+    temporary, staging = _with_overlay(root, instance, plan)
     try:
         ns = argparse.Namespace(actor=plan["writer"], node=args.node, node_name=args.node_name,
                                 node_path=args.node_path, node_boundary=args.node_boundary, node_keywords=args.node_keywords,
@@ -407,7 +479,7 @@ def revise_claim(root: Path, instance: Instance, args: argparse.Namespace) -> di
         return _summary(plan, "revise-claim", operation_id=operation["operation_id"], claim_id=args.claim_id, replayed=True)
     event_id = f"evt_{operation['operation_digest'][:26].upper()}"
     created_at = dt.datetime.now().astimezone().isoformat(timespec="seconds")
-    temporary, staging = _with_overlay(root, plan)
+    temporary, staging = _with_overlay(root, instance, plan)
     try:
         ns = argparse.Namespace(**vars(args), actor=plan["writer"])
         writes, details = _core().plan_revise_claim(staging, ns, event_id=event_id, created_at=created_at)
@@ -437,7 +509,7 @@ def move_topic(root: Path, instance: Instance, args: argparse.Namespace) -> dict
         return _summary(plan, "move-topic", operation_id=operation["operation_id"], topic_id=args.topic_id, replayed=True)
     event_id = f"evt_{operation['operation_digest'][:26].upper()}"
     created_at = dt.datetime.now().astimezone().isoformat(timespec="seconds")
-    temporary, staging = _with_overlay(root, plan)
+    temporary, staging = _with_overlay(root, instance, plan)
     try:
         ns = argparse.Namespace(**vars(args), actor=plan["writer"])
         writes, details = _core().plan_move_topic(staging, ns, event_id=event_id, created_at=created_at)
@@ -453,6 +525,37 @@ def move_topic(root: Path, instance: Instance, args: argparse.Namespace) -> dict
     plan["delta"] = None; _counters(plan); _save(path, plan)
     return _summary(plan, "move-topic", operation_id=operation["operation_id"], topic_id=args.topic_id,
                     moved_claim_ids=details["claim_ids"], node_created=details["node_created"], warning=details["warning"], replayed=False)
+
+
+def update_topic(root: Path, instance: Instance, args: argparse.Namespace) -> dict[str, Any]:
+    path, plan = _load(root, instance, args.plan_id); _ensure_open(root, instance, plan)
+    canonical_input = {"topic_id": args.topic_id, "title": args.title, "summary": args.summary,
+                       "keywords": sorted(set(args.keywords)), "aliases": sorted(set(args.aliases)),
+                       "reason": args.reason.strip()}
+    if not canonical_input["reason"]:
+        _fail("PLAN_INPUT_INVALID", "topic update reason is required")
+    operation = _operation(plan["plan_id"], "update_topic", canonical_input)
+    if any(item["operation_id"] == operation["operation_id"] for item in plan["operations"]):
+        return _summary(plan, "update-topic", operation_id=operation["operation_id"], topic_id=args.topic_id, replayed=True)
+    event_id = f"evt_{operation['operation_digest'][:26].upper()}"
+    created_at = dt.datetime.now().astimezone().isoformat(timespec="seconds")
+    temporary, staging = _with_overlay(root, instance, plan)
+    try:
+        ns = argparse.Namespace(**vars(args), actor=plan["writer"])
+        writes, details = _core().plan_update_topic(staging, ns, event_id=event_id, created_at=created_at)
+    finally:
+        temporary.cleanup()
+    operation["topic_id"] = args.topic_id
+    plan["operations"].append(operation); plan.setdefault("topic_updates", []).append(details)
+    plan["writes"].update({rel: (base64.b64encode(value).decode("ascii") if value is not None else None) for rel, value in writes.items()})
+    for rel in writes:
+        plan.setdefault("path_operations", {}).setdefault(rel, []).append("update_topic")
+    plan["affected_topics"] = sorted(set(plan["affected_topics"] + [args.topic_id]))
+    plan["affected_nodes"] = sorted(set(plan["affected_nodes"] + [details["node_id"]]))
+    plan["delta"] = None; _counters(plan); _save(path, plan)
+    return _summary(plan, "update-topic", operation_id=operation["operation_id"], topic_id=args.topic_id,
+                    changed_fields=[key for key in ("title", "summary", "keywords", "aliases") if details["before"].get(key) != details["after"].get(key)],
+                    replayed=False)
 
 
 def add_authority_ref(root: Path, instance: Instance, args: argparse.Namespace) -> dict[str, Any]:
@@ -548,11 +651,79 @@ def _append_authority_event(root: Path, plan: dict[str, Any], event: dict[str, A
     return rel
 
 
+def _apply_refresh(root: Path, instance: Instance, plan: dict[str, Any], refs_rel: str, data: dict[str, Any],
+                   old: dict[str, Any], reason: str) -> tuple[dict[str, Any], dict[str, Any], bool]:
+    """Refresh one stale Authority Ref in the registry overlay.
+
+    ``data`` is mutated in place; the plan registry write and proposal event are
+    staged. Returns ``(operation, details, replayed)``. A replayed identical
+    refresh returns the recorded details without mutating again.
+    """
+    old_hash = old.get("approved_hash") or old.get("fragment_hash")
+    committed = _committed_bytes(root, plan["baseline_commit"], old["path"])
+    new_hash = hashlib.sha256(committed).hexdigest() if committed is not None else old_hash
+    canonical_input = {"authority_ref_id": old["id"], "old_approved_hash": old_hash,
+                       "new_approved_hash": new_hash, "reason": reason}
+    operation = _operation(plan["plan_id"], "refresh_authority_ref", canonical_input)
+    existing = next((item for item in plan["operations"]
+                     if item["operation_type"] == "refresh_authority_ref"
+                     and item["input"]["authority_ref_id"] == old["id"]
+                     and item["input"]["reason"] == reason), None)
+    if existing:
+        details = next(item for item in plan.get("authority_ref_refreshes", []) if item["authority_ref_id"] == old["id"])
+        return existing, details, True
+    refreshed = dict(old); refreshed["approved_hash"] = new_hash; refreshed.pop("fragment_hash", None)
+    data["refs"][data["refs"].index(old)] = refreshed
+    created_at = dt.datetime.now().astimezone().isoformat(timespec="seconds")
+    event = {**_core().event_identity(root, argparse.Namespace(actor=plan["writer"])),
+             "event_id": f"evt_{operation['operation_digest'][:26].upper()}", "event_type": "authority_ref_refreshed",
+             "authority_ref_id": old["id"], "old_approved_hash": old_hash, "new_approved_hash": new_hash,
+             "affected_claim_ids": old.get("claim_ids", []), "reason": reason, "created_at": created_at}
+    _store_authority_registry(plan, refs_rel, data, "refresh_authority_ref")
+    event_path = _append_authority_event(root, plan, event, "refresh_authority_ref")
+    details = {"authority_ref_id": old["id"], "old_hash": old_hash, "new_hash": new_hash,
+               "affected_claim_ids": old.get("claim_ids", []), "path": old["path"], "reason": reason,
+               "event_id": event["event_id"], "event_path": event_path}
+    operation["authority_ref_id"] = old["id"]
+    plan["operations"].append(operation); plan.setdefault("authority_ref_refreshes", []).append(details)
+    plan["delta"] = None
+    return operation, details, False
+
+
 def refresh_authority_ref(root: Path, instance: Instance, args: argparse.Namespace) -> dict[str, Any]:
     path, plan = _load(root, instance, args.plan_id); _ensure_open(root, instance, plan)
     reason = args.reason.strip()
     if not reason:
         _fail("PLAN_INPUT_INVALID", "Authority Ref refresh reason is required")
+    if getattr(args, "all_stale", False):
+        if args.authority_ref_id:
+            _fail("PLAN_INPUT_INVALID", "--all-stale cannot be combined with --authority-ref-id")
+        refs_rel, data = _authority_registry_overlay(root, instance, plan)
+        refreshed: list[dict[str, Any]] = []
+        skipped: list[dict[str, Any]] = []
+        for old in list(data["refs"]):
+            committed = _committed_bytes(root, plan["baseline_commit"], old["path"])
+            if committed is None:
+                skipped.append({"authority_ref_id": old["id"], "path": old["path"], "status": "skipped_missing",
+                                "reason": "authority path does not exist in plan committed baseline"})
+                continue
+            working = root / old["path"]
+            if not working.is_file() or working.read_bytes() != committed:
+                skipped.append({"authority_ref_id": old["id"], "path": old["path"], "status": "skipped_dirty",
+                                "reason": "authority path differs from plan committed baseline (uncommitted content); the human must commit it first"})
+                continue
+            old_hash = old.get("approved_hash") or old.get("fragment_hash")
+            new_hash = hashlib.sha256(committed).hexdigest()
+            if old_hash == new_hash:
+                skipped.append({"authority_ref_id": old["id"], "path": old["path"], "status": "skipped_current"})
+                continue
+            operation, details, replayed = _apply_refresh(root, instance, plan, refs_rel, data, old, reason)
+            refreshed.append({"authority_ref_id": old["id"], "path": old["path"], "old_approved_hash": details["old_hash"],
+                              "new_approved_hash": details["new_hash"], "affected_claim_ids": details["affected_claim_ids"],
+                              "replayed": replayed})
+        _counters(plan); _save(path, plan)
+        return _summary(plan, "refresh-authority-ref", refreshed_count=len(refreshed), skipped_count=len(skipped),
+                        refreshed=refreshed, skipped=skipped, replayed=False)
     replay = next((item for item in plan["operations"] if item["operation_type"] == "refresh_authority_ref"
                    and item["input"]["authority_ref_id"] == args.authority_ref_id
                    and item["input"]["reason"] == reason), None)
@@ -576,28 +747,8 @@ def refresh_authority_ref(root: Path, instance: Instance, args: argparse.Namespa
     new_hash = hashlib.sha256(committed).hexdigest()
     if old_hash == new_hash:
         _fail("PLAN_STRUCTURE_NOOP", "Authority Ref already approves the committed baseline", path=old["path"])
-    canonical_input = {"authority_ref_id": args.authority_ref_id, "old_approved_hash": old_hash,
-                       "new_approved_hash": new_hash, "reason": reason}
-    operation = _operation(plan["plan_id"], "refresh_authority_ref", canonical_input)
-    if any(item["operation_id"] == operation["operation_id"] for item in plan["operations"]):
-        return _summary(plan, "refresh-authority-ref", operation_id=operation["operation_id"],
-                        authority_ref_id=args.authority_ref_id, old_approved_hash=old_hash,
-                        new_approved_hash=new_hash, affected_claim_ids=old.get("claim_ids", []), replayed=True)
-    refreshed = dict(old); refreshed["approved_hash"] = new_hash; refreshed.pop("fragment_hash", None)
-    data["refs"][data["refs"].index(old)] = refreshed
-    created_at = dt.datetime.now().astimezone().isoformat(timespec="seconds")
-    event = {**_core().event_identity(root, argparse.Namespace(actor=plan["writer"])),
-             "event_id": f"evt_{operation['operation_digest'][:26].upper()}", "event_type": "authority_ref_refreshed",
-             "authority_ref_id": args.authority_ref_id, "old_approved_hash": old_hash, "new_approved_hash": new_hash,
-             "affected_claim_ids": old.get("claim_ids", []), "reason": reason, "created_at": created_at}
-    _store_authority_registry(plan, refs_rel, data, "refresh_authority_ref")
-    event_path = _append_authority_event(root, plan, event, "refresh_authority_ref")
-    details = {"authority_ref_id": args.authority_ref_id, "old_hash": old_hash, "new_hash": new_hash,
-               "affected_claim_ids": old.get("claim_ids", []), "path": old["path"], "reason": reason,
-               "event_id": event["event_id"], "event_path": event_path}
-    operation["authority_ref_id"] = args.authority_ref_id
-    plan["operations"].append(operation); plan.setdefault("authority_ref_refreshes", []).append(details)
-    plan["delta"] = None; _counters(plan); _save(path, plan)
+    operation, details, _ = _apply_refresh(root, instance, plan, refs_rel, data, old, reason)
+    _counters(plan); _save(path, plan)
     return _summary(plan, "refresh-authority-ref", operation_id=operation["operation_id"], authority_ref_id=args.authority_ref_id,
                     old_approved_hash=old_hash, new_approved_hash=new_hash,
                     affected_claim_ids=old.get("claim_ids", []), replayed=False)
@@ -629,7 +780,7 @@ def retire_authority_ref(root: Path, instance: Instance, args: argparse.Namespac
         if not replacement or replacement_ref == args.authority_ref_id:
             _fail("PLAN_AUTHORITY_REPLACEMENT_INVALID", "replacement Authority Ref must exist and differ from the retired Ref", path=refs_rel)
     if replacement_claim:
-        temporary, staging = _with_overlay(root, plan)
+        temporary, staging = _with_overlay(root, instance, plan)
         try:
             registry, _ = _core().load_authority(staging)
             claim_ids = {item["id"] for item in _core().parse_claims(staging, registry)[0]}
@@ -661,6 +812,88 @@ def retire_authority_ref(root: Path, instance: Instance, args: argparse.Namespac
     plan["delta"] = None; _counters(plan); _save(path, plan)
     return _summary(plan, "retire-authority-ref", operation_id=operation["operation_id"], authority_ref_id=args.authority_ref_id,
                     affected_claim_ids=retired.get("claim_ids", []), replayed=False)
+
+
+def _validate_authority_path(root: Path, plan: dict[str, Any], path: str) -> bytes:
+    pure = PurePosixPath(path)
+    if not path or pure.is_absolute() or ".." in pure.parts or "\\" in path or path.startswith(".local/"):
+        _fail("PLAN_AUTHORITY_PATH_INVALID", "authority path must be portable, project-relative, and non-local", path=path)
+    committed = _committed_bytes(root, plan["baseline_commit"], path)
+    if committed is None:
+        _fail("PLAN_AUTHORITY_NOT_COMMITTED", "authority path does not exist in committed baseline", path=path)
+    working = root / path
+    if not working.is_file() or working.read_bytes() != committed:
+        _fail("PLAN_AUTHORITY_WORKTREE_DIRTY", "authority path has uncommitted content; restore the committed baseline or commit it and start a new plan", path=path)
+    return committed
+
+
+def update_authority_ref(root: Path, instance: Instance, args: argparse.Namespace) -> dict[str, Any]:
+    """Re-point an existing Authority Ref to a different file, recomputing approved_hash.
+
+    The Ref ID, linked Claim IDs, role, change policy, and fact classes are
+    preserved; only the target path (and optionally locator) change. The new
+    target must be committed at the plan baseline, exactly like add/refresh.
+    """
+    path, plan = _load(root, instance, args.plan_id); _ensure_open(root, instance, plan)
+    reason = args.reason.strip()
+    if not reason:
+        _fail("PLAN_INPUT_INVALID", "Authority Ref update reason is required")
+    replay = next((item for item in plan["operations"] if item["operation_type"] == "update_authority_ref"
+                   and item["input"]["authority_ref_id"] == args.authority_ref_id
+                   and item["input"]["path"] == args.path
+                   and item["input"].get("locator") == args.locator
+                   and item["input"]["reason"] == reason), None)
+    if replay:
+        details = next(item for item in plan.get("authority_ref_updates", []) if item["authority_ref_id"] == args.authority_ref_id)
+        return _summary(plan, "update-authority-ref", operation_id=replay["operation_id"],
+                        authority_ref_id=args.authority_ref_id, old_path=details["old_path"], new_path=details["new_path"],
+                        old_approved_hash=details["old_hash"], new_approved_hash=details["new_hash"],
+                        affected_claim_ids=details["affected_claim_ids"], replayed=True)
+    refs_rel, data = _authority_registry_overlay(root, instance, plan)
+    matches = [item for item in data["refs"] if item.get("id") == args.authority_ref_id]
+    if len(matches) != 1:
+        _fail("PLAN_AUTHORITY_REF_MISSING", f"Authority Ref not found or not unique: {args.authority_ref_id}", path=refs_rel)
+    old = matches[0]
+    committed = _validate_authority_path(root, plan, args.path)
+    new_hash = hashlib.sha256(committed).hexdigest()
+    old_hash = old.get("approved_hash") or old.get("fragment_hash")
+    new_path = args.path
+    new_locator = args.locator if args.locator is not None else old.get("locator")
+    if new_path == old["path"] and (args.locator is None or args.locator == old.get("locator")):
+        _fail("PLAN_STRUCTURE_NOOP", "Authority Ref already targets the requested path and locator", path=new_path)
+    canonical_input = {"authority_ref_id": args.authority_ref_id, "path": new_path, "locator": new_locator,
+                       "old_approved_hash": old_hash, "new_approved_hash": new_hash, "reason": reason}
+    operation = _operation(plan["plan_id"], "update_authority_ref", canonical_input)
+    if any(item["operation_id"] == operation["operation_id"] for item in plan["operations"]):
+        return _summary(plan, "update-authority-ref", operation_id=operation["operation_id"],
+                        authority_ref_id=args.authority_ref_id, old_path=old["path"], new_path=new_path,
+                        old_approved_hash=old_hash, new_approved_hash=new_hash,
+                        affected_claim_ids=old.get("claim_ids", []), replayed=True)
+    updated = dict(old); updated["path"] = new_path; updated["approved_hash"] = new_hash
+    updated.pop("fragment_hash", None)
+    if args.locator is not None:
+        updated["locator"] = new_locator
+    data["refs"][data["refs"].index(old)] = updated
+    created_at = dt.datetime.now().astimezone().isoformat(timespec="seconds")
+    event = {**_core().event_identity(root, argparse.Namespace(actor=plan["writer"])),
+             "event_id": f"evt_{operation['operation_digest'][:26].upper()}", "event_type": "authority_ref_updated",
+             "authority_ref_id": args.authority_ref_id, "old_path": old["path"], "new_path": new_path,
+             "old_locator": old.get("locator"), "new_locator": new_locator,
+             "old_approved_hash": old_hash, "new_approved_hash": new_hash,
+             "affected_claim_ids": old.get("claim_ids", []), "reason": reason, "created_at": created_at}
+    _store_authority_registry(plan, refs_rel, data, "update_authority_ref")
+    event_path = _append_authority_event(root, plan, event, "update_authority_ref")
+    details = {"authority_ref_id": args.authority_ref_id, "old_path": old["path"], "new_path": new_path,
+               "old_locator": old.get("locator"), "new_locator": new_locator,
+               "old_hash": old_hash, "new_hash": new_hash, "affected_claim_ids": old.get("claim_ids", []),
+               "reason": reason, "event_id": event["event_id"], "event_path": event_path}
+    operation["authority_ref_id"] = args.authority_ref_id
+    plan["operations"].append(operation); plan.setdefault("authority_ref_updates", []).append(details)
+    plan["delta"] = None; _counters(plan); _save(path, plan)
+    return _summary(plan, "update-authority-ref", operation_id=operation["operation_id"],
+                    authority_ref_id=args.authority_ref_id, old_path=old["path"], new_path=new_path,
+                    old_approved_hash=old_hash, new_approved_hash=new_hash,
+                    affected_claim_ids=old.get("claim_ids", []), replayed=False)
 
 
 def _evaluation_contract(root: Path, instance: Instance) -> dict[str, Any]:
@@ -695,6 +928,18 @@ def _run_cases(staging: Path, instance: Instance, contract: dict[str, Any], case
     return evaluation["rows"]
 
 
+def _case_blocking_map(contract: dict[str, Any]) -> dict[str, bool]:
+    return {case["id"]: bool(case.get("blocking", True)) for case in contract["cases"]}
+
+
+def _split_case_failures(contract: dict[str, Any], records: list[dict[str, Any]]) -> tuple[list[str], list[str]]:
+    """Split failed evaluation rows into blocking and advisory (blocking: false) case ids."""
+    blocking = _case_blocking_map(contract)
+    failed = [item["case_id"] for item in records if not item["ok"]]
+    return ([case_id for case_id in failed if blocking.get(case_id, True)],
+            [case_id for case_id in failed if not blocking.get(case_id, True)])
+
+
 def _validation_records(staging: Path, instance: Instance, contract: dict[str, Any], cases: list[dict[str, Any]], phase: str) -> dict[str, Any]:
     core = _core()
     validation = core.validate(staging)
@@ -706,17 +951,19 @@ def _validation_records(staging: Path, instance: Instance, contract: dict[str, A
     if refs_path and (staging / refs_path).is_file():
         from .authority import observe_authority_refs
         refs = observe_authority_refs(staging, authority_refs_from_document(json.loads((staging / refs_path).read_text(encoding="utf-8"))))
-    failed = [item["case_id"] for item in case_records if not item["ok"]]
-    ok = validation["ok"] and projection["ok"] and tree.get("ok", False) and not failed and all(item.get("effective_status", item.get("status")) in {"current", "fresh"} for item in refs)
+    blocking_failed, advisory_failed = _split_case_failures(contract, case_records)
+    ok = validation["ok"] and projection["ok"] and tree.get("ok", False) and not blocking_failed and all(item.get("effective_status", item.get("status")) in {"current", "fresh"} for item in refs)
     return {"ok": ok, "validation": validation, "projection": projection, "tree": tree,
-            "evaluation_records": case_records, "failed_case_ids": failed, "authority_records": refs}
+            "evaluation_records": case_records, "failed_case_ids": blocking_failed,
+            "blocking_failed_case_ids": blocking_failed, "non_blocking_failed_case_ids": advisory_failed,
+            "authority_records": refs}
 
 
 def check_delta(root: Path, instance: Instance, args: argparse.Namespace) -> dict[str, Any]:
     if args.mode not in CHECK_MODES:
         _fail("PLAN_CHECK_MODE_INVALID", f"unsupported knowledge-plan check mode: {args.mode}")
     path, plan = _load(root, instance, args.plan_id); _ensure_open(root, instance, plan); _assert_budget(plan)
-    temporary, staging = _with_overlay(root, plan)
+    temporary, staging = _with_overlay(root, instance, plan)
     try:
         registry, _ = _core().load_authority(staging)
         claims, parse_findings = _core().parse_claims(staging, registry)
@@ -750,21 +997,25 @@ def check_delta(root: Path, instance: Instance, args: argparse.Namespace) -> dic
             if not projection["ok"]:
                 findings.extend(projection.get("errors", []))
         records = _run_cases(staging, instance, contract, affected, "delta") if not findings else []
-        failed_case_ids = [item["case_id"] for item in records if not item["ok"]]
+        failed_case_ids, advisory_failed = _split_case_failures(contract, records)
         findings.extend({"code": "PLAN_EVALUATION_FAILED", "path": "evaluation", "message": f"affected evaluation failed: {case_id}", "case_id": case_id}
                         for case_id in failed_case_ids)
+        warnings = [{"code": "PLAN_EVALUATION_NON_BLOCKING", "path": "evaluation",
+                     "message": f"non-blocking evaluation case failed (warning only): {case_id}", "case_id": case_id, "blocking": False}
+                    for case_id in advisory_failed]
         digest = _content_digest(plan)
         artifact = _artifact_rel(instance, digest, "delta")
         full = {"schema_version": 1, "evaluator_contract_version": contract["contract_version"], "mode": "delta",
                 "plan_id": plan["plan_id"], "plan_digest": digest,
                 "affected_case_ids": [item["id"] for item in affected],
                 "deferred_case_ids": [item["case_id"] for item in selection if item["decision"] == "deferred"],
-                "case_selection": selection, "records": records, "findings": findings}
+                "case_selection": selection, "records": records, "findings": findings, "warnings": warnings}
         _write_artifact(root, artifact, full)
         plan["counters"]["delta_checks"] += 1
         delta = {"ok": not findings, "mode": "delta", "delta_digest": digest, "touched_operations": len(plan["operations"]),
                  "touched_files": sorted(plan["writes"]), "affected_case_ids": full["affected_case_ids"],
-                 "failed_case_ids": failed_case_ids, "findings": findings, "can_finalize": not findings, "artifact_path": artifact}
+                 "failed_case_ids": failed_case_ids, "findings": findings, "warnings": warnings,
+                 "can_finalize": not findings, "artifact_path": artifact}
         plan["delta"] = delta; _counters(plan); _save(path, plan)
         return _compact(plan, "knowledge-plan check", delta, summary={"can_finalize": not findings, "touched_operations": len(plan["operations"]), "touched_files": len(plan["writes"])})
     finally:
@@ -786,6 +1037,8 @@ def _assert_finalized_environment(root: Path, plan: dict[str, Any], instance: In
         _fail("PLAN_STALE_BASELINE", "committed baseline changed after finalize")
     checked_refs = list(plan.get("authority_refs", [])) + [
         {"path": item["path"], "approved_hash": item["new_hash"]} for item in plan.get("authority_ref_refreshes", [])
+    ] + [
+        {"path": item["new_path"], "approved_hash": item["new_hash"]} for item in plan.get("authority_ref_updates", [])
     ]
     for ref in checked_refs:
         committed = _committed_bytes(root, plan["baseline_commit"], ref["path"])
@@ -799,6 +1052,54 @@ def _assert_finalized_environment(root: Path, plan: dict[str, Any], instance: In
             actual = hashlib.sha256(target.read_bytes()).hexdigest() if target.exists() else None
             if actual != action["expected_hash"]:
                 _fail("PLAN_WORKTREE_DRIFT", "planned authority changed after finalize", path=action["path"])
+
+
+def _candidate_bundle(root: Path, instance: Instance, plan: dict[str, Any], content_digest: str) -> dict[str, Any]:
+    """Build the immutable candidate Bundle for a plan's staged writes.
+
+    Shared by ``finalize`` and ``capture --preview-only`` so the preview shows
+    exactly the semantic_diff/content_hash that finalize would produce, without
+    writing the Bundle artifact or running the full preflight gate.
+    """
+    actions = []
+    for rel, after in sorted(_decode_writes(plan).items()):
+        new_hash = hashlib.sha256(after).hexdigest() if after is not None else None
+        operation_type = _action_operation(plan, rel)
+        descriptor = {"plan_id": plan["plan_id"], "operation_type": operation_type, "core_version": _runtime_version(),
+                      "path": rel, "new_hash": new_hash}
+        operation_digest = canonical_digest(descriptor)
+        provenance = {"plan_id": plan["plan_id"], "operation_id": f"op_{operation_digest[:26]}", "operation_type": operation_type,
+                      "operation_digest": operation_digest, "core_version": _runtime_version()}
+        actions.append({"operation": "replace" if after is not None else "delete", "path": rel,
+                        "content": after.decode("utf-8") if after is not None else None, "provenance": provenance})
+    operation_types = {item["operation_type"] for item in plan["operations"]}
+    if "move_topic" in operation_types and "revise_claim" in operation_types:
+        bundle_type = "knowledge_refactor"
+    elif "move_topic" in operation_types or "update_topic" in operation_types:
+        bundle_type = "knowledge_structure_change"
+    elif "revise_claim" in operation_types:
+        bundle_type = "claim_revise"
+    elif operation_types.intersection({"refresh_authority_ref", "retire_authority_ref", "update_authority_ref"}) and not operation_types.intersection({"add_claim", "add_authority_ref"}):
+        bundle_type = "authority_maintenance"
+    else:
+        bundle_type = "claim_create"
+    manifest = {"bundle_type": bundle_type, "intent": plan["intent"],
+                "semantic_diff": {"plan_digest": content_digest, "operations": len(plan["operations"]), "claims_created": sorted(plan["claims"]),
+                                  "claims_revised": sorted(plan.get("existing_claim_changes", {})),
+                                  "structure_changes": plan.get("structure_changes", []),
+                                  "topics_updated": plan.get("topic_updates", []),
+                                  "affected_topics": plan.get("affected_topics", []), "affected_nodes": plan.get("affected_nodes", []),
+                                  "authority_refs_added": [item["id"] for item in plan["authority_refs"]],
+                                  "authority_refs_refreshed": [{key: item[key] for key in ("authority_ref_id", "old_hash", "new_hash", "affected_claim_ids")} for item in plan.get("authority_ref_refreshes", [])],
+                                  "authority_refs_updated": [{key: item.get(key) for key in ("authority_ref_id", "old_path", "new_path", "old_hash", "new_hash", "affected_claim_ids")} for item in plan.get("authority_ref_updates", [])],
+                                  "authority_refs_retired": [{key: item.get(key) for key in ("authority_ref_id", "affected_claim_ids", "replacement_authority_ref_id", "replacement_claim_id", "reason")} for item in plan.get("authority_ref_retirements", [])]},
+                "evidence_refs": [], "authority_refs": sorted(set([item["id"] for item in plan["authority_refs"]]
+                    + [item["authority_ref_id"] for item in plan.get("authority_ref_refreshes", [])]
+                    + [item["authority_ref_id"] for item in plan.get("authority_ref_updates", [])]
+                    + [item["authority_ref_id"] for item in plan.get("authority_ref_retirements", [])])), "permission_effect": "none",
+                "risk": plan["risk"], "actions": actions}
+    bundle = build_bundle(root, manifest, instance.identities)
+    return _core().preflight_bundle(root, bundle)
 
 
 def finalize(root: Path, instance: Instance, args: argparse.Namespace) -> dict[str, Any]:
@@ -818,57 +1119,40 @@ def finalize(root: Path, instance: Instance, args: argparse.Namespace) -> dict[s
         _fail("PLAN_DELTA_REQUIRED", "successful delta check for the current plan digest is required before finalize")
     # Refuse before another candidate or full gate is produced.
     _assert_budget(plan, {"candidate_bundles": 1, "full_preflight_checks": 1})
-    actions = []
+    # Count no-op actions and enforce the no-op budget without building the bundle.
     for rel, after in sorted(_decode_writes(plan).items()):
         target = root / rel
         existed = target.exists(); before = target.read_bytes() if existed else b""
         if (after is not None and before == after) or (after is None and not existed):
             plan["counters"]["noop_actions"] += 1
             _save(path, plan); _assert_budget(plan)
-        new_hash = hashlib.sha256(after).hexdigest() if after is not None else None; operation_type = _action_operation(plan, rel)
-        descriptor = {"plan_id": plan["plan_id"], "operation_type": operation_type, "core_version": _runtime_version(), "path": rel, "new_hash": new_hash}
-        operation_digest = canonical_digest(descriptor)
-        provenance = {"plan_id": plan["plan_id"], "operation_id": f"op_{operation_digest[:26]}", "operation_type": operation_type,
-                      "operation_digest": operation_digest, "core_version": _runtime_version()}
-        actions.append({"operation": "replace" if after is not None else "delete", "path": rel,
-                        "content": after.decode("utf-8") if after is not None else None, "provenance": provenance})
-    operation_types = {item["operation_type"] for item in plan["operations"]}
-    if "move_topic" in operation_types and "revise_claim" in operation_types:
-        bundle_type = "knowledge_refactor"
-    elif "move_topic" in operation_types:
-        bundle_type = "knowledge_structure_change"
-    elif "revise_claim" in operation_types:
-        bundle_type = "claim_revise"
-    elif operation_types.intersection({"refresh_authority_ref", "retire_authority_ref"}) and not operation_types.intersection({"add_claim", "add_authority_ref"}):
-        bundle_type = "authority_maintenance"
-    else:
-        bundle_type = "claim_create"
-    manifest = {"bundle_type": bundle_type, "intent": plan["intent"],
-                "semantic_diff": {"plan_digest": content_digest, "operations": len(plan["operations"]), "claims_created": sorted(plan["claims"]),
-                                  "claims_revised": sorted(plan.get("existing_claim_changes", {})),
-                                  "structure_changes": plan.get("structure_changes", []),
-                                  "affected_topics": plan.get("affected_topics", []), "affected_nodes": plan.get("affected_nodes", []),
-                                  "authority_refs_added": [item["id"] for item in plan["authority_refs"]],
-                                  "authority_refs_refreshed": [{key: item[key] for key in ("authority_ref_id", "old_hash", "new_hash", "affected_claim_ids")} for item in plan.get("authority_ref_refreshes", [])],
-                                  "authority_refs_retired": [{key: item.get(key) for key in ("authority_ref_id", "affected_claim_ids", "replacement_authority_ref_id", "replacement_claim_id", "reason")} for item in plan.get("authority_ref_retirements", [])]},
-                "evidence_refs": [], "authority_refs": sorted(set([item["id"] for item in plan["authority_refs"]]
-                    + [item["authority_ref_id"] for item in plan.get("authority_ref_refreshes", [])]
-                    + [item["authority_ref_id"] for item in plan.get("authority_ref_retirements", [])])), "permission_effect": "none",
-                "risk": plan["risk"], "actions": actions}
-    bundle = build_bundle(root, manifest, instance.identities)
-    bundle = _core().preflight_bundle(root, bundle)
-    temporary, staging = _with_overlay(root, plan)
+    bundle = _candidate_bundle(root, instance, plan, content_digest)
+    temporary, staging = _with_overlay(root, instance, plan)
     try:
         contract = _evaluation_contract(staging, instance)
-        records = _validation_records(staging, instance, contract, contract["cases"], "full_preflight")
-        records["case_selection"] = [{"case_id": case["id"], "decision": "selected", "reason": "full_preflight_all_cases"}
-                                     for case in contract["cases"]]
+        # Full preflight blocks only on cases that intersect this plan's change
+        # scope (consistent with the delta check); unrelated cases are deferred
+        # and cannot block an unrelated plan. Operators may additionally defer
+        # specific cases with --defer-evaluation.
+        touched_topics = {claim["topic_id"] for claim in plan.get("claims", {}).values()} | set(plan.get("affected_topics", []))
+        touched_nodes = set(plan.get("affected_nodes", []))
+        touched_claims = set(plan.get("existing_claim_changes", {}))
+        full_selected, full_decisions = select_delta_cases(contract, node_ids=touched_nodes,
+                                                           topic_ids=touched_topics, claim_ids=touched_claims)
+        deferred_ids = set(getattr(args, "defer_evaluation", None) or [])
+        full_decisions = [item for item in full_decisions if item["case_id"] not in deferred_ids]
+        full_decisions += [{"case_id": case_id, "decision": "deferred_user", "reason": "explicit_defer_evaluation"}
+                           for case_id in sorted(deferred_ids)]
+        full_selected = [case for case in full_selected if case["id"] not in deferred_ids]
+        records = _validation_records(staging, instance, contract, full_selected, "full_preflight")
+        records["case_selection"] = full_decisions
     finally:
         temporary.cleanup()
+    historical_warnings: list[dict[str, Any]] = []
     if not records["ok"]:
         blocking_authority, historical_warnings = _classify_authority_records(plan, records["authority_records"])
         component_ok = (records["validation"].get("ok") and records["projection"].get("ok")
-                        and records["tree"].get("ok", False) and not records["failed_case_ids"])
+                        and records["tree"].get("ok", False) and not records["blocking_failed_case_ids"])
         if not component_ok or blocking_authority:
             failed_artifact = _artifact_rel(instance, content_digest, "full-preflight-failed")
             _write_artifact(root, failed_artifact, {
@@ -881,14 +1165,17 @@ def finalize(root: Path, instance: Instance, args: argparse.Namespace) -> dict[s
             findings += [{"code": "PLAN_FULL_EVALUATION_FAILED", "path": "evaluation", "message": case_id,
                           "case_id": case_id, "artifact_path": failed_artifact,
                           "evaluator_contract_version": contract["contract_version"], "runtime_version": _runtime_version()}
-                         for case_id in records["failed_case_ids"]]
+                         for case_id in records["blocking_failed_case_ids"]]
             findings += blocking_authority + historical_warnings
             if not findings:
                 findings.append({"code": "PLAN_FULL_PREFLIGHT_FAILED", "path": "full_preflight",
                                  "message": "full staged preflight failed without component findings"})
             raise _core().SemanticPlanError("PLAN_FULL_PREFLIGHT_FAILED", "full staged preflight failed", findings)
-    else:
-        historical_warnings = []
+    historical_warnings = historical_warnings + [
+        {"code": "PLAN_EVALUATION_NON_BLOCKING", "path": "evaluation",
+         "message": f"non-blocking evaluation case failed (warning only): {case_id}", "case_id": case_id, "blocking": False}
+        for case_id in records.get("non_blocking_failed_case_ids", [])
+    ]
     historical_warnings = historical_warnings + _intent_overlap_warnings(root, plan, bundle)
     plan["counters"]["full_checks"] += 1; plan["counters"]["full_preflight_checks"] += 1
     plan["counters"]["candidate_bundles"] += 1; _counters(plan); _assert_budget(plan)
@@ -944,13 +1231,18 @@ def record_post_apply_full_check(root: Path, instance: Instance, bundle: dict[st
     records = _validation_records(root, instance, contract, contract["cases"], "post_apply")
     blocking_authority, historical_warnings = _classify_authority_records(plan, records["authority_records"], phase="post-apply full validation")
     component_ok = (records["validation"].get("ok") and records["projection"].get("ok")
-                    and records["tree"].get("ok", False) and not records["failed_case_ids"])
+                    and records["tree"].get("ok", False) and not records["blocking_failed_case_ids"])
     if not component_ok or blocking_authority:
         findings = records["validation"].get("errors", []) + records["projection"].get("errors", []) + records["tree"].get("errors", [])
         findings += [{"code": "PLAN_POST_APPLY_EVALUATION_FAILED", "path": "evaluation", "message": case_id, "case_id": case_id}
-                     for case_id in records["failed_case_ids"]]
+                     for case_id in records["blocking_failed_case_ids"]]
         findings += blocking_authority
         raise _core().SemanticPlanError("PLAN_POST_APPLY_FULL_FAILED", "post-apply full validation failed", findings)
+    historical_warnings = historical_warnings + [
+        {"code": "PLAN_EVALUATION_NON_BLOCKING", "path": "evaluation",
+         "message": f"non-blocking evaluation case failed (warning only): {case_id}", "case_id": case_id, "blocking": False}
+        for case_id in records.get("non_blocking_failed_case_ids", [])
+    ]
     plan["counters"]["full_checks"] += 1; plan["counters"]["post_apply_full_checks"] += 1
     artifact = _artifact_rel(instance, plan["finalized_plan_digest"], "post-apply-full")
     receipt = {"ok": True, "plan_digest": plan["finalized_plan_digest"], "bundle_id": bundle["bundle_id"],
@@ -1024,6 +1316,11 @@ def _affected_authority_refs(root: Path, instance: Instance, plan: dict[str, Any
                        "old_hash": item.get("old_hash"), "new_hash": None,
                        "linked_claim_ids": item.get("affected_claim_ids", []),
                        "human_review_reason": item["reason"]})
+    for item in plan.get("authority_ref_updates", []):
+        report.append({"authority_ref_id": item["authority_ref_id"], "change": "updated", "path": item["new_path"],
+                       "old_path": item.get("old_path"), "old_hash": item.get("old_hash"), "new_hash": item.get("new_hash"),
+                       "linked_claim_ids": item.get("affected_claim_ids", []),
+                       "human_review_reason": item.get("reason", "The Authority Ref was re-pointed to a new file and requires exact-hash human review.")})
 
     refs_rel = instance.authority.get("authority_refs")
     committed = _committed_bytes(root, plan["baseline_commit"], refs_rel) if refs_rel else None
@@ -1167,13 +1464,22 @@ def inspect(root: Path, instance: Instance, args: argparse.Namespace) -> dict[st
 
 def rebase_plan(root: Path, instance: Instance, args: argparse.Namespace) -> dict[str, Any]:
     path, plan = _load(root, instance, args.plan_id)
-    if plan.get("finalized_bundle"):
-        _fail("PLAN_FINALIZED_IMMUTABLE", "finalized plan cannot be rebased")
-    if plan.get("state") != "open":
-        _fail("PLAN_NOT_OPEN", f"plan is {plan.get('state')}")
     reason = args.reason.strip()
     if not reason:
         _fail("PLAN_INPUT_INVALID", "rebase reason required")
+    finalized_unapplied = False
+    if plan.get("finalized_bundle"):
+        # A finalized-but-not-applied plan keeps its operations and Claim
+        # identity across a rebase: it is re-opened on the new baseline so the
+        # operator can re-run check/finalize and derive a fresh bundle. Once an
+        # approval or apply record exists the plan is immutable.
+        _, approval_path, receipt_path = _core().bundle_paths(root, plan["finalized_bundle"]["bundle_id"])
+        if approval_path.is_file() or receipt_path.is_file():
+            _fail("PLAN_FINALIZED_IMMUTABLE",
+                  "finalized plan with an approval or apply record cannot be rebased; abandon and re-init (replays operations)")
+        finalized_unapplied = True
+    elif plan.get("state") != "open":
+        _fail("PLAN_NOT_OPEN", f"plan is {plan.get('state')}")
     old_baseline = plan["baseline_commit"]
     head = _head(root)
     if plan.get("baseline_mode") == "worktree":
@@ -1186,6 +1492,7 @@ def rebase_plan(root: Path, instance: Instance, args: argparse.Namespace) -> dic
     referenced = {item["path"] for item in plan.get("authority_refs", [])}
     referenced |= {item.get("path") for item in plan.get("authority_ref_refreshes", []) if item.get("path")}
     referenced |= {item.get("path") for item in plan.get("authority_ref_retirements", []) if item.get("path")}
+    referenced |= {item.get("new_path") for item in plan.get("authority_ref_updates", []) if item.get("new_path")}
     if refs_rel:
         referenced.add(refs_rel)
     conflicts = []
@@ -1199,7 +1506,21 @@ def rebase_plan(root: Path, instance: Instance, args: argparse.Namespace) -> dic
         _fail("PLAN_REBASE_CONFLICT",
               "Authority paths changed between plan baseline and HEAD; rebase would re-anchor them under new content: "
               + ", ".join(conflicts)
-              + ". Refresh or retire the affected refs in the plan, or abandon and re-init.", path=refs_rel or ".")
+              + ". Refresh, update, or retire the affected refs in the plan, or abandon and re-init.", path=refs_rel or ".")
+    if finalized_unapplied:
+        stale_bundle = plan["finalized_bundle"]
+        _discard_stale_finalized_artifacts(root, stale_bundle)
+        plan["state"] = "open"
+        plan["finalized_bundle"] = None
+        plan["finalized_plan_digest"] = None
+        plan["full_preflight_receipt"] = None
+        plan["post_apply_receipt"] = None
+        # The stale candidate Bundle and its full preflight were bound to the old
+        # baseline digest and are now discarded; reset those budget counters so
+        # the re-anchored plan can produce a fresh candidate without tripping
+        # max_full_preflight/max_candidate_bundles.
+        for counter in ("candidate_bundles", "full_preflight_checks", "full_checks"):
+            plan.setdefault("counters", {})[counter] = 0
     plan["baseline_commit"] = head
     if plan.get("baseline_mode") == "worktree":
         plan["worktree_authority_hash"] = _authority_registry_worktree_snapshot(root, instance)
@@ -1207,7 +1528,21 @@ def rebase_plan(root: Path, instance: Instance, args: argparse.Namespace) -> dic
                                                   "at": dt.datetime.now().astimezone().isoformat(timespec="seconds")})
     plan["delta"] = None
     _save(path, plan)
-    return _summary(plan, "rebase", old_baseline_commit=old_baseline, rebase_count=len(plan["rebase_history"]))
+    return _summary(plan, "rebase", old_baseline_commit=old_baseline, rebase_count=len(plan["rebase_history"]),
+                    un_finalized=finalized_unapplied)
+
+
+def _discard_stale_finalized_artifacts(root: Path, bundle: dict[str, Any]) -> None:
+    """Remove the immutable Bundle and lifecycle markers of a re-anchored plan.
+
+    The Bundle digest is bound to the old baseline; once the plan is re-opened
+    the artifact is stale and must not be approvable/applicable. The full
+    preflight artifact under .local/ is disposable and left in place.
+    """
+    bundle_path, approval_path, receipt_path = _core().bundle_paths(root, bundle["bundle_id"])
+    for candidate in (bundle_path, approval_path, receipt_path):
+        with contextlib.suppress(FileNotFoundError):
+            candidate.unlink()
 
 
 def abandon(root: Path, instance: Instance, args: argparse.Namespace) -> dict[str, Any]:
@@ -1259,15 +1594,77 @@ def _draft_finding(path: Path, field: str, message: str) -> dict[str, Any]:
     return {"code": "PLAN_DRAFT_INVALID", "path": str(path), "draft_field": field, "message": message}
 
 
-def load_capture_draft(path: Path) -> tuple[dict[str, Any] | None, list[dict[str, Any]]]:
+_MARKDOWN_LIST_FIELDS = {"node_keywords", "topic_keywords", "keywords", "aliases", "fact_classes"}
+_MARKDOWN_FIELD_ALIASES = {"fact_class": "fact_classes", "node_keyword": "node_keywords",
+                           "topic_keyword": "topic_keywords", "keyword": "keywords", "alias": "aliases"}
+
+
+def _markdown_draft_from_text(text: str) -> dict[str, Any] | None:
+    """Parse a Markdown capture draft into the canonical JSON draft shape.
+
+    Format: top-level ``- key: value`` lines, ``## <claim title>`` headers start
+    a Claim, ``### authority_ref`` headers start that Claim's Authority Refs.
+    Repeat a list field (``- fact_class: X``) or comma-separate values. Unknown
+    keys are left in place and rejected by the shared draft validation.
+    """
+    draft: dict[str, Any] = {"schema_version": CAPTURE_DRAFT_VERSION, "claims": []}
+    claim: dict[str, Any] | None = None
+    ref: dict[str, Any] | None = None
+    for raw in text.splitlines():
+        line = raw.strip()
+        if line.startswith("## "):
+            claim = {}
+            draft["claims"].append(claim)
+            ref = None
+            continue
+        if line.startswith("### ") and claim is not None:
+            ref = {}
+            claim.setdefault("authority_refs", []).append(ref)
+            continue
+        key_value = None
+        if line.startswith("- ") and ": " in line[2:]:
+            key_value = line[2:].split(": ", 1)
+        elif ": " in line:
+            key_value = line.split(": ", 1)
+        if key_value is None:
+            continue
+        key, value = (part.strip() for part in key_value)
+        key = key.replace("-", "_").replace(" ", "_").lower()
+        if not value:
+            continue
+        key = _MARKDOWN_FIELD_ALIASES.get(key, key)
+        target = ref if ref is not None else (claim if claim is not None else draft)
+        if key in _MARKDOWN_LIST_FIELDS:
+            target.setdefault(key, [])
+            for item in value.split(","):
+                item = item.strip()
+                if item and item not in target[key]:
+                    target[key].append(item)
+        else:
+            target[key] = value
+    if not draft.get("claims"):
+        return None
+    return draft
+
+
+def load_capture_draft(path: Path, *, fmt: str | None = None) -> tuple[dict[str, Any] | None, list[dict[str, Any]]]:
+    """Load and validate a capture draft (JSON by default, Markdown when fmt='markdown')."""
     try:
-        draft = json.loads(path.read_text(encoding="utf-8"))
+        text = path.read_text(encoding="utf-8")
     except FileNotFoundError:
         return None, [{"code": "PLAN_DRAFT_MISSING", "path": str(path), "message": "capture draft file not found"}]
-    except ValueError as exc:
-        return None, [{"code": "PLAN_DRAFT_INVALID", "path": str(path), "message": f"capture draft is not valid JSON: {exc}"}]
-    if not isinstance(draft, dict):
-        return None, [_draft_finding(path, "$", "draft must be a JSON object")]
+    is_markdown = fmt == "markdown" or (fmt is None and path.suffix.lower() in {".md", ".markdown"})
+    if is_markdown:
+        draft = _markdown_draft_from_text(text)
+        if draft is None:
+            return None, [_draft_finding(path, "$", "markdown draft must contain at least one '## Claim' section")]
+    else:
+        try:
+            draft = json.loads(text)
+        except ValueError as exc:
+            return None, [{"code": "PLAN_DRAFT_INVALID", "path": str(path), "message": f"capture draft is not valid JSON: {exc}"}]
+        if not isinstance(draft, dict):
+            return None, [_draft_finding(path, "$", "draft must be a JSON object")]
     findings: list[dict[str, Any]] = []
     unknown = sorted(set(draft) - _CAPTURE_DRAFT_KEYS)
     if unknown:
@@ -1361,9 +1758,24 @@ def _capture_report(plan: dict[str, Any], draft_path: str) -> dict[str, Any]:
             "approved": False, "applied": False, "errors": []}
 
 
+def _capture_preview_report(plan: dict[str, Any], draft_path: str, bundle: dict[str, Any]) -> dict[str, Any]:
+    return {"ok": True, "command": "knowledge-plan capture", "draft_path": draft_path, "preview_only": True,
+            "plan_id": plan["plan_id"], "plan_state": plan.get("state", "open"), "finalized": False,
+            "bundle_id": bundle["bundle_id"], "content_hash": bundle["content_hash"],
+            "semantic_diff": bundle["semantic_diff"], "expected_changed_files": bundle["expected_changed_files"],
+            "risk": bundle["risk"], "permission_effect": bundle["permission_effect"],
+            "operation_count": len(plan.get("operations", [])),
+            "approved": False, "applied": False,
+            "next_step": f"Preview only — nothing was finalized or written. Review the semantic_diff, then either run "
+                        f"knowledge-plan finalize {plan['plan_id']} (after a delta check) to create the immutable Bundle, "
+                        f"or abandon it.",
+            "errors": []}
+
+
 def capture(root: Path, instance: Instance, args: argparse.Namespace) -> dict[str, Any]:
     file_path = Path(args.file) if Path(args.file).is_absolute() else root / args.file
-    draft, findings = load_capture_draft(file_path)
+    draft_format = getattr(args, "draft_format", None)
+    draft, findings = load_capture_draft(file_path, fmt=draft_format)
     if findings:
         return {"ok": False, "command": "knowledge-plan capture", "draft_path": str(file_path), "plan_id": None,
                 "retained_plan": None, "errors": findings, "exit_code": 1}
@@ -1404,6 +1816,12 @@ def capture(root: Path, instance: Instance, args: argparse.Namespace) -> dict[st
             failures = [{**item, "draft_field": claim_to_field[item["claim_id"]]} if item.get("claim_id") in claim_to_field else item
                         for item in (delta.get("findings") or checked.get("findings") or [])]
             raise _core().SemanticPlanError("PLAN_DELTA_FAILED", "delta validation failed; fix the draft and re-run with a new intent", failures)
+        if getattr(args, "preview_only", False):
+            # Show the exact candidate Bundle (semantic_diff + content_hash) that
+            # finalize would produce, without running full preflight or writing it.
+            _, plan = _load(root, instance, plan_id)
+            bundle = _candidate_bundle(root, instance, plan, _content_digest(plan))
+            return _capture_preview_report(plan, str(file_path), bundle)
         finalize(root, instance, argparse.Namespace(plan_id=plan_id))
     except (BundleError, _core().SemanticPlanError) as exc:
         code = getattr(exc, "code", "PLAN_CAPTURE_FAILED"); message = str(exc); retained = None
@@ -1422,8 +1840,10 @@ def capture(root: Path, instance: Instance, args: argparse.Namespace) -> dict[st
 
 
 def dispatch_plan_command(root: Path, args: argparse.Namespace, instance: Instance) -> dict[str, Any]:
-    commands = {"init": init_plan, "rebase": rebase_plan, "add-claim": add_claim, "revise-claim": revise_claim, "move-topic": move_topic,
+    commands = {"init": init_plan, "rebase": rebase_plan, "add-claim": add_claim, "revise-claim": revise_claim,
+                "move-topic": move_topic, "update-topic": update_topic,
                 "add-authority-ref": add_authority_ref, "refresh-authority-ref": refresh_authority_ref,
+                "update-authority-ref": update_authority_ref,
                 "retire-authority-ref": retire_authority_ref, "check": check_delta, "finalize": finalize,
                 "inspect": inspect, "abandon": abandon, "capture": capture}
     return commands[args.plan_command](root, instance, args)

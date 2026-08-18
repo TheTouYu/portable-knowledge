@@ -163,25 +163,36 @@ python tools/pkc.py knowledge-plan move-topic PLAN_ID \
   --to-path knowledge/target/topic.md --reason "Lifecycle boundary changed"
 # For atomic target-Node creation, move-topic also requires complete
 # --node-name, --node-path, and --node-boundary metadata.
+python tools/pkc.py knowledge-plan update-topic PLAN_ID \
+  --topic-id TOPIC_ID --title "Retuned title" \
+  --summary "Bounded routing summary" --keyword schema --alias 契约 \
+  --reason "Improve retrieval without rewriting Claims"
 python tools/pkc.py knowledge-plan add-authority-ref PLAN_ID \
   --claim-id CLAIM_ID --path src/module.py --locator "function:name" \
   --role current_implementation --change-policy invalidate_on_change \
   --fact-class runtime_behavior
+python tools/pkc.py knowledge-plan update-authority-ref PLAN_ID \
+  --authority-ref-id AREF_ID --path src/new-file.py --locator "function:name" \
+  --reason "The rule moved to a new file"
+python tools/pkc.py knowledge-plan refresh-authority-ref PLAN_ID --all-stale \
+  --reason "Committed sources changed and were reviewed"
 python tools/pkc.py knowledge-plan check PLAN_ID --mode delta
 python tools/pkc.py knowledge-plan finalize PLAN_ID
+python tools/pkc.py knowledge-plan finalize PLAN_ID --defer-evaluation CASE_ID  # escape hatch for a known-failing case
 python tools/pkc.py bundle-inspect BUNDLE_ID --format json
 ```
 
-Inspect and show the Bundle ID without abbreviation, the complete immutable 64-character `content_hash`, semantic difference, Authority/evidence basis, exclusions, permission effect, risk, and exact changed files. Stop. A generic “continue/agree” is not approval; only a real human confirmation naming that exact displayed hash authorizes approval and application. After that confirmation:
+Inspect and show the Bundle ID without abbreviation, the complete immutable 64-character `content_hash`, semantic difference, Authority/evidence basis, exclusions, permission effect, risk, and exact changed files. Stop. A generic “continue/agree” is not approval; only a real human confirmation naming that exact displayed hash authorizes approval and application. `--content-hash` on approve/apply is optional: it auto-resolves from the verified immutable Bundle (verify_bundle recomputes the canonical hash, so it cannot be weakened); a supplied hash must still match exactly or the operation fails closed. After that confirmation:
 
 ```bash
-python tools/pkc.py bundle-approve BUNDLE_ID --content-hash HASH --apply
-python tools/pkc.py bundle-apply BUNDLE_ID --content-hash HASH --apply
+python tools/pkc.py bundle-approve BUNDLE_ID --apply
+python tools/pkc.py bundle-apply BUNDLE_ID --apply
 python tools/pkc.py rebuild
 python tools/pkc.py validate
 python tools/pkc.py tree --format text
 python tools/pkc.py query "representative question" --level 2
 # Run the target project's configured retrieval evaluation/knowledge-check.
+python tools/pkc.py knowledge-check --eval-coverage
 python tools/pkc.py bundle-inspect BUNDLE_ID --format json
 git diff --check
 git status --short --branch
@@ -189,7 +200,7 @@ git status --short --branch
 
 Post-apply checks prove Bundle lifecycle, text authority, projection, routing, and configured retrieval expectations only. Report evidence as separate layers: current source implementation; automated tests; generated/decoded GIA or equivalent artifact; editor import/loading; writeback/injection; and in-game behavior. Never promote one layer as proof of a later layer.
 
-Use `add-claim` for new knowledge, `revise-claim` for correction, and `move-topic` for ownership/path refactoring. Multi-Bundle orchestration (`bundle_migration_plan`, formerly the ambiguous `migration_plan`) is non-atomic across phases and is not structure migration.
+Use `add-claim` for new knowledge, `revise-claim` for correction, `move-topic` for ownership/path refactoring, and `update-topic` to retune Topic retrieval metadata without rewriting Claim bodies. A finalized-but-not-applied plan whose committed baseline advanced can be recovered with `knowledge-plan rebase PLAN_ID --reason ...` (operations and Claim identity are preserved, the stale candidate Bundle is discarded, then re-check/re-finalize); a plan with an approval or apply record stays immutable. Batch capture supports Markdown drafts (`--draft-format markdown`) and `--preview-only` to show the exact candidate semantic_diff without finalizing. Multi-Bundle orchestration (`bundle_migration_plan`, formerly the ambiguous `migration_plan`) is non-atomic across phases and is not structure migration.
 
 Valid Authority roles are `design_intent`, `current_implementation`, `documented_contract`, and `external_environment_behavior`. Valid fact classes are `runtime_behavior`, `public_type_surface`, `cli_behavior`, `documented_contract`, `external_game_evidence`, `transform_defaults`, `writeback_behavior`, and `evidence_scope`. A role and a fact class are different controlled vocabularies. `bundle-status [bundle-id]` supports aggregate or single-Bundle status. Query text is positional; there is no `--text` option.
 

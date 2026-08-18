@@ -37,6 +37,7 @@ from .authority import (FACT_CLASSES, POLICIES, ROLES, AuthorityRegistryError, a
 from .retrieval import RetrievalError, build_progressive_scope
 from .experience import (ExperienceError, authorized_claims, build_vector_index, evaluate_cases,
                          freshness_markers, search_knowledge, upstream_freshness)
+from .evaluation_contract import EvaluationContractError
 from .federation import FederationError, search as search_federation
 
 SCHEMA_VERSION = 1
@@ -66,16 +67,18 @@ EVENT_TYPES = {
     "evidence": {"evidence_added", "evidence_corrected", "evidence_retracted"},
     "proposals": {
         "proposal_created", "proposal_resolved", "claim_revised", "claim_superseded",
-        "claims_merged", "claim_confirmed", "claim_permission_changed", "topic_moved",
-        "authority_ref_refreshed", "authority_ref_retired",
+        "claims_merged", "claim_confirmed", "claim_permission_changed", "topic_moved", "topic_updated",
+        "authority_ref_refreshed", "authority_ref_retired", "authority_ref_updated",
     },
 }
 LIFECYCLES = {"draft", "active", "superseded", "deprecated", "rejected"}
 CONFIRMATIONS = {"unconfirmed", "confirmed", "confirmed_with_limits"}
 CONTENT_HASH_HELP = (
-    "REQUIRED: the Bundle's exact immutable content hash; obtain it from "
-    "`bundle-status <bundle_id>` or `bundle-inspect <bundle_id>`, and approve and apply "
-    "with the same hash"
+    "the Bundle's exact immutable content hash. Omit to auto-resolve from the "
+    "immutable Bundle artifact (unambiguous; verify_bundle recomputes the canonical "
+    "hash, so it cannot be weakened); when supplied it must match the Bundle exactly "
+    "or the operation fails closed. Inspect with `bundle-inspect <bundle_id>` or "
+    "`bundle-status <bundle_id>` before approving/applying."
 )
 QUERY_BUDGETS = {1: 4_000, 2: 8_000, 3: 20_000}
 AUTHORIZED_REVIEW_ROLES = {"business_reviewer", "owner"}
@@ -1426,6 +1429,69 @@ def claim_markdown(title: str, claim_id: str, statement: str, boundary: str) -> 
             f"<!-- CLAIM:END {claim_id} -->\n")
 
 
+def _topic_markdown_with_metadata(title: str, summary: str, body: str) -> str:
+    """Rebuild a Topic Markdown file, preserving its Claim block body.
+
+    ``body`` is everything from the first Claim marker (or the whole remainder
+    when the Topic has no Claim yet) and is written back unchanged. This keeps
+    ``update-topic`` a metadata-only change: it never rewrites Claim content.
+    """
+    header = f"# {title}\n\n{summary.strip()}\n\n"
+    return header + (body.lstrip("\n") if body else "")
+
+
+def plan_update_topic(root: Path, args: argparse.Namespace, *, event_id: str, created_at: str) -> tuple[dict[str, bytes | None], dict[str, Any]]:
+    """Plan a governed Topic metadata update (title/summary/keywords/aliases).
+
+    The Topic identity, its Claim blocks, and Claim IDs are preserved; only the
+    registry metadata and the Markdown header/summary are rewritten. All updates
+    go through the same proposal + bundle + apply governance as other operations.
+    """
+    ensure_actor(root, args.actor, review_required=True)
+    registry, _ = load_authority(root)
+    topic = next((item for item in registry.get("topics", []) if item.get("id") == args.topic_id), None)
+    if not topic:
+        raise SemanticPlanError("PLAN_TOPIC_UPDATE_SOURCE_MISSING", f"source Topic does not exist: {args.topic_id}")
+    path = root / topic["path"]
+    if not path.is_file():
+        raise SemanticPlanError("PLAN_STRUCTURE_HISTORY_INCONSISTENT", f"Topic Markdown is missing: {topic['path']}")
+    title = (args.title or topic.get("title") or "").strip()
+    summary = (args.summary if args.summary is not None else topic.get("summary") or "").strip()
+    keywords = sorted(set(args.keywords)) if args.keywords is not None else sorted(set(topic.get("keywords", [])))
+    aliases = sorted(set(args.aliases)) if args.aliases is not None else sorted(set(topic.get("aliases", [])))
+    if not title:
+        raise SemanticPlanError("PLAN_INPUT_INVALID", "topic title must not be empty", path=topic["path"])
+    before = {"title": topic.get("title"), "summary": topic.get("summary", ""),
+              "keywords": sorted(set(topic.get("keywords", []))), "aliases": sorted(set(topic.get("aliases", [])))}
+    after = {"title": title, "summary": summary, "keywords": keywords, "aliases": aliases}
+    if before == after:
+        raise SemanticPlanError("PLAN_STRUCTURE_NOOP", "Topic metadata update does not change any field", path=topic["path"])
+    original = path.read_text(encoding="utf-8")
+    lines = original.split("\n", 1)
+    body_start = lines[1] if len(lines) > 1 else ""
+    marker_index = body_start.find("<!-- CLAIM:START")
+    body = body_start[marker_index:] if marker_index >= 0 else body_start.strip()
+    new_text = _topic_markdown_with_metadata(title, summary, body)
+    if new_text == original:
+        raise SemanticPlanError("PLAN_STRUCTURE_NOOP", "Topic metadata update does not change Markdown content", path=topic["path"])
+    topic["title"] = title
+    topic["summary"] = summary
+    topic["keywords"] = keywords
+    if aliases:
+        topic["aliases"] = aliases
+    elif "aliases" in topic:
+        topic.pop("aliases", None)
+    event = {**event_identity(root, args), "event_id": event_id, "event_type": "topic_updated",
+             "topic_id": args.topic_id, "node_id": topic["node_id"], "path": topic["path"],
+             "before": before, "after": after, "before_hash": sha256_bytes(original.encode("utf-8")),
+             "after_hash": sha256_bytes(new_text.encode("utf-8")), "reason": args.reason.strip(), "created_at": created_at}
+    rel = shard_rel("proposals", args.actor, created_at)
+    writes = {REGISTRY_REL.as_posix(): (json.dumps(registry, ensure_ascii=False, indent=2) + "\n").encode("utf-8"),
+              topic["path"]: new_text.encode("utf-8"), rel: append_jsonl_bytes(root / rel, event)}
+    return writes, {"topic_id": args.topic_id, "node_id": topic["node_id"], "path": topic["path"],
+                    "before": before, "after": after, "event_id": event_id, "event_path": rel}
+
+
 def plan_new_claim(root: Path, args: argparse.Namespace, *, claim_id: str, fact_classes: list[str] | None = None) -> tuple[dict[str, bytes], dict[str, Any]]:
     """Pure Claim and enclosing-structure rule shared by single-item and plan interfaces."""
     ensure_actor(root, args.actor)
@@ -1640,6 +1706,20 @@ def _load_bundle(root: Path, bundle_id: str) -> dict[str, Any]:
     return value
 
 
+def _resolved_content_hash(bundle: dict[str, Any], provided: str | None) -> str:
+    """Resolve the exact immutable content hash for approve/apply.
+
+    When ``--content-hash`` is omitted, the immutable Bundle artifact is the
+    single unambiguous source of its exact hash, so it is resolved from there.
+    A supplied hash is still fail-closed: it must match the Bundle exactly.
+    """
+    if not provided:
+        return bundle["content_hash"]
+    if provided != bundle["content_hash"]:
+        raise BundleError("exact content hash is required; the supplied hash does not match the immutable Bundle")
+    return provided
+
+
 def capture_command(root: Path, args: argparse.Namespace, instance: Instance) -> dict[str, Any]:
     request = read_json(Path(args.manifest))
     return capture_bundle_draft(root, request, instance.identities, lambda bundle: preflight_bundle(root, bundle),
@@ -1661,8 +1741,7 @@ def bundle_create_command(root: Path, args: argparse.Namespace, instance: Instan
 
 def bundle_approve_command(root: Path, args: argparse.Namespace, instance: Instance) -> dict[str, Any]:
     bundle = _load_bundle(root, args.bundle_id)
-    if args.content_hash != bundle["content_hash"]:
-        raise BundleError("exact content hash is required for approval")
+    content_hash = _resolved_content_hash(bundle, args.content_hash)
     if any(action.get("provenance") for action in bundle.get("actions", [])):
         from .semantic_plan import verify_finalized_bundle_provenance
         verify_finalized_bundle_provenance(root, instance, bundle)
@@ -1671,15 +1750,14 @@ def bundle_approve_command(root: Path, args: argparse.Namespace, instance: Insta
     _, path, _ = bundle_paths(root, args.bundle_id)
     writes = {relpath(root, path): bundle_json(value)}
     if not args.apply:
-        return {"ok": True, "command": "bundle-approve", "bundle_id": args.bundle_id, "content_hash": bundle["content_hash"], "applied": False, "dry_run": True, "changed_files": sorted(writes), "approval": value, "errors": [], "next_step": "DRY RUN — nothing was written. Re-run bundle-approve with --apply to record the approval."}
+        return {"ok": True, "command": "bundle-approve", "bundle_id": args.bundle_id, "content_hash": bundle["content_hash"], "applied": False, "dry_run": True, "dry_run_notice": "DRY RUN — NOTHING WAS WRITTEN. The approval was NOT recorded. Re-run bundle-approve with --apply to record the exact-hash approval.", "changed_files": sorted(writes), "approval": value, "errors": [], "next_step": "DRY RUN — nothing was written. Re-run bundle-approve with --apply to record the approval."}
     changed = transactional_replace(root, "bundle-approve", writes)
-    return {"ok": True, "command": "bundle-approve", "bundle_id": args.bundle_id, "applied": True, "dry_run": False, "changed_files": changed, "errors": []}
+    return {"ok": True, "command": "bundle-approve", "bundle_id": args.bundle_id, "content_hash": content_hash, "applied": True, "dry_run": False, "changed_files": changed, "errors": []}
 
 
 def bundle_apply_command(root: Path, args: argparse.Namespace, instance: Instance) -> dict[str, Any]:
     bundle = _load_bundle(root, args.bundle_id)
-    if args.content_hash != bundle["content_hash"]:
-        raise BundleError("exact content hash is required for apply")
+    content_hash = _resolved_content_hash(bundle, args.content_hash)
     semantic_plan = None
     if any(action.get("provenance") for action in bundle.get("actions", [])):
         from .semantic_plan import verify_finalized_bundle_provenance
@@ -1688,7 +1766,7 @@ def bundle_apply_command(root: Path, args: argparse.Namespace, instance: Instanc
     _, approval_path, receipt_path = bundle_paths(root, args.bundle_id)
     approved = read_json(approval_path)
     if not args.apply:
-        return {"ok": True, "command": "bundle-apply", "bundle_id": args.bundle_id, "content_hash": bundle["content_hash"], "applied": False, "dry_run": True, "changed_files": bundle["expected_changed_files"], "errors": [], "next_step": "DRY RUN — nothing was written. Re-run bundle-apply with --apply to apply the Bundle."}
+        return {"ok": True, "command": "bundle-apply", "bundle_id": args.bundle_id, "content_hash": bundle["content_hash"], "applied": False, "dry_run": True, "dry_run_notice": "DRY RUN — NOTHING WAS WRITTEN. The Bundle was NOT applied. Re-run bundle-apply with --apply to apply the Bundle.", "changed_files": bundle["expected_changed_files"], "errors": [], "next_step": "DRY RUN — nothing was written. Re-run bundle-apply with --apply to apply the Bundle."}
     receipt_rel = relpath(root, receipt_path)
     receipt = {"schema_version": 1, "bundle_id": args.bundle_id, "content_hash": bundle["content_hash"], "changed_files": bundle["expected_changed_files"]}
     def replace_with_receipt(target_root: Path, command: str, writes: dict[str, bytes | None]) -> list[str]:
@@ -1769,7 +1847,20 @@ def bundle_health(root: Path, items: list[dict[str, Any]]) -> dict[str, Any]:
     for intent, group in by_intent.items():
         if len(group) > 1:
             duplicate_drafts.append({"intent": intent or "(empty intent)", "draft_bundle_ids": sorted(item["bundle_id"] for item in group)})
+    # Orphan-draft hygiene: a draft whose intent is already covered by an applied
+    # Bundle is a supersede candidate rather than another apply candidate.
+    applied_intents = {str(item.get("intent", "")).strip() for item in items if item.get("applied")}
+    supersede_candidates: list[dict[str, Any]] = []
+    for intent, group in by_intent.items():
+        if not intent or intent not in applied_intents:
+            continue
+        covered_by = sorted(item["bundle_id"] for item in items if item.get("applied") and str(item.get("intent", "")).strip() == intent)
+        for draft in group:
+            supersede_candidates.append({"intent": intent, "draft_bundle_id": draft["bundle_id"],
+                                         "covered_by_applied": covered_by,
+                                         "next_step": f"bundle-supersede {draft['bundle_id']} --by {covered_by[0]} --reason 'intent already applied'"})
     return {"state_counts": counts, "duplicate_draft_intents": duplicate_drafts,
+            "supersede_candidates": supersede_candidates,
             "approved_pending_apply": pending_apply, "anomalies": anomalies,
             "total": len(items)}
 
@@ -1928,7 +2019,36 @@ def knowledge_index_command(root: Path, instance: Instance, permission: str) -> 
     return build_vector_index(root, instance, claims, permission)
 
 
-def knowledge_check_command(root: Path, instance: Instance, semantic: bool) -> dict[str, Any]:
+def _evaluation_topic_coverage(root: Path, instance: Instance) -> dict[str, Any]:
+    """List topics that have no evaluation case covering them.
+
+    A Topic is covered when any case's ``affected_by.topic_ids`` or
+    ``expected_topic_ids`` names it. Uncovered Topics are retrieval blind spots
+    for the configured evaluation contract; this is a read-only advisory and
+    never blocks ``knowledge-check``.
+    """
+    report = {"status": "NOT_CONFIGURED", "skipped": True, "total_topics": 0, "covered_topics": [], "uncovered_topics": []}
+    if not (instance.raw.get("evaluation") or {}).get("cases_path"):
+        return report
+    try:
+        from .evaluation_contract import load_evaluation_contract
+        contract = load_evaluation_contract(root, instance)
+        registry, _ = load_authority(root)
+    except (EvaluationContractError, KnowledgeError, InstanceError, OSError, ValueError):
+        return report
+    all_topic_ids = {topic.get("id") for topic in registry.get("topics", [])}
+    covered: set[str] = set()
+    for case in contract["cases"]:
+        scope = case.get("affected_by") or {}
+        covered.update(scope.get("topic_ids", []))
+        covered.update(case.get("expected_topic_ids", []))
+    covered &= all_topic_ids
+    uncovered = sorted(all_topic_ids - covered)
+    return {"status": "COVERED" if not uncovered else "GAP", "skipped": False,
+            "total_topics": len(all_topic_ids), "covered_topics": sorted(covered), "uncovered_topics": uncovered}
+
+
+def knowledge_check_command(root: Path, instance: Instance, semantic: bool, eval_coverage: bool = False) -> dict[str, Any]:
     started = time.monotonic()
     failures: list[str] = []
     warnings: list[str] = []
@@ -1969,6 +2089,12 @@ def knowledge_check_command(root: Path, instance: Instance, semantic: bool) -> d
         except ExperienceError as exc:
             failures.append(f"retrieval evaluation unavailable: {exc}"); environment_failure = environment_failure or exc.environment
             evaluation.update({"status": "UNAVAILABLE", "skipped": False})
+    eval_coverage_report: dict[str, Any] = {"status": "NOT_CONFIGURED", "skipped": True, "total_topics": 0, "covered_topics": [], "uncovered_topics": []}
+    if eval_coverage:
+        eval_coverage_report = _evaluation_topic_coverage(root, instance)
+        uncovered = eval_coverage_report.get("uncovered_topics", [])
+        if uncovered:
+            warnings.append("evaluation coverage gap: topics without any evaluation case: " + ", ".join(uncovered))
     warnings = list(dict.fromkeys(warnings))
     proof = experience.get("proof_boundary", "This read-only check does not prove later external-system behavior.")
     bundle_health_value: dict[str, Any] = {}
@@ -1982,8 +2108,8 @@ def knowledge_check_command(root: Path, instance: Instance, semantic: bool) -> d
             "runtime_version": _runtime_version(), "core_version": _runtime_version(), "counts": counts,
             "memory_freshness": "PASS" if not any("memory/" in item or "stale marker" in item for item in failures) else "FAIL",
             "retrieval": evaluation, "authority": {"current": authority_current, "pending_review": authority_pending},
-            "bundle_health": bundle_health_value, "warnings": warnings, "failures": failures,
-            "elapsed_seconds": round(time.monotonic() - started, 3),
+            "bundle_health": bundle_health_value, "eval_coverage": eval_coverage_report, "warnings": warnings,
+            "failures": failures, "elapsed_seconds": round(time.monotonic() - started, 3),
             "proof_boundary": proof, "read_only": True, "operation_authorized": False,
             "scope_note": "Offline by default; does not rebuild projections, access the network unless --semantic is requested, or change authority.",
             "errors": [{"code": "KNOWLEDGE_HEALTH", "path": ".", "message": item} for item in failures]}
@@ -1997,6 +2123,12 @@ def git_status(root: Path) -> list[str]:
 def output(payload: dict[str, Any], fmt: str) -> None:
     if fmt == "json":
         print(json.dumps(payload, ensure_ascii=False, indent=2))
+    elif payload.get("dry_run"):
+        notice = payload.get("dry_run_notice") or payload.get("next_step") or f"{payload.get('command')} is a dry run — nothing was written."
+        print(f"DRY RUN — NOTHING WAS WRITTEN. {notice}")
+        if payload.get("command") in {"bundle-approve", "bundle-apply", "bundle-create", "bundle-supersede", "bundle-rollback"}:
+            print(f"Re-run with --apply to persist: pkc {payload.get('command')} ... --apply")
+        return
     elif payload.get("command") == "knowledge-check":
         counts = payload.get("counts", {})
         evaluation = payload.get("retrieval", {})
@@ -2008,6 +2140,11 @@ def output(payload: dict[str, Any], fmt: str) -> None:
         print(f"Retrieval evaluation: {evaluation.get('status', 'UNKNOWN')}" +
               ("" if evaluation.get("skipped") else f"; cases {evaluation.get('passed', 0)}/{evaluation.get('total', 0)} (Topic@{evaluation.get('topic_top_n', 3)}, Claim@{evaluation.get('claim_top_n', 5)})"))
         print(f"Authority refs current/pending: {authority.get('current', 0)}/{authority.get('pending_review', 0)}")
+        coverage = payload.get("eval_coverage") or {}
+        if not coverage.get("skipped", True):
+            uncovered = coverage.get("uncovered_topics") or []
+            print(f"Evaluation coverage: {coverage.get('status')} (topics {len(coverage.get('covered_topics', []))}/{coverage.get('total_topics', 0)} covered)"
+                  + (f"; uncovered: {', '.join(uncovered)}" if uncovered else ""))
         for warning in payload.get("warnings", []): print(f"WARNING: {warning}")
         for failure in payload.get("failures", []): print(f"BLOCKING: {failure}")
         print(f"Evidence boundary: {payload.get('proof_boundary')}")
@@ -2042,15 +2179,26 @@ def output(payload: dict[str, Any], fmt: str) -> None:
             print(f"  * {ref.get('change')} [{ref.get('scope', 'plan_affected')}] {ref.get('authority_ref_id')}: {ref.get('path')}")
     elif payload.get("command") == "knowledge-plan capture":
         if payload.get("ok"):
-            print("OK: knowledge-plan capture (file-driven)")
-            print(f"Draft: {payload.get('draft_path')}")
-            print(f"Plan: {payload.get('plan_id')} (finalized, {payload.get('operation_count', 0)} operations)")
-            print(f"Bundle: {payload.get('bundle_id')}")
-            print(f"Content hash (exact; only approval credential): {payload.get('content_hash')}")
-            print(f"Risk: {payload.get('risk')}  Permission effect: {payload.get('permission_effect')}")
-            print(f"Expected changed files: {', '.join(payload.get('expected_changed_files', [])) or '(none)'}")
-            print(f"Semantic diff: {json.dumps(payload.get('semantic_diff'), ensure_ascii=False, sort_keys=True)}")
-            print("Review: pkc bundle-inspect <bundle_id> --format json; approval requires the exact content hash")
+            if payload.get("preview_only"):
+                print("PREVIEW: knowledge-plan capture (no finalize, nothing written)")
+                print(f"Draft: {payload.get('draft_path')}")
+                print(f"Plan: {payload.get('plan_id')} (open, {payload.get('operation_count', 0)} operations)")
+                print(f"Would-be Bundle: {payload.get('bundle_id')}")
+                print(f"Content hash (exact; only approval credential): {payload.get('content_hash')}")
+                print(f"Risk: {payload.get('risk')}  Permission effect: {payload.get('permission_effect')}")
+                print(f"Expected changed files: {', '.join(payload.get('expected_changed_files', [])) or '(none)'}")
+                print(f"Semantic diff: {json.dumps(payload.get('semantic_diff'), ensure_ascii=False, sort_keys=True)}")
+                print(f"Next: {payload.get('next_step', '')}")
+            else:
+                print("OK: knowledge-plan capture (file-driven)")
+                print(f"Draft: {payload.get('draft_path')}")
+                print(f"Plan: {payload.get('plan_id')} (finalized, {payload.get('operation_count', 0)} operations)")
+                print(f"Bundle: {payload.get('bundle_id')}")
+                print(f"Content hash (exact; only approval credential): {payload.get('content_hash')}")
+                print(f"Risk: {payload.get('risk')}  Permission effect: {payload.get('permission_effect')}")
+                print(f"Expected changed files: {', '.join(payload.get('expected_changed_files', [])) or '(none)'}")
+                print(f"Semantic diff: {json.dumps(payload.get('semantic_diff'), ensure_ascii=False, sort_keys=True)}")
+                print("Review: pkc bundle-inspect <bundle_id> --format json; approval requires the exact content hash")
         else:
             for error in payload.get("errors", []):
                 field = error.get("draft_field")
@@ -2096,6 +2244,8 @@ def output(payload: dict[str, Any], fmt: str) -> None:
             print(f"  State counts: {json.dumps(health['state_counts'], sort_keys=True)}")
             for dup in health.get("duplicate_draft_intents", []):
                 print(f"  WARNING duplicate draft intent: {dup['intent']} -> {', '.join(dup['draft_bundle_ids'])}")
+            for candidate in health.get("supersede_candidates", []):
+                print(f"  SUPERSEDE CANDIDATE: draft {candidate['draft_bundle_id']} intent already applied -> {candidate['next_step']}")
             for pending in health.get("approved_pending_apply", []):
                 print(f"  PENDING APPLY: {pending['bundle_id']} ({pending.get('intent')}) -> {pending['next_step']}")
             for anomaly in health.get("anomalies", []):
@@ -2165,7 +2315,10 @@ def capabilities_command() -> dict[str, Any]:
                              "knowledge_health": True, "hybrid_retrieval": True, "vector_cache": True,
                              "upstream_freshness": True, "read_only_federation": True,
                              "claim_status_filter": True, "manifest_compatibility_mode": True,
-                             "file_driven_capture": True}, "errors": []}
+                             "file_driven_capture": True, "topic_metadata_update_plan": True,
+                             "authority_ref_update_plan": True, "batch_authority_refresh": True,
+                             "finalized_plan_rebase": True, "evaluation_blocking_control": True,
+                             "sparse_plan_overlay": True}, "errors": []}
 
 
 def parser_build() -> argparse.ArgumentParser:
@@ -2192,6 +2345,8 @@ def parser_build() -> argparse.ArgumentParser:
     command("tree")
     health = command("knowledge-check")
     health.add_argument("--semantic", action="store_true", help="try optional remote embeddings and fall back to lexical retrieval")
+    health.add_argument("--eval-coverage", action="store_true",
+                        help="list topics that have no evaluation case covering them (read-only advisory)")
     index = command("knowledge-index")
     index.add_argument("--permission", choices=tuple(PERMISSIONS), default="internal")
     search = command("knowledge-search")
@@ -2315,10 +2470,10 @@ def parser_build() -> argparse.ArgumentParser:
     bundle_create.add_argument("--compatibility-mode", action="store_true", help="explicit maintainer/fixture compatibility boundary; never for normal production intake")
     bundle_approve = mutation("bundle-approve")
     bundle_approve.add_argument("bundle_id")
-    bundle_approve.add_argument("--content-hash", required=True, help=CONTENT_HASH_HELP)
+    bundle_approve.add_argument("--content-hash", help=CONTENT_HASH_HELP)
     bundle_apply = mutation("bundle-apply")
     bundle_apply.add_argument("bundle_id")
-    bundle_apply.add_argument("--content-hash", required=True, help=CONTENT_HASH_HELP)
+    bundle_apply.add_argument("--content-hash", help=CONTENT_HASH_HELP)
     bundle_inspect = command("bundle-inspect")
     bundle_inspect.add_argument("bundle_id", nargs="?", help="inspect one Bundle (or all when omitted) including its exact immutable content hash")
     bundle_status = command("bundle-status")
@@ -2379,6 +2534,12 @@ def parser_build() -> argparse.ArgumentParser:
     plan_move_topic.add_argument("--to-path", required=True); plan_move_topic.add_argument("--reason", required=True)
     plan_move_topic.add_argument("--node-name"); plan_move_topic.add_argument("--node-path"); plan_move_topic.add_argument("--node-boundary")
     plan_move_topic.add_argument("--node-keyword", dest="node_keywords", action="append", default=[])
+    plan_update_topic = plan_command("update-topic")
+    plan_update_topic.add_argument("plan_id"); plan_update_topic.add_argument("--topic-id", required=True)
+    plan_update_topic.add_argument("--title"); plan_update_topic.add_argument("--summary")
+    plan_update_topic.add_argument("--keyword", dest="keywords", action="append", default=[])
+    plan_update_topic.add_argument("--alias", dest="aliases", action="append", default=[])
+    plan_update_topic.add_argument("--reason", required=True)
     plan_ref = plan_command("add-authority-ref")
     plan_ref.add_argument("plan_id"); plan_ref.add_argument("--claim-id", required=True)
     plan_ref.add_argument("--path", required=True); plan_ref.add_argument("--locator", required=True)
@@ -2390,8 +2551,15 @@ def parser_build() -> argparse.ArgumentParser:
                           help=enum_help("repeatable fact class covered by this Reference", FACT_CLASSES))
     plan_ref.add_argument("--diagnostic-hash")
     plan_refresh_ref = plan_command("refresh-authority-ref")
-    plan_refresh_ref.add_argument("plan_id"); plan_refresh_ref.add_argument("--authority-ref-id", required=True)
+    plan_refresh_ref.add_argument("plan_id")
+    plan_refresh_ref.add_argument("--authority-ref-id")
+    plan_refresh_ref.add_argument("--all-stale", action="store_true",
+                                  help="refresh every registered stale Authority Ref in one operation (skips current/missing/dirty refs with a per-ref status)")
     plan_refresh_ref.add_argument("--reason", required=True)
+    plan_update_ref = plan_command("update-authority-ref")
+    plan_update_ref.add_argument("plan_id"); plan_update_ref.add_argument("--authority-ref-id", required=True)
+    plan_update_ref.add_argument("--path", required=True); plan_update_ref.add_argument("--locator")
+    plan_update_ref.add_argument("--reason", required=True)
     plan_retire_ref = plan_command("retire-authority-ref")
     plan_retire_ref.add_argument("plan_id"); plan_retire_ref.add_argument("--authority-ref-id", required=True)
     replacement = plan_retire_ref.add_mutually_exclusive_group()
@@ -2401,6 +2569,8 @@ def parser_build() -> argparse.ArgumentParser:
     plan_check.add_argument("--mode", choices=CHECK_MODES, required=True,
                             help=f"check mode; legal values: {', '.join(CHECK_MODES)} (staged delta validation; run once after all operations, before finalize)")
     plan_finalize = plan_command("finalize"); plan_finalize.add_argument("plan_id")
+    plan_finalize.add_argument("--defer-evaluation", action="append", default=[],
+                               help="repeatable evaluation case id to skip in full preflight; the case is recorded as deferred_user and never blocks finalize")
     plan_inspect = plan_command("inspect"); plan_inspect.add_argument("plan_id")
     plan_rebase = plan_command("rebase"); plan_rebase.add_argument("plan_id")
     plan_rebase.add_argument("--reason", required=True)
@@ -2408,6 +2578,10 @@ def parser_build() -> argparse.ArgumentParser:
     plan_abandon.add_argument("--reason", required=True)
     plan_capture = plan_command("capture")
     plan_capture.add_argument("--file", required=True)
+    plan_capture.add_argument("--draft-format", choices=("json", "markdown"), default=None,
+                              help="capture draft file format (default: json; .md/.markdown files auto-detect as markdown)")
+    plan_capture.add_argument("--preview-only", action="store_true",
+                              help="build and show the exact candidate Bundle semantic_diff/content_hash without finalizing or writing anything")
     return parser
 
 
@@ -2463,7 +2637,7 @@ def main(argv: list[str] | None = None) -> int:
         elif args.command == "validate-merge": payload = validate_merge_command(root, args.base)
         elif args.command == "rebuild": payload = rebuild(root)
         elif args.command == "tree": payload = tree_command(root)
-        elif args.command == "knowledge-check": payload = knowledge_check_command(root, instance, args.semantic)
+        elif args.command == "knowledge-check": payload = knowledge_check_command(root, instance, args.semantic, getattr(args, "eval_coverage", False))
         elif args.command == "knowledge-index": payload = knowledge_index_command(root, instance, args.permission)
         elif args.command == "knowledge-search": payload = knowledge_search_command(root, instance, args.query, args.term, args.permission, args.limit, args.semantic, args.status)
         elif args.command == "query": payload = query_command(root, args.query, args.level, args.limit, args.cursor, args.permission, args.node, args.topic, args.status, instance)

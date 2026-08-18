@@ -90,6 +90,21 @@ pkc knowledge-plan move-topic PLAN_ID \
 
 If the target Node does not exist, the same operation may create it atomically by also supplying complete `--node-name`, `--node-path`, `--node-boundary`, and optional repeatable `--node-keyword` metadata. `--to-path` is always explicit and must remain under the target Node path. The old Markdown path is deleted in the same transaction; Topic ID, Claim IDs, Authority References, and prior events are preserved. Empty source Nodes are warned about, not implicitly deleted.
 
+Retune an existing Topic's retrieval metadata without rewriting any Claim body:
+
+```bash
+pkc knowledge-plan update-topic PLAN_ID \
+  --topic-id TOPIC_ID \
+  --title "Schema Contract (CN)" \
+  --summary "Bounded routing summary" \
+  --keyword schema \
+  --keyword 契约 \
+  --alias 契约规范 \
+  --reason "Improve Chinese retrieval"
+```
+
+`update-topic` changes only the registry metadata and the Markdown header/summary; every Claim block, Claim ID, Authority link, and event is preserved. Any subset of `--title`, `--summary`, `--keyword`, `--alias` may be supplied; at least one field must change or the operation fails as `PLAN_STRUCTURE_NOOP`. The Topic is added to the plan's affected scope so delta/full-preflight evaluation selects its cases. The Bundle is typed `knowledge_structure_change` and records `topics_updated` in its semantic diff.
+
 Add an Authority Reference:
 
 ```bash
@@ -154,6 +169,27 @@ pkc knowledge-plan retire-authority-ref PLAN_ID \
 
 Use `--replacement-claim-id CLAIM_ID` instead when a replacement Claim, rather than another Ref, owns the new boundary. Exactly one replacement kind may be supplied. PKC requires an explicit reason and an existing, distinct replacement. The active registry removes the retired Ref, while an immutable `authority_ref_retired` event retains its complete before-image, affected Claim IDs, reason, and replacement link. Delta validation still enforces fact-class coverage after retirement.
 
+Re-point an existing Ref to a different file (recomputing its approved hash on the current baseline):
+
+```bash
+pkc knowledge-plan update-authority-ref PLAN_ID \
+  --authority-ref-id AUTHORITY_REF_ID \
+  --path authority/control-flow.md \
+  --locator "control-flow rule" \
+  --reason "The rule moved from data-flow.md to control-flow.md"
+```
+
+`update-authority-ref` preserves the Ref ID, Claim links, role, change policy, and fact classes; only the target path (and optionally locator) change. The new path must exist in the plan's committed baseline and match the working tree exactly, like add/refresh. The immutable `authority_ref_updated` event records old/new path, locator, and approved hashes. The Bundle is typed `authority_maintenance` and records `authority_refs_updated`.
+
+Batch-refresh every registered stale Ref in one operation:
+
+```bash
+pkc knowledge-plan refresh-authority-ref PLAN_ID --all-stale \
+  --reason "Committed sources changed and were reviewed"
+```
+
+`--all-stale` iterates the registered Refs and refreshes only those whose committed source hash changed; already-current Refs and Refs whose path is missing or dirty in the working tree are skipped with a per-Ref `skipped_*` status (never silently rewritten, never blocking the batch). Do not combine `--all-stale` with `--authority-ref-id`.
+
 Check and finalize:
 
 ```bash
@@ -162,7 +198,48 @@ pkc knowledge-plan finalize PLAN_ID
 pkc knowledge-plan inspect PLAN_ID
 ```
 
-Finalize performs full staged preflight and creates one immutable candidate Bundle only if all checks pass. Delta and full preflight share the configured evaluation normalizer and evaluator. Delta runs unscoped cases conservatively and may defer only explicitly scoped, non-intersecting cases; its JSON artifact records selected/deferred cases and reasons. Full preflight runs every case. Evaluation failures expose a bounded artifact path containing normalized inputs, ranked Topic/Claim results, limits, permission, forbidden hits, and failed assertion categories.
+Finalize performs full staged preflight and creates one immutable candidate Bundle only if all checks pass. Delta and full preflight share the configured evaluation normalizer and evaluator. Delta runs unscoped cases conservatively and may defer only explicitly scoped, non-intersecting cases; its JSON artifact records selected/deferred cases and reasons. Full preflight runs every case that intersects the plan's change scope (unrelated cases are deferred and never block an unrelated plan); per-case `blocking: false` reports a failing case as an advisory warning instead of blocking, and `finalize --defer-evaluation CASE_ID` explicitly defers a case. Evaluation failures expose a bounded artifact path containing normalized inputs, ranked Topic/Claim results, limits, permission, forbidden hits, and failed assertion categories.
+
+Defer a known-failing evaluation case without weakening other gates:
+
+```bash
+pkc knowledge-plan finalize PLAN_ID --defer-evaluation CASE_ID
+```
+
+The deferred case is recorded as `deferred_user` in the full-preflight case selection and is never blocking; it is still surfaced for review. Do not use this to hide a case that should gate this plan — it is a temporary operational escape hatch for cases that cannot be green yet.
+
+Recover a finalized-but-not-applied plan whose committed baseline advanced:
+
+```bash
+pkc knowledge-plan rebase PLAN_ID --reason "Unrelated commit moved HEAD; re-anchor before approval"
+```
+
+A plan that is finalized but has no approval or apply record may be re-anchored: `rebase` keeps every operation and Claim identity, re-opens the plan on the new baseline, and discards the stale candidate Bundle (it cannot be approved). After rebase, run `check` then `finalize` to derive a fresh Bundle on the new baseline. A plan with an approval or apply record stays immutable (`PLAN_FINALIZED_IMMUTABLE`) — recover it by abandon + re-init, accepting that Claim IDs are regenerated.
+
+Exact-hash approve and apply (hash auto-resolves from the verified immutable Bundle; a supplied hash must still match exactly):
+
+```bash
+pkc bundle-approve BUNDLE_ID            # dry-run default; hash resolved from the Bundle
+pkc bundle-approve BUNDLE_ID --apply     # record approval at the Bundle's exact hash
+pkc bundle-apply BUNDLE_ID --apply       # apply at the same exact hash
+```
+
+`bundle-approve`/`bundle-apply` default to a loud dry run that echoes "NOTHING WAS WRITTEN" and the resolved `content_hash`; `--apply` is required to persist. If `--content-hash` is supplied it must equal the immutable Bundle's canonical hash or the operation fails closed. `verify_bundle` recomputes the canonical hash of the artifact on load, so auto-resolution cannot be weakened by a tampered Bundle file. Inspect with `bundle-inspect`/`bundle-status` before approving.
+
+Orphan-draft hygiene: `bundle-status` and `finalize` flag drafts whose intent is already covered by an applied Bundle. `bundle-status` reports them as `supersede_candidates`; finalize warns with `PLAN_INTENT_ALREADY_APPLIED`. Supersede an orphan draft instead of applying it again:
+
+```bash
+pkc bundle-supersede ORPHAN_DRAFT_BUNDLE_ID --by APPLIED_BUNDLE_ID \
+  --reason "intent already applied"
+```
+
+Evaluation coverage: list Topics that have no evaluation case covering them:
+
+```bash
+pkc knowledge-check --eval-coverage
+```
+
+`--eval-coverage` is read-only and never changes health status; it reports `covered_topics`/`uncovered_topics` so retrieval blind spots can be wired before they regress silently.
 
 ## File-driven batch capture
 
@@ -211,6 +288,41 @@ Draft contract (`schema_version` must be `1`):
 - Topic/Node metadata fields (`topic_path`, `topic_title`, `topic_summary`, `topic_keywords`, `node_name`, `node_path`, `node_boundary`, `node_keywords`) are optional and only valid when atomically creating that object, exactly as in `add-claim`.
 - Ref `fact_classes` must be declared by the target Claim; `role`, `change_policy`, `permission`, and `duplicate_resolution` use the same controlled vocabularies as the typed CLI. Unknown fields are rejected so typos fail loudly.
 - Authority documents must be committed before capture (same committed-baseline rule as `init`).
+
+A Markdown draft is also supported (`--draft-format markdown`; `.md` files auto-detect):
+
+```markdown
+- intent: Describe the bounded semantic change
+- risk: medium
+
+## Schema Contract
+
+- node: software-core
+- topic_id: topic-schema
+- title: Schema input is explicit
+- statement: One stable, atomic assertion.
+- boundary: When this claim applies and what it does not prove.
+- fact_class: documented_contract
+
+### authority_ref
+
+- path: src/module.py
+- locator: function:run
+- role: current_implementation
+- change_policy: invalidate_on_change
+- fact_class: runtime_behavior
+```
+
+`- key: value` lines before the first `##` section are the draft-level `intent`/`risk`; each `##` section is one Claim; `### authority_ref` starts a Claim's Authority Ref. Repeat or comma-separate list fields (`node_keywords`, `topic_keywords`, `fact_classes`, `aliases`) and use the same controlled vocabularies as JSON. The Markdown parser normalizes into the exact JSON draft contract, so validation and error field names are identical.
+
+Preview a capture without finalizing (build the exact candidate Bundle and show its semantic_diff/content_hash, writing nothing):
+
+```bash
+pkc knowledge-plan capture --file DRAFT.json --preview-only
+pkc knowledge-plan capture --file DRAFT.md --draft-format markdown --preview-only
+```
+
+`--preview-only` runs the full typed pipeline except `finalize` and leaves the plan open; the report marks `preview_only: true` and tells you exactly how to continue (`finalize PLAN_ID` after a delta check, or `abandon`).
 
 Output (JSON and text) reports plan ID, Bundle ID, the exact 64-character content hash, semantic diff, expected changed files, risk, permission effect, and every validation failure. Draft errors name the exact field (`claims[2].authority_refs[0].role`). Any failure after plan creation abandons the plan with a stated reason and never leaves a partial Bundle; the `retained_plan` field reports the abandoned plan id, state, and reason. Re-running the same draft after a successful capture replays the identical Bundle.
 

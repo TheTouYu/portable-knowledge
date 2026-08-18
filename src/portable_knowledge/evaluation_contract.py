@@ -93,6 +93,9 @@ def load_evaluation_contract(root: Path, instance: Any, *, required: bool = True
         affected = raw.get("affected_by")
         if affected is not None and not isinstance(affected, dict):
             raise EvaluationContractError("affected_by must be an object", path=case_path, field="affected_by", case_id=case_id)
+        blocking = raw.get("blocking", True)
+        if not isinstance(blocking, bool):
+            raise EvaluationContractError("evaluation case blocking must be a boolean", path=case_path, field="blocking", case_id=case_id)
         scope_source = affected if affected is not None else raw
         legacy_scope = affected is None and any(key in raw for key in ("node_ids", "topic_ids", "claim_ids"))
         scope = {
@@ -102,7 +105,7 @@ def load_evaluation_contract(root: Path, instance: Any, *, required: bool = True
         } if affected is not None or legacy_scope else None
         cases.append({"id": case_id, "query": query.strip(), "search_terms": terms,
                       "expected_topic_ids": expected_topics, "expected_claim_ids": expected_claims,
-                      "must_not_claim_ids": forbidden, "affected_by": scope})
+                      "must_not_claim_ids": forbidden, "affected_by": scope, "blocking": blocking})
     return {"contract_version": EVALUATOR_CONTRACT_VERSION, "path": rel,
             "defaults": {"topic_top_n": topic_top_n, "claim_top_n": claim_top_n, "permission": permission}, "cases": cases}
 
@@ -151,6 +154,7 @@ def evaluate_normalized_cases(contract: dict[str, Any], cases: list[dict[str, An
             if forbidden_hits: assertions.append("forbidden_claim_returned")
             if not filters_ok: assertions.append("visibility_filter_failed")
             ranks = [item["rank"] for item in claim_rows if item["id"] in case["expected_claim_ids"]]
+            topic_ranks = [item["rank"] for item in topic_rows if item["id"] in case["expected_topic_ids"]]
             rows.append({"id": case["id"], "case_id": case["id"], "ok": not assertions, "pass": not assertions,
                          "phase": phase, "query": case["query"], "terms": case["search_terms"],
                          "alternate_terms_used": bool(case["search_terms"]), "mode": result.get("mode", "lexical"),
@@ -162,6 +166,7 @@ def evaluate_normalized_cases(contract: dict[str, Any], cases: list[dict[str, An
                          "forbidden_claim_ids_encountered": forbidden_hits, "failed_assertions": assertions,
                          "topic_pass": topic_ok, "claim_pass": claim_ok, "forbidden_pass": not forbidden_hits,
                          "filter_pass": filters_ok, "best_expected_claim_rank": min(ranks) if ranks else None,
+                         "best_expected_topic_rank": min(topic_ranks) if topic_ranks else None,
                          "warnings": result.get("warnings", [])})
         except Exception as exc:
             rows.append({"id": case["id"], "case_id": case["id"], "ok": False, "pass": False, "phase": phase,

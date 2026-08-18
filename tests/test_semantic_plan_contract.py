@@ -1101,6 +1101,162 @@ class SemanticPlanContractTests(unittest.TestCase):
         event = next(item for item in events if item["event_type"] == "authority_ref_retired")
         self.assertEqual(event["replacement_authority_ref_id"], replacement["authority_ref_id"])
 
+    def test_batch_refresh_all_stale_refreshes_multiple_stale_refs(self):
+        seed = self.init()["plan_id"]
+        schema_claim = self.add_claim(seed, "schema", "Batch schema authority", "Schema batch target.", ("documented_contract",))["claim_id"]
+        runtime_claim = self.add_claim(seed, "runtime", "Batch runtime authority", "Runtime batch target.", ("documented_contract",))["claim_id"]
+        schema_ref = self.add_ref(seed, schema_claim, "schema", "authority/schema-contract.md", "documented_contract", "documented_contract")
+        runtime_ref = self.add_ref(seed, runtime_claim, "runtime", "authority/runtime-contract.md", "documented_contract", "documented_contract")
+        self.cli("knowledge-plan", "check", seed, "--mode", "delta")
+        first = self.cli("knowledge-plan", "finalize", seed)
+        self.cli("bundle-approve", first["bundle_id"], "--content-hash", first["content_hash"], "--apply")
+        self.cli("bundle-apply", first["bundle_id"], "--content-hash", first["content_hash"], "--apply")
+        subprocess.run(["git", "add", "data/store", "domain/topics/schema.md", "domain/topics/runtime.md"], cwd=self.root, check=True)
+        subprocess.run(["git", "commit", "-qm", "batch authority baseline"], cwd=self.root, check=True)
+        for rel in ("authority/schema-contract.md", "authority/runtime-contract.md"):
+            path = self.root / rel
+            path.write_text(path.read_text(encoding="utf-8") + f"\n{rel} changed.\n", encoding="utf-8")
+            subprocess.run(["git", "add", rel], cwd=self.root, check=True)
+        subprocess.run(["git", "commit", "-qm", "change both authority sources"], cwd=self.root, check=True)
+
+        plan_id = self.cli("knowledge-plan", "init", "--intent", "Batch refresh stale Authority", "--risk", "medium")["plan_id"]
+        batch = self.cli("knowledge-plan", "refresh-authority-ref", plan_id, "--all-stale", "--reason", "Committed sources changed and were reviewed.")
+        self.assertEqual(batch["refreshed_count"], 2)
+        self.assertEqual(batch["skipped_count"], 0)
+        self.assertEqual({item["authority_ref_id"] for item in batch["refreshed"]},
+                         {schema_ref["authority_ref_id"], runtime_ref["authority_ref_id"]})
+        self.assertTrue(self.cli("knowledge-plan", "check", plan_id, "--mode", "delta")["can_finalize"])
+        finalized = self.cli("knowledge-plan", "finalize", plan_id)
+        bundle = json.loads((self.root / "data/knowledge/bundles" / f"{finalized['bundle_id']}.json").read_text())
+        self.assertEqual(len(bundle["semantic_diff"]["authority_refs_refreshed"]), 2)
+        self.cli("bundle-approve", finalized["bundle_id"], "--content-hash", finalized["content_hash"], "--apply")
+        self.cli("bundle-apply", finalized["bundle_id"], "--content-hash", finalized["content_hash"], "--apply")
+        refs = json.loads((self.root / "data/store/authority-refs.json").read_text())["refs"]
+        for ref in refs:
+            if ref["id"] in {schema_ref["authority_ref_id"], runtime_ref["authority_ref_id"]}:
+                self.assertEqual(ref["approved_hash"], hashlib.sha256((self.root / ref["path"]).read_bytes()).hexdigest())
+
+    def test_update_topic_metadata_governed_and_preserves_claims(self):
+        seed = self.init()["plan_id"]
+        claim = self.add_claim(seed, "schema", "Topic metadata target", "This claim survives a metadata-only topic update.", ("documented_contract",))["claim_id"]
+        self.add_ref(seed, claim, "schema", "authority/schema-contract.md", "documented_contract", "documented_contract")
+        self.cli("knowledge-plan", "check", seed, "--mode", "delta")
+        first = self.cli("knowledge-plan", "finalize", seed)
+        self.cli("bundle-approve", first["bundle_id"], "--content-hash", first["content_hash"], "--apply")
+        self.cli("bundle-apply", first["bundle_id"], "--content-hash", first["content_hash"], "--apply")
+        subprocess.run(["git", "add", "data/store", "domain/topics/schema.md"], cwd=self.root, check=True)
+        subprocess.run(["git", "commit", "-qm", "topic metadata baseline"], cwd=self.root, check=True)
+        before_markdown = (self.root / "domain/topics/schema.md").read_text(encoding="utf-8")
+
+        plan_id = self.cli("knowledge-plan", "init", "--intent", "Retune schema Topic metadata", "--risk", "low")["plan_id"]
+        updated = self.cli("knowledge-plan", "update-topic", plan_id, "--topic-id", "topic-schema",
+                           "--title", "Schema Contract (CN)", "--summary", "中文可检索的 Schema 契约。",
+                           "--keyword", "schema", "--keyword", "契约", "--alias", "契约规范",
+                           "--reason", "Improve Chinese retrieval.")
+        self.assertEqual(updated["topic_id"], "topic-schema")
+        self.assertEqual(updated["changed_fields"], ["title", "summary", "keywords", "aliases"])
+        self.assertTrue(self.cli("knowledge-plan", "check", plan_id, "--mode", "delta")["can_finalize"])
+        finalized = self.cli("knowledge-plan", "finalize", plan_id)
+        bundle = json.loads((self.root / "data/knowledge/bundles" / f"{finalized['bundle_id']}.json").read_text())
+        self.assertEqual(bundle["bundle_type"], "knowledge_structure_change")
+        self.assertEqual(bundle["semantic_diff"]["topics_updated"][0]["topic_id"], "topic-schema")
+        self.cli("bundle-approve", finalized["bundle_id"], "--content-hash", finalized["content_hash"], "--apply")
+        self.cli("bundle-apply", finalized["bundle_id"], "--content-hash", finalized["content_hash"], "--apply")
+        registry = json.loads((self.root / "data/store/registry.json").read_text())
+        topic = next(item for item in registry["topics"] if item["id"] == "topic-schema")
+        self.assertEqual(topic["title"], "Schema Contract (CN)")
+        self.assertEqual(topic["summary"], "中文可检索的 Schema 契约。")
+        self.assertEqual(topic["aliases"], ["契约规范"])
+        markdown = (self.root / "domain/topics/schema.md").read_text(encoding="utf-8")
+        self.assertTrue(markdown.startswith("# Schema Contract (CN)\n\n中文可检索的 Schema 契约。"))
+        self.assertIn(f"<!-- CLAIM:START {claim}", markdown)
+        self.assertIn(before_markdown.split("<!-- CLAIM:START")[1], markdown)
+
+    def test_update_authority_ref_repoints_path_and_recomputes_hash(self):
+        seed = self.init()["plan_id"]
+        claim = self.add_claim(seed, "schema", "Re-point authority", "This claim follows its Authority file.", ("documented_contract",))["claim_id"]
+        original = self.add_ref(seed, claim, "schema", "authority/schema-contract.md", "documented_contract", "documented_contract")
+        self.cli("knowledge-plan", "check", seed, "--mode", "delta")
+        first = self.cli("knowledge-plan", "finalize", seed)
+        self.cli("bundle-approve", first["bundle_id"], "--content-hash", first["content_hash"], "--apply")
+        self.cli("bundle-apply", first["bundle_id"], "--content-hash", first["content_hash"], "--apply")
+        subprocess.run(["git", "add", "data/store", "domain/topics/schema.md"], cwd=self.root, check=True)
+        subprocess.run(["git", "commit", "-qm", "re-point baseline"], cwd=self.root, check=True)
+
+        plan_id = self.cli("knowledge-plan", "init", "--intent", "Re-point schema Authority to validation contract", "--risk", "medium")["plan_id"]
+        updated = self.cli("knowledge-plan", "update-authority-ref", plan_id,
+                           "--authority-ref-id", original["authority_ref_id"],
+                           "--path", "authority/validation-contract.md", "--locator", "validation contract",
+                           "--reason", "The rule now lives in the validation contract.")
+        self.assertEqual(updated["old_path"], "authority/schema-contract.md")
+        self.assertEqual(updated["new_path"], "authority/validation-contract.md")
+        new_hash = hashlib.sha256((self.root / "authority/validation-contract.md").read_bytes()).hexdigest()
+        self.assertEqual(updated["new_approved_hash"], new_hash)
+        self.assertTrue(self.cli("knowledge-plan", "check", plan_id, "--mode", "delta")["can_finalize"])
+        finalized = self.cli("knowledge-plan", "finalize", plan_id)
+        bundle = json.loads((self.root / "data/knowledge/bundles" / f"{finalized['bundle_id']}.json").read_text())
+        self.assertEqual(bundle["bundle_type"], "authority_maintenance")
+        self.assertEqual(bundle["semantic_diff"]["authority_refs_updated"][0]["new_path"], "authority/validation-contract.md")
+        self.cli("bundle-approve", finalized["bundle_id"], "--content-hash", finalized["content_hash"], "--apply")
+        self.cli("bundle-apply", finalized["bundle_id"], "--content-hash", finalized["content_hash"], "--apply")
+        refs = json.loads((self.root / "data/store/authority-refs.json").read_text())["refs"]
+        current = next(ref for ref in refs if ref["id"] == original["authority_ref_id"])
+        self.assertEqual(current["path"], "authority/validation-contract.md")
+        self.assertEqual(current["approved_hash"], new_hash)
+
+    def test_finalize_ignores_unrelated_and_non_blocking_and_deferred_failing_cases(self):
+        plan_id, _, _ = self.build_complete_plan()
+        fixture_path = self.root / "evaluation/cases-v1.json"
+        fixture_path.write_text(json.dumps({
+            "schema_version": 1,
+            "cases": [
+                {"id": "unrelated-fail", "query": "Schema Contract", "affected_by": {"topic_ids": ["topic-deployment"]},
+                 "expected_claim_ids": ["clm_missing_fixture"]},
+                {"id": "advisory-fail", "query": "Schema Contract", "affected_by": {"topic_ids": ["topic-schema"]},
+                 "expected_claim_ids": ["clm_missing_fixture"], "blocking": False},
+                {"id": "deferred-fail", "query": "Schema Contract", "affected_by": {"topic_ids": ["topic-schema"]},
+                 "expected_claim_ids": ["clm_missing_fixture"]},
+            ],
+        }), encoding="utf-8")
+        finalized = self.cli("knowledge-plan", "finalize", plan_id, "--defer-evaluation", "deferred-fail")
+        self.assertTrue(finalized["summary"]["finalized"])
+        self.assertIn("advisory-fail", {item["case_id"] for item in finalized["warnings"]})
+        full = json.loads((self.root / finalized["artifact_path"]).read_text(encoding="utf-8"))
+        selections = full["records"]["case_selection"]
+        self.assertIn({"case_id": "deferred-fail", "decision": "deferred_user", "reason": "explicit_defer_evaluation"}, selections)
+        self.assertIn({"case_id": "unrelated-fail", "decision": "deferred", "reason": "explicit_scope_unaffected"}, selections)
+
+    def test_overlay_sparse_copy_skips_unrelated_root_files(self):
+        from portable_knowledge import semantic_plan
+        transient = self.root / "tmp-transient.ts"
+        transient.write_text("// transient build artifact\n", encoding="utf-8")
+        unrelated = self.root / "unrelated-cache.bin"
+        unrelated.write_bytes(b"\x00" * 4096)
+        instance = core.load_instance(self.root)
+        plan_id = self.init()["plan_id"]
+        _, plan = semantic_plan._load(self.root, instance, plan_id)
+        temporary, staging = semantic_plan._with_overlay(self.root, instance, plan)
+        try:
+            self.assertTrue((staging / "project-intelligence.json").is_file())
+            self.assertTrue((staging / "data/store/registry.json").is_file())
+            self.assertTrue((staging / "data/store/actors.json").is_file())
+            self.assertTrue((staging / "domain/topics/schema.md").is_file())
+            self.assertTrue((staging / "evaluation/cases-v1.json").is_file())
+            self.assertFalse((staging / "tmp-transient.ts").exists())
+            self.assertFalse((staging / "unrelated-cache.bin").exists())
+        finally:
+            temporary.cleanup()
+        # After adding an Authority Ref, its source file is part of the sparse overlay.
+        claim = self.add_claim(plan_id, "schema", "Overlay authority", "Authority source is copied into staging.", ("documented_contract",))["claim_id"]
+        self.add_ref(plan_id, claim, "schema", "authority/schema-contract.md", "documented_contract", "documented_contract")
+        _, plan = semantic_plan._load(self.root, instance, plan_id)
+        temporary, staging = semantic_plan._with_overlay(self.root, instance, plan)
+        try:
+            self.assertTrue((staging / "authority/schema-contract.md").is_file())
+        finally:
+            temporary.cleanup()
+
+
     def test_low_level_manifest_requires_explicit_compatibility_mode(self):
         manifest = {"bundle_type": "claim_create", "intent": "Low-level compatibility test", "semantic_diff": {"before": "same", "after": "same"},
                     "evidence_refs": [], "authority_refs": [], "permission_effect": "none", "risk": "low",
@@ -1153,7 +1309,7 @@ class SemanticPlanContractTests(unittest.TestCase):
         self.assertIn("authority/schema-contract.md", failed["errors"][0]["message"])
         self.assertEqual(self.formal_authority(), self.authority_before)
 
-    def test_rebase_rejects_finalized_and_missing_reason(self):
+    def test_rebase_rejects_missing_reason_and_approved_finalized_plan(self):
         plan_id = self.init()["plan_id"]
         missing = self.cli("knowledge-plan", "rebase", plan_id, "--reason", "", expected=1)
         self.assertEqual(missing["errors"][0]["code"], "PLAN_INPUT_INVALID")
@@ -1162,8 +1318,46 @@ class SemanticPlanContractTests(unittest.TestCase):
         self.add_ref(plan_id, claim, "schema", "authority/schema-contract.md", "documented_contract", "documented_contract")
         self.assertTrue(self.cli("knowledge-plan", "check", plan_id, "--mode", "delta")["can_finalize"])
         finalized = self.cli("knowledge-plan", "finalize", plan_id)
-        failed = self.cli("knowledge-plan", "rebase", finalized["plan_id"], "--reason", "Too late.", expected=1)
-        self.assertEqual(failed["errors"][0]["code"], "PLAN_FINALIZED_IMMUTABLE")
+        # A finalized-but-not-applied plan with an unchanged baseline is a no-op rebase,
+        # not an immutability error: the operator can re-anchor once HEAD moves.
+        noop = self.cli("knowledge-plan", "rebase", finalized["plan_id"], "--reason", "Baseline unchanged.", expected=1)
+        self.assertEqual(noop["errors"][0]["code"], "PLAN_REBASE_NOOP")
+        # An approval record makes the plan truly immutable.
+        self.cli("bundle-approve", finalized["bundle_id"], "--content-hash", finalized["content_hash"], "--apply")
+        denied = self.cli("knowledge-plan", "rebase", finalized["plan_id"], "--reason", "Approved.", expected=1)
+        self.assertEqual(denied["errors"][0]["code"], "PLAN_FINALIZED_IMMUTABLE")
+
+    def test_rebase_reanchors_finalized_unapplied_plan_preserving_identity(self):
+        plan_id = self.init()["plan_id"]
+        claim_id = self.add_claim(plan_id, "schema", "Schema input is explicit", "The schema parser accepts explicit versioned fields.",
+                                  ("documented_contract",))["claim_id"]
+        self.add_ref(plan_id, claim_id, "schema", "authority/schema-contract.md", "documented_contract", "documented_contract")
+        self.assertTrue(self.cli("knowledge-plan", "check", plan_id, "--mode", "delta")["can_finalize"])
+        finalized = self.cli("knowledge-plan", "finalize", plan_id)
+        bundle_path = self.root / "data/knowledge/bundles" / f"{finalized['bundle_id']}.json"
+        self.assertTrue(bundle_path.is_file())
+        # Move HEAD with an unrelated commit, then rebase the finalized-but-unapplied plan.
+        (self.root / "docs").mkdir(exist_ok=True)
+        (self.root / "docs" / "note.md").write_text("Committed after finalize.\n", encoding="utf-8")
+        subprocess.run(["git", "add", "docs/note.md"], cwd=self.root, check=True)
+        subprocess.run(["git", "commit", "-qm", "unrelated docs commit"], cwd=self.root, check=True)
+        rebased = self.cli("knowledge-plan", "rebase", plan_id, "--reason", "Re-anchor before approval.")
+        self.assertEqual(rebased["plan_id"], plan_id)
+        self.assertTrue(rebased["un_finalized"])
+        plan_value = json.loads((self.root / ".local/pkc/semantic-plans" / f"{plan_id}.json").read_text(encoding="utf-8"))
+        self.assertEqual(plan_value["state"], "open")
+        self.assertIsNone(plan_value["finalized_bundle"])
+        self.assertEqual(plan_value["operations"][0]["claim_id"], claim_id)
+        self.assertEqual(plan_value["claims"][claim_id]["claim_id"], claim_id)
+        self.assertEqual(plan_value["claims"][claim_id]["title"], "Schema input is explicit")
+        # The stale immutable Bundle artifact is removed so it cannot be approved.
+        self.assertFalse(bundle_path.exists())
+        # Operations and Claim identity survive; the plan can be re-finalized on the new baseline.
+        self.assertTrue(self.cli("knowledge-plan", "check", plan_id, "--mode", "delta")["can_finalize"])
+        refinalized = self.cli("knowledge-plan", "finalize", plan_id)
+        self.assertTrue(refinalized["summary"]["finalized"])
+        self.assertNotEqual(refinalized["bundle_id"], finalized["bundle_id"])
+        self.assertEqual(self.cli("knowledge-plan", "inspect", plan_id)["claims"][0]["claim_id"], claim_id)
 
     def _establish_committed_ref(self, *, change_source: bool = True) -> dict:
         """Commit one Authority Ref; optionally also commit a change of its source on a new
@@ -1810,6 +2004,76 @@ class CaptureContractTests(unittest.TestCase):
         self.assertIn("PLAN_FULL_PREFLIGHT_FAILED", failed["retained_plan"]["reason"])
         self.assertEqual(len(list((self.root / "data/knowledge/bundles").glob("bnd_*.json"))), 0)
         self.assertEqual(self.formal_authority(), self.authority_before)
+
+    def test_capture_markdown_draft_and_preview_only(self):
+        path = self.root / "draft.md"
+        path.write_text(
+            "- intent: Markdown preview draft\n- risk: low\n\n"
+            "## Schema Draft\n\n"
+            "- node: software-core\n- topic_id: topic-schema\n"
+            "- title: Schema draft claim\n- statement: A markdown draft claim.\n- boundary: Only the committed neutral fixture is in scope.\n"
+            "- fact_class: documented_contract\n\n"
+            "### authority_ref\n\n"
+            "- path: authority/schema-contract.md\n- locator: draft\n- role: documented_contract\n"
+            "- change_policy: invalidate_on_change\n- fact_class: documented_contract\n", encoding="utf-8")
+        preview = self.cli("knowledge-plan", "capture", "--file", "draft.md", "--draft-format", "markdown", "--preview-only")
+        self.assertTrue(preview["preview_only"])
+        self.assertFalse(preview["finalized"])
+        self.assertEqual(preview["plan_state"], "open")
+        self.assertTrue(preview["content_hash"])
+        self.assertEqual(len(preview["semantic_diff"]["claims_created"]), 1)
+        # Preview writes nothing.
+        self.assertEqual(len(list((self.root / "data/knowledge/bundles").glob("bnd_*.json"))), 0)
+        # The retained open plan can be finalized afterwards.
+        pid = preview["plan_id"]
+        self.assertTrue(self.cli("knowledge-plan", "check", pid, "--mode", "delta")["can_finalize"])
+        finalized = self.cli("knowledge-plan", "finalize", pid)
+        self.assertTrue(finalized["summary"]["finalized"])
+        self.assertEqual(len(list((self.root / "data/knowledge/bundles").glob("bnd_*.json"))), 1)
+
+    def test_bundle_status_flags_orphan_draft_supersede_candidates(self):
+        plan_id = self.cli("knowledge-plan", "init", "--intent", "Add neutral software contracts", "--risk", "medium")["plan_id"]
+        claim = self.cli("knowledge-plan", "add-claim", plan_id, "--node", "software-core", "--topic-id", "topic-schema",
+                         "--title", "First intent claim", "--statement", "First claim statement.",
+                         "--boundary", "Only the committed neutral fixture is in scope.",
+                         "--fact-class", "documented_contract")["claim_id"]
+        self.cli("knowledge-plan", "add-authority-ref", plan_id, "--claim-id", claim,
+                 "--path", "authority/schema-contract.md", "--locator", "schema contract",
+                 "--role", "documented_contract", "--change-policy", "invalidate_on_change",
+                 "--fact-class", "documented_contract")
+        self.cli("knowledge-plan", "check", plan_id, "--mode", "delta")
+        first = self.cli("knowledge-plan", "finalize", plan_id)
+        self.cli("bundle-approve", first["bundle_id"], "--content-hash", first["content_hash"], "--apply")
+        self.cli("bundle-apply", first["bundle_id"], "--content-hash", first["content_hash"], "--apply")
+        subprocess.run(["git", "add", "data/store", "domain/topics/schema.md"], cwd=self.root, check=True)
+        subprocess.run(["git", "commit", "-qm", "applied first"], cwd=self.root, check=True)
+        # An orphan draft with the SAME intent is now covered by the applied Bundle.
+        draft = self.write_draft("orphan.json", "Add neutral software contracts",
+                                 [self.schema_claim("Orphan duplicate statement.")])
+        self.cli("knowledge-plan", "capture", "--file", draft.name)
+        health = self.cli("bundle-status")["health"]
+        candidates = [item for item in health["supersede_candidates"] if item["intent"] == "Add neutral software contracts"]
+        self.assertTrue(candidates)
+        self.assertIn("bundle-supersede", candidates[0]["next_step"])
+
+    def test_knowledge_check_eval_coverage_reports_uncovered_topics(self):
+        self.cli("rebuild")
+        cov = self.cli("knowledge-check", "--eval-coverage")["eval_coverage"]
+        self.assertEqual(cov["status"], "COVERED")
+        self.assertEqual(sorted(cov["covered_topics"]), ["topic-runtime", "topic-schema", "topic-validation"])
+        # Add a genuinely uncovered Topic -> GAP.
+        registry = json.loads((self.root / "data/store/registry.json").read_text())
+        registry["topics"].append({"id": "topic-experience", "node_id": "software-core", "title": "Experience Contract",
+                                   "path": "domain/topics/experience.md", "summary": "Experience behavior",
+                                   "keywords": ["experience"], "permission": "internal"})
+        (self.root / "data/store/registry.json").write_text(json.dumps(registry, indent=2) + "\n", encoding="utf-8")
+        (self.root / "domain/topics/experience.md").write_text("# Experience Contract\n\nExperience behavior.\n", encoding="utf-8")
+        subprocess.run(["git", "add", "data/store/registry.json", "domain/topics/experience.md"], cwd=self.root, check=True)
+        subprocess.run(["git", "commit", "-qm", "add experience topic"], cwd=self.root, check=True)
+        self.cli("rebuild")
+        cov = self.cli("knowledge-check", "--eval-coverage")["eval_coverage"]
+        self.assertEqual(cov["status"], "GAP")
+        self.assertIn("topic-experience", cov["uncovered_topics"])
 
 
 if __name__ == "__main__":
