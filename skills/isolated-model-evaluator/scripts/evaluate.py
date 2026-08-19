@@ -185,8 +185,8 @@ def main() -> int:
     task_group.add_argument("--task-file", type=Path)
     parser.add_argument("--root", type=Path, default=Path.cwd())
     parser.add_argument("--skill", action="append", default=[])
-    parser.add_argument("--provider", default="deepseek", help="Pi provider (default: deepseek, user default)")
-    parser.add_argument("--model", default="deepseek-v4-flash", help="Pi model (default: deepseek-v4-flash, user default)")
+    parser.add_argument("--provider", default="opencode-go", help="Pi provider (default: opencode-go, user default)")
+    parser.add_argument("--model", default="deepseek-v4-flash", help="Pi model (default: deepseek-v4-flash @ opencode-go, user default)")
     parser.add_argument("--thinking", default="max", help="Pi thinking level (default: max, user default)")
     parser.add_argument("--tools", default="read,bash")
     parser.add_argument("--extensions", action="append", default=[],
