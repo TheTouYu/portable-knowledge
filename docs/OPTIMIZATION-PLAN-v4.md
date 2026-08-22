@@ -7,8 +7,8 @@ Evidence: `docs/FEEDBACK-pkc-knowledge-tree-usage-blocks-2026-08-22.md`
 
 This is an ordinary plan, not PKC Authority. It does not create Claims,
 Authority References, Project Memory, project registry, Bundle, or approval to
-change another project. It addresses the real-world Genshin-TS multi-agent
-shared git worktree feedback against `portable-knowledge 0.2.0rc1`.
+change another project. It addresses the real-world multi-agent shared
+git worktree feedback against `portable-knowledge 0.2.0rc1`.
 
 ## 1. Why v4
 

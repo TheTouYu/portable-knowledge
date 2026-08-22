@@ -1,6 +1,6 @@
 # FEEDBACK: PKC 知识树使用阻碍报告（2026-08-22）
 
-来源：Genshin-TS 多智能体共享 git worktree 的真实使用反馈，针对
+来源：某多智能体共享 git worktree 项目的真实使用反馈，针对
 `portable-knowledge 0.2.0rc1` 的 `knowledge-plan` 工作流。
 
 ## 阻碍清单
