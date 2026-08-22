@@ -614,7 +614,7 @@ class SemanticPlanContractTests(unittest.TestCase):
                          "--locator", "x", "--role", "current_implementation", "--change-policy", "invalidate_on_change",
                          "--fact-class", "runtime_behavior", expected=1)
         self.assertEqual(dirty["errors"][0]["code"], "PLAN_AUTHORITY_WORKTREE_DIRTY")
-        self.assertIn("restore the committed baseline or commit it and start a new plan", dirty["errors"][0]["message"])
+        self.assertIn("restore the committed baseline, commit it and start a new plan", dirty["errors"][0]["message"])
         subprocess.run(["git", "checkout", "--", "authority/runtime-contract.md"], cwd=self.root, check=True)
         subprocess.run(["git", "commit", "--allow-empty", "-qm", "advance baseline"], cwd=self.root, check=True)
         stale = self.cli("knowledge-plan", "inspect", plan_id)
@@ -1703,6 +1703,23 @@ class SemanticPlanContractTests(unittest.TestCase):
                           expected=1)
         self.assertTrue(any(error["code"] == "PLAN_WORKTREE_SNAPSHOT_DRIFT" for error in denied["errors"]))
 
+    def test_worktree_baseline_accepts_new_untracked_authority_doc(self):
+        """Obstacle 1/5: --baseline worktree lets a plan reference a newly written,
+        not-yet-committed design document as Authority and still pass delta/finalize."""
+        self._configure_authority_refs()
+        design = self.root / "authority/design-intent.md"
+        design.parent.mkdir(parents=True, exist_ok=True)
+        design.write_text("# Design intent\n\nThe schema parser accepts explicit versioned fields.\n", encoding="utf-8")
+        plan_id = self.cli("knowledge-plan", "init", "--intent", "Capture design intent with its own document",
+                           "--risk", "low", "--baseline", "worktree")["plan_id"]
+        claim = self.add_claim(plan_id, "schema", "Schema input is explicit", "The schema parser accepts explicit versioned fields.",
+                               ("documented_contract",))["claim_id"]
+        self.add_ref(plan_id, claim, "schema", "authority/design-intent.md", "design_intent", "documented_contract")
+        self.cli("knowledge-plan", "check", plan_id, "--mode", "delta")
+        finalized = self.cli("knowledge-plan", "finalize", plan_id)
+        self.assertTrue(finalized["ok"])
+        self.assertEqual(finalized["bundle_id"][:4], "bnd_")
+
     def _configure_authority_refs(self) -> None:
         config_path = self.root / "project-intelligence.json"
         config = json.loads(config_path.read_text(encoding="utf-8"))
@@ -1871,6 +1888,31 @@ class CaptureContractTests(unittest.TestCase):
         self.assertIn(captured["content_hash"], text)
         self.assertIn("Risk: medium", text)
 
+    def test_capture_worktree_baseline_accepts_untracked_authority_doc(self):
+        """Obstacle 4/5: one-command batch intake can opt into worktree baseline and
+        reference a not-yet-committed design document as Authority."""
+        design = self.root / "authority/design-intent.md"
+        design.parent.mkdir(parents=True, exist_ok=True)
+        design.write_text("# Design intent\n\nBatch capture may reference this uncommitted file.\n", encoding="utf-8")
+        claim = self.schema_claim()
+        claim["authority_refs"] = [{"path": "authority/design-intent.md", "locator": "design intent",
+                                    "role": "design_intent", "change_policy": "invalidate_on_change",
+                                    "fact_classes": ["documented_contract"]}]
+        draft = self.write_draft("worktree-batch.json", "Batch worktree capture", [claim], risk="low")
+        captured = self.cli("knowledge-plan", "capture", "--file", draft.name, "--baseline", "worktree")
+        self.assertEqual(captured["command"], "knowledge-plan capture")
+        self.assertEqual(captured["plan_state"], "finalized")
+        self.assertTrue(captured["bundle_id"].startswith("bnd_"))
+        self.assertEqual(len(captured["semantic_diff"]["claims_created"]), 1)
+        self.assertEqual(len(captured["semantic_diff"]["authority_refs_added"]), 1)
+        # draft baseline_mode field is also honored without the CLI flag
+        draft2 = self.root / "worktree-batch-2.json"
+        draft2.write_text(json.dumps({"schema_version": 1, "intent": "Batch worktree capture 2", "risk": "low",
+                                      "baseline_mode": "worktree", "claims": [claim]}, indent=2) + "\n", encoding="utf-8")
+        captured2 = self.cli("knowledge-plan", "capture", "--file", draft2.name)
+        self.assertEqual(captured2["plan_state"], "finalized")
+        self.assertTrue(captured2["bundle_id"].startswith("bnd_"))
+
     def test_capture_draft_schema_error_reports_field_and_creates_nothing(self):
         claim = self.schema_claim()
         claim["authority_refs"][0]["role"] = "not_a_role"
@@ -1981,6 +2023,7 @@ class CaptureContractTests(unittest.TestCase):
         self.assertEqual(failed["errors"][0]["code"], "AUTHORITY_FACT_COVERAGE")
         self.assertEqual(failed["errors"][0]["draft_field"], "claims[0].a")
         self.assertEqual(failed["errors"][0]["missing_fact_classes"], ["documented_contract"])
+        self.assertIn("knowledge-plan add-authority-ref", failed["errors"][0].get("recommended_action", ""))
         self.assertEqual(failed["retained_plan"]["state"], "abandoned")
         self.assertIn("PLAN_DELTA_FAILED", failed["retained_plan"]["reason"])
         self.assertEqual(len(list((self.root / "data/knowledge/bundles").glob("bnd_*.json"))), 0)

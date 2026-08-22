@@ -144,7 +144,7 @@ Common change policies:
 - `invalidate_on_change`
 - `manual_review`
 
-The path must exist in the committed baseline. Use the Claim ID returned by `add-claim`; do not invent one. An Authority Reference may not point to a path also modified by the same plan: delta rejects this as `PLAN_AUTHORITY_STAGED_DRIFT`. New references bind only to committed-baseline hashes; PKC does not infer a staged self-reference or silently approve an after-image.
+The path must exist in the plan's baseline: for `--baseline committed` (default) it must be committed at the plan's git baseline, while `--baseline worktree` explicitly accepts applied-but-uncommitted and newly written working-tree files as Authority. Use the Claim ID returned by `add-claim`; do not invent one. An Authority Reference may not point to a path also modified by the same plan: delta rejects this as `PLAN_AUTHORITY_STAGED_DRIFT`. New references bind only to the accepted baseline hashes; PKC does not infer a staged self-reference or silently approve an after-image.
 
 The Authority Reference registry's canonical array key is `refs`. The legacy `authority_refs` key is accepted as an input alias and normalized to `refs` on the next governed write. Registries containing both keys with different values fail closed as `AUTHORITY_REFS_SCHEMA`.
 
@@ -156,7 +156,7 @@ pkc knowledge-plan refresh-authority-ref PLAN_ID \
   --reason "The committed implementation changed and the linked Claims were reviewed"
 ```
 
-Refresh preserves the Ref ID, path, locator, Claim links, role, fact classes, baseline state, and change policy. The path must exist in the plan's committed baseline and the worktree bytes must exactly match that baseline. The operation fails on a no-op. Its immutable audit event and Bundle diff record the old and new approved hashes and affected Claim IDs. A refreshed Ref participates in the same atomic Bundle as Claim additions/revisions and other typed operations.
+Refresh preserves the Ref ID, path, locator, Claim links, role, fact classes, baseline state, and change policy. The path must exist in the plan's baseline (committed for `committed`, working tree for `worktree`); committed plans also require the worktree bytes to exactly match that baseline. The operation fails on a no-op. Its immutable audit event and Bundle diff record the old and new approved hashes and affected Claim IDs. A refreshed Ref participates in the same atomic Bundle as Claim additions/revisions and other typed operations.
 
 Retire a Ref that no longer applies:
 
@@ -252,6 +252,7 @@ Draft contract (`schema_version` must be `1`):
   "schema_version": 1,
   "intent": "Describe the bounded semantic change",
   "risk": "medium",
+  "baseline_mode": "committed",
   "claims": [
     {
       "id": "schema",
@@ -287,7 +288,7 @@ Draft contract (`schema_version` must be `1`):
 - `claims[].id` is an optional local alias used by `authority_refs[].claim_id`; without either, a Ref binds to its enclosing Claim. Duplicate ids and unknown `claim_id` references are draft errors.
 - Topic/Node metadata fields (`topic_path`, `topic_title`, `topic_summary`, `topic_keywords`, `node_name`, `node_path`, `node_boundary`, `node_keywords`) are optional and only valid when atomically creating that object, exactly as in `add-claim`.
 - Ref `fact_classes` must be declared by the target Claim; `role`, `change_policy`, `permission`, and `duplicate_resolution` use the same controlled vocabularies as the typed CLI. Unknown fields are rejected so typos fail loudly.
-- Authority documents must be committed before capture (same committed-baseline rule as `init`).
+- `baseline_mode` is optional (`committed` default, or `worktree` to reference not-yet-committed design docs); the CLI `--baseline worktree` overrides the draft field. Authority documents must be committed before capture unless `baseline_mode`/`--baseline` is `worktree` (same baseline rule as `init`).
 
 A Markdown draft is also supported (`--draft-format markdown`; `.md` files auto-detect):
 

@@ -32,7 +32,7 @@ DEFAULT_BUDGETS = {
     "max_noop_actions": 0,
 }
 CAPTURE_DRAFT_VERSION = 1
-_CAPTURE_DRAFT_KEYS = {"schema_version", "intent", "risk", "claims"}
+_CAPTURE_DRAFT_KEYS = {"schema_version", "intent", "risk", "baseline_mode", "claims"}
 _CAPTURE_CLAIM_KEYS = {"id", "node", "node_name", "node_path", "node_boundary", "node_keywords",
                        "topic_id", "topic_path", "topic_title", "topic_summary", "topic_keywords",
                        "title", "statement", "boundary", "permission", "duplicate_resolution",
@@ -71,6 +71,19 @@ def _head(root: Path) -> str:
 def _committed_bytes(root: Path, baseline: str, path: str) -> bytes | None:
     result = _git(root, "show", f"{baseline}:{path}")
     return result.stdout if result.returncode == 0 else None
+
+
+def _authority_bytes(root: Path, plan: dict[str, Any], path: str) -> bytes | None:
+    """Return the Authority source bytes this plan's baseline mode accepts.
+
+    ``committed`` plans read the exact git baseline (HEAD at init/rebase).
+    ``worktree`` plans explicitly accept applied-but-uncommitted working-tree
+    files as their Authority snapshot, so they read the current working tree.
+    """
+    if plan.get("baseline_mode") == "worktree":
+        working = root / path
+        return working.read_bytes() if working.is_file() else None
+    return _committed_bytes(root, plan["baseline_commit"], path)
 
 
 def _runtime_version() -> str:
@@ -315,7 +328,7 @@ def _overlay_authority_rel_paths(root: Path, instance: Instance, plan: dict[str,
     refs_rel = authority.get("authority_refs")
     if refs_rel:
         planned = _decode_writes(plan).get(refs_rel)
-        committed = planned if planned is not None else _committed_bytes(root, plan["baseline_commit"], refs_rel)
+        committed = planned if planned is not None else _authority_bytes(root, plan, refs_rel)
         if committed is not None:
             try:
                 registered = authority_refs_from_document(json.loads(committed.decode("utf-8")))
@@ -571,17 +584,24 @@ def add_authority_ref(root: Path, instance: Instance, args: argparse.Namespace) 
     pure = PurePosixPath(args.path)
     if not args.path or pure.is_absolute() or ".." in pure.parts or "\\" in args.path or args.path.startswith(".local/"):
         _fail("PLAN_AUTHORITY_PATH_INVALID", "authority path must be portable, project-relative, and non-local", path=args.path)
-    committed = _committed_bytes(root, plan["baseline_commit"], args.path)
+    baseline_mode = plan.get("baseline_mode", "committed")
+    committed = _authority_bytes(root, plan, args.path)
     if committed is None:
-        _fail("PLAN_AUTHORITY_NOT_COMMITTED", "authority path does not exist in committed baseline", path=args.path)
+        if baseline_mode == "worktree":
+            _fail("PLAN_AUTHORITY_NOT_COMMITTED", "authority path does not exist in working tree", path=args.path)
+        else:
+            _fail("PLAN_AUTHORITY_NOT_COMMITTED", "authority path does not exist in committed baseline", path=args.path)
     working = root / args.path
-    if not working.is_file() or working.read_bytes() != committed:
-        _fail("PLAN_AUTHORITY_WORKTREE_DIRTY", "authority path has uncommitted content; restore the committed baseline or commit it and start a new plan", path=args.path)
+    if baseline_mode == "committed":
+        if not working.is_file() or working.read_bytes() != committed:
+            _fail("PLAN_AUTHORITY_WORKTREE_DIRTY", "authority path has uncommitted content; restore the committed baseline, commit it and start a new plan, or use --baseline worktree", path=args.path)
     facts = sorted(set(args.fact_class))
     if not facts or any(value not in FACT_CLASSES for value in facts):
         _fail("PLAN_FACT_CLASS_REQUIRED", "Authority Ref requires valid fact classes", path=args.path)
     if not set(facts).issubset(set(claim["fact_classes"])):
-        _fail("PLAN_FACT_COVERAGE", "Authority Ref fact classes must be declared by the Claim", path=args.path)
+        _fail("PLAN_FACT_COVERAGE",
+              f"Authority Ref fact classes {', '.join(sorted(set(facts) - set(claim['fact_classes'])))} are not declared by Claim {args.claim_id}; revise the Claim with revise-claim or drop those --fact-class values",
+              path=args.path)
     if PERMISSION_RANK[claim["permission"]] > PERMISSION_RANK["internal"]:
         _fail("PLAN_PERMISSION_EXPANSION", "semantic plan cannot expand Claim permission beyond internal", path=args.path)
     approved_hash = hashlib.sha256(committed).hexdigest()
@@ -602,9 +622,9 @@ def add_authority_ref(root: Path, instance: Instance, args: argparse.Namespace) 
         _fail("PLAN_AUTHORITY_REFS_UNCONFIGURED", "instance has no authority_refs path")
     current = _decode_writes(plan).get(refs_rel)
     if current is None:
-        current = _committed_bytes(root, plan["baseline_commit"], refs_rel)
+        current = _authority_bytes(root, plan, refs_rel)
         if current is None:
-            _fail("PLAN_AUTHORITY_REFS_UNCOMMITTED", "authority_refs registry is not committed", path=refs_rel)
+            _fail("PLAN_AUTHORITY_REFS_UNCOMMITTED", "authority_refs registry is not available in the plan baseline", path=refs_rel)
     try:
         data = canonical_authority_document(json.loads(current.decode("utf-8")))
     except ValueError as exc:
@@ -624,9 +644,9 @@ def _authority_registry_overlay(root: Path, instance: Instance, plan: dict[str, 
         _fail("PLAN_AUTHORITY_REFS_UNCONFIGURED", "instance has no authority_refs path")
     current = _decode_writes(plan).get(refs_rel)
     if current is None:
-        current = _committed_bytes(root, plan["baseline_commit"], refs_rel)
+        current = _authority_bytes(root, plan, refs_rel)
         if current is None:
-            _fail("PLAN_AUTHORITY_REFS_UNCOMMITTED", "authority_refs registry is not committed", path=refs_rel)
+            _fail("PLAN_AUTHORITY_REFS_UNCOMMITTED", "authority_refs registry is not available in the plan baseline", path=refs_rel)
     try:
         return refs_rel, canonical_authority_document(json.loads(current.decode("utf-8")))
     except (ValueError, UnicodeDecodeError, json.JSONDecodeError) as exc:
@@ -660,7 +680,7 @@ def _apply_refresh(root: Path, instance: Instance, plan: dict[str, Any], refs_re
     refresh returns the recorded details without mutating again.
     """
     old_hash = old.get("approved_hash") or old.get("fragment_hash")
-    committed = _committed_bytes(root, plan["baseline_commit"], old["path"])
+    committed = _authority_bytes(root, plan, old["path"])
     new_hash = hashlib.sha256(committed).hexdigest() if committed is not None else old_hash
     canonical_input = {"authority_ref_id": old["id"], "old_approved_hash": old_hash,
                        "new_approved_hash": new_hash, "reason": reason}
@@ -702,15 +722,15 @@ def refresh_authority_ref(root: Path, instance: Instance, args: argparse.Namespa
         refreshed: list[dict[str, Any]] = []
         skipped: list[dict[str, Any]] = []
         for old in list(data["refs"]):
-            committed = _committed_bytes(root, plan["baseline_commit"], old["path"])
+            committed = _authority_bytes(root, plan, old["path"])
             if committed is None:
                 skipped.append({"authority_ref_id": old["id"], "path": old["path"], "status": "skipped_missing",
-                                "reason": "authority path does not exist in plan committed baseline"})
+                                "reason": "authority path does not exist in plan baseline"})
                 continue
             working = root / old["path"]
-            if not working.is_file() or working.read_bytes() != committed:
+            if plan.get("baseline_mode", "committed") != "worktree" and (not working.is_file() or working.read_bytes() != committed):
                 skipped.append({"authority_ref_id": old["id"], "path": old["path"], "status": "skipped_dirty",
-                                "reason": "authority path differs from plan committed baseline (uncommitted content); the human must commit it first"})
+                                "reason": "authority path differs from plan committed baseline (uncommitted content); the human must commit it first, or use --baseline worktree"})
                 continue
             old_hash = old.get("approved_hash") or old.get("fragment_hash")
             new_hash = hashlib.sha256(committed).hexdigest()
@@ -737,16 +757,16 @@ def refresh_authority_ref(root: Path, instance: Instance, args: argparse.Namespa
     if len(matches) != 1:
         _fail("PLAN_AUTHORITY_REF_MISSING", f"Authority Ref not found or not unique: {args.authority_ref_id}", path=refs_rel)
     old = matches[0]
-    committed = _committed_bytes(root, plan["baseline_commit"], old["path"])
+    committed = _authority_bytes(root, plan, old["path"])
     if committed is None:
-        _fail("PLAN_AUTHORITY_NOT_COMMITTED", "Authority path does not exist in plan committed baseline", path=old["path"])
+        _fail("PLAN_AUTHORITY_NOT_COMMITTED", "Authority path does not exist in plan baseline", path=old["path"])
     working = root / old["path"]
-    if not working.is_file() or working.read_bytes() != committed:
-        _fail("PLAN_AUTHORITY_WORKTREE_DIRTY", "Authority path differs from plan committed baseline", path=old["path"])
+    if plan.get("baseline_mode", "committed") != "worktree" and (not working.is_file() or working.read_bytes() != committed):
+        _fail("PLAN_AUTHORITY_WORKTREE_DIRTY", "Authority path differs from plan committed baseline; commit it first or use --baseline worktree", path=old["path"])
     old_hash = old.get("approved_hash") or old.get("fragment_hash")
     new_hash = hashlib.sha256(committed).hexdigest()
     if old_hash == new_hash:
-        _fail("PLAN_STRUCTURE_NOOP", "Authority Ref already approves the committed baseline", path=old["path"])
+        _fail("PLAN_STRUCTURE_NOOP", "Authority Ref already approves the current baseline", path=old["path"])
     operation, details, _ = _apply_refresh(root, instance, plan, refs_rel, data, old, reason)
     _counters(plan); _save(path, plan)
     return _summary(plan, "refresh-authority-ref", operation_id=operation["operation_id"], authority_ref_id=args.authority_ref_id,
@@ -818,12 +838,14 @@ def _validate_authority_path(root: Path, plan: dict[str, Any], path: str) -> byt
     pure = PurePosixPath(path)
     if not path or pure.is_absolute() or ".." in pure.parts or "\\" in path or path.startswith(".local/"):
         _fail("PLAN_AUTHORITY_PATH_INVALID", "authority path must be portable, project-relative, and non-local", path=path)
-    committed = _committed_bytes(root, plan["baseline_commit"], path)
+    committed = _authority_bytes(root, plan, path)
     if committed is None:
+        if plan.get("baseline_mode", "committed") == "worktree":
+            _fail("PLAN_AUTHORITY_NOT_COMMITTED", "authority path does not exist in working tree", path=path)
         _fail("PLAN_AUTHORITY_NOT_COMMITTED", "authority path does not exist in committed baseline", path=path)
     working = root / path
-    if not working.is_file() or working.read_bytes() != committed:
-        _fail("PLAN_AUTHORITY_WORKTREE_DIRTY", "authority path has uncommitted content; restore the committed baseline or commit it and start a new plan", path=path)
+    if plan.get("baseline_mode", "committed") != "worktree" and (not working.is_file() or working.read_bytes() != committed):
+        _fail("PLAN_AUTHORITY_WORKTREE_DIRTY", "authority path has uncommitted content; restore the committed baseline, commit it and start a new plan, or use --baseline worktree", path=path)
     return committed
 
 
@@ -832,7 +854,8 @@ def update_authority_ref(root: Path, instance: Instance, args: argparse.Namespac
 
     The Ref ID, linked Claim IDs, role, change policy, and fact classes are
     preserved; only the target path (and optionally locator) change. The new
-    target must be committed at the plan baseline, exactly like add/refresh.
+    target must exist in the plan baseline: committed for committed plans,
+    working tree for ``--baseline worktree`` plans.
     """
     path, plan = _load(root, instance, args.plan_id); _ensure_open(root, instance, plan)
     reason = args.reason.strip()
@@ -972,7 +995,9 @@ def check_delta(root: Path, instance: Instance, args: argparse.Namespace) -> dic
         findings = [{"code": item.code, "path": item.path, "message": item.message} for item in parse_findings]
         refs_rel = instance.authority.get("authority_refs")
         all_refs = authority_refs_from_document(json.loads((staging / refs_rel).read_text(encoding="utf-8"))) if refs_rel else []
-        findings.extend({**item, "path": refs_rel or "authority_ref", "message": "missing changed Claim Authority fact coverage"}
+        findings.extend({**item, "path": refs_rel or "authority_ref",
+                         "message": f"Claim {item.get('claim_id')} requires Authority Ref coverage for fact classes: {', '.join(item.get('missing_fact_classes', []))}",
+                         "recommended_action": f"use knowledge-plan add-authority-ref {plan['plan_id']} --claim-id {item.get('claim_id')} --path <authority-doc> --locator <section> --role <role> --change-policy <policy> --fact-class {' --fact-class '.join(item.get('missing_fact_classes', []))}"}
                         for item in validate_authority_coverage(planned_claims, all_refs))
         for claim_id, change in plan.get("existing_claim_changes", {}).items():
             if change["semantic_declaration"] in {"correct", "expand"} and not any(claim_id in ref.get("claim_ids", []) for ref in all_refs):
@@ -984,13 +1009,13 @@ def check_delta(root: Path, instance: Instance, args: argparse.Namespace) -> dic
                                  "authority_ref_id": ref["id"], "claim_ids": ref.get("claim_ids", []),
                                  "staged_by_current_plan": True})
                 continue
-            committed = _committed_bytes(root, plan["baseline_commit"], ref["path"])
+            committed = _authority_bytes(root, plan, ref["path"])
             if committed is None or hashlib.sha256(committed).hexdigest() != ref["approved_hash"]:
                 findings.append({"code": "PLAN_AUTHORITY_STALE", "path": ref["path"],
-                                 "message": "committed Authority hash changed since plan baseline; commit the intended Authority change, then start a new plan"})
-            elif not (root / ref["path"]).is_file() or (root / ref["path"]).read_bytes() != committed:
+                                 "message": "Authority hash changed since the reference was added; refresh the Authority Ref or commit the intended Authority change and start a new plan"})
+            elif plan.get("baseline_mode", "committed") != "worktree" and (not (root / ref["path"]).is_file() or (root / ref["path"]).read_bytes() != committed):
                 findings.append({"code": "PLAN_AUTHORITY_WORKTREE_DIRTY", "path": ref["path"],
-                                 "message": "Authority has uncommitted content; restore the committed baseline or commit it and start a new plan"})
+                                 "message": "Authority has uncommitted content; restore the committed baseline, commit it and start a new plan, or use --baseline worktree"})
         contract, affected, selection = _affected_cases(staging, instance, plan)
         if not findings:
             projection = _core().rebuild(staging)
@@ -1031,21 +1056,23 @@ def _action_operation(plan: dict[str, Any], rel: str) -> str:
 
 
 def _assert_finalized_environment(root: Path, plan: dict[str, Any], instance: Instance, *, allow_applied: bool = False) -> None:
-    if not allow_applied:
-        _assert_no_maintenance_drift(root, plan, instance)
-    if _head(root) != plan["baseline_commit"]:
-        _fail("PLAN_STALE_BASELINE", "committed baseline changed after finalize")
+    worktree_baseline = plan.get("baseline_mode", "committed") == "worktree"
+    if not worktree_baseline:
+        if not allow_applied:
+            _assert_no_maintenance_drift(root, plan, instance)
+        if _head(root) != plan["baseline_commit"]:
+            _fail("PLAN_STALE_BASELINE", "committed baseline changed after finalize")
     checked_refs = list(plan.get("authority_refs", [])) + [
         {"path": item["path"], "approved_hash": item["new_hash"]} for item in plan.get("authority_ref_refreshes", [])
     ] + [
         {"path": item["new_path"], "approved_hash": item["new_hash"]} for item in plan.get("authority_ref_updates", [])
     ]
     for ref in checked_refs:
-        committed = _committed_bytes(root, plan["baseline_commit"], ref["path"])
+        committed = _authority_bytes(root, plan, ref["path"])
         if committed is None or hashlib.sha256(committed).hexdigest() != ref["approved_hash"]:
-            _fail("PLAN_AUTHORITY_STALE", "committed Authority hash changed since plan baseline; commit the intended Authority change, then start a new plan", path=ref["path"])
-        if not (root / ref["path"]).is_file() or (root / ref["path"]).read_bytes() != committed:
-            _fail("PLAN_AUTHORITY_WORKTREE_DIRTY", "Authority has uncommitted content; restore the committed baseline or commit it and start a new plan", path=ref["path"])
+            _fail("PLAN_AUTHORITY_STALE", "Authority hash changed since the reference was added; refresh the Authority Ref or commit the intended Authority change and start a new plan", path=ref["path"])
+        if not worktree_baseline and (not (root / ref["path"]).is_file() or (root / ref["path"]).read_bytes() != committed):
+            _fail("PLAN_AUTHORITY_WORKTREE_DIRTY", "Authority has uncommitted content; restore the committed baseline, commit it and start a new plan, or use --baseline worktree", path=ref["path"])
     if not allow_applied:
         for action in (plan.get("finalized_bundle") or {}).get("actions", []):
             target = root / action["path"]
@@ -1323,7 +1350,7 @@ def _affected_authority_refs(root: Path, instance: Instance, plan: dict[str, Any
                        "human_review_reason": item.get("reason", "The Authority Ref was re-pointed to a new file and requires exact-hash human review.")})
 
     refs_rel = instance.authority.get("authority_refs")
-    committed = _committed_bytes(root, plan["baseline_commit"], refs_rel) if refs_rel else None
+    committed = _authority_bytes(root, plan, refs_rel) if refs_rel else None
     if committed:
         try:
             existing = authority_refs_from_document(json.loads(committed.decode("utf-8")))
@@ -1675,6 +1702,8 @@ def load_capture_draft(path: Path, *, fmt: str | None = None) -> tuple[dict[str,
         findings.append(_draft_finding(path, "intent", "intent is required"))
     if draft.get("risk") not in {"low", "medium", "high"}:
         findings.append(_draft_finding(path, "risk", "risk must be low, medium, or high"))
+    if "baseline_mode" in draft and draft["baseline_mode"] not in {"committed", "worktree"}:
+        findings.append(_draft_finding(path, "baseline_mode", "baseline_mode must be committed or worktree"))
     claims = draft.get("claims")
     if not isinstance(claims, list) or not claims:
         findings.append(_draft_finding(path, "claims", "claims must be a non-empty list"))
@@ -1781,7 +1810,8 @@ def capture(root: Path, instance: Instance, args: argparse.Namespace) -> dict[st
                 "retained_plan": None, "errors": findings, "exit_code": 1}
     plan_id = None; claim_to_field: dict[str, str] = {}
     try:
-        created = init_plan(root, instance, argparse.Namespace(intent=draft["intent"], risk=draft["risk"]))
+        baseline = getattr(args, "baseline", None) or draft.get("baseline_mode", "committed")
+        created = init_plan(root, instance, argparse.Namespace(intent=draft["intent"], risk=draft["risk"], baseline=baseline))
         plan_id = created["plan_id"]
         _, plan = _load(root, instance, plan_id)
         if plan.get("state") == "finalized":

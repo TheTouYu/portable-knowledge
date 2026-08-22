@@ -2392,7 +2392,8 @@ def parser_build() -> argparse.ArgumentParser:
         child.add_argument("--performed-by")
         child.add_argument("--created-at")
         mode = child.add_mutually_exclusive_group()
-        mode.add_argument("--apply", action="store_true")
+        mode.add_argument("--apply", action="store_true",
+                          help="apply immediately; disabled in normal production mode for new-claim/revise-claim (use --compatibility-mode for maintainer recovery)")
         mode.add_argument("--dry-run", action="store_true")
         return child
 
@@ -2510,7 +2511,7 @@ def parser_build() -> argparse.ArgumentParser:
     plan_init.add_argument("--intent", required=True)
     plan_init.add_argument("--risk", choices=("low", "medium", "high"), required=True)
     plan_init.add_argument("--baseline", choices=("committed", "worktree"), default="committed",
-                          help="authority baseline mode: committed (default, git HEAD) or worktree (explicitly accept applied-but-uncommitted maintenance as baseline; use only when a just-applied Bundle is not yet committed and you accept that working tree as authority)")
+                          help="authority baseline mode: committed (default, git HEAD) or worktree (explicitly accept applied-but-uncommitted maintenance and newly written working-tree files as Authority; use only when a just-applied Bundle is not yet committed or you are capturing design docs that are not committed yet)")
     plan_claim = plan_command("add-claim")
     plan_claim.add_argument("plan_id")
     plan_claim.add_argument("--node", required=True)
@@ -2579,6 +2580,8 @@ def parser_build() -> argparse.ArgumentParser:
     plan_abandon.add_argument("--reason", required=True)
     plan_capture = plan_command("capture")
     plan_capture.add_argument("--file", required=True)
+    plan_capture.add_argument("--baseline", choices=("committed", "worktree"), default=None,
+                              help="authority baseline mode for the one-command batch plan (default: committed; use worktree to reference not-yet-committed design docs)")
     plan_capture.add_argument("--draft-format", choices=("json", "markdown"), default=None,
                               help="capture draft file format (default: json; .md/.markdown files auto-detect as markdown)")
     plan_capture.add_argument("--preview-only", action="store_true",

@@ -243,12 +243,12 @@ Use the operation that matches the semantic intent:
 
 These operations may share one plan and one immutable Bundle. Run one delta check after all operations, finalize for full staged preflight, then stop for exact-hash review. Multi-Bundle orchestration (`bundle_migration_plan`, historically the ambiguous `migration_plan`) is non-atomic across phases and is not a substitute for a structure-refactor Bundle.
 
-### 9.1 Authority documents must be committed before `init`
+### 9.1 Authority documents must be committed before `init` (except explicit worktree baseline)
 
-`knowledge-plan add-authority-ref` requires the referenced Authority document to
-match the committed baseline exactly, so commit every Authority document
-(`authority/…`) *before* running `knowledge-plan init`. A commit made after
-`init` invalidates the plan's baseline: every later mutation fails with
+By default, `knowledge-plan add-authority-ref` requires the referenced Authority
+document to match the committed baseline exactly, so commit every Authority
+document (`authority/…`) *before* running `knowledge-plan init`. A commit made
+after `init` invalidates the plan's baseline: every later mutation fails with
 `PLAN_STALE_BASELINE`. Recovery, in increasing order of disruption:
 
 1. `knowledge-plan rebase <plan_id> --reason …` — re-anchors an open plan to
@@ -257,6 +257,22 @@ match the committed baseline exactly, so commit every Authority document
    are kept; the plan identity and plan id do not change.
 2. `knowledge-plan abandon <plan_id> --reason …` + re-`init` + replay — always
    available, but replays every operation.
+
+For design-intent capture where the design document is not committed yet,
+explicitly opt in to the working-tree baseline instead:
+
+```bash
+pkc knowledge-plan init --intent "..." --risk low --baseline worktree
+pkc knowledge-plan add-claim ... --fact-class documented_contract
+pkc knowledge-plan add-authority-ref ... --path authority/design-intent.md ...
+```
+
+`--baseline worktree` accepts applied-but-uncommitted maintenance and newly
+written working-tree files as Authority for that plan. It is an explicit,
+opt-in relaxation of the default committed-baseline gate; the working-tree file
+still must exist and its exact bytes become the approved hash. The same option
+is available on one-command batch intake: `knowledge-plan capture --file DRAFT.json --baseline worktree`
+(or `"baseline_mode": "worktree"` in the draft).
 
 ### 9.2 Bundle artifacts and `expected_changed_files`
 

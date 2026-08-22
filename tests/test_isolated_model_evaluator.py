@@ -95,7 +95,7 @@ class IsolatedModelEvaluatorTests(unittest.TestCase):
             with mock.patch("sys.argv", argv), mock.patch.object(evaluator.subprocess, "run", return_value=completed) as run:
                 self.assertEqual(evaluator.main(), 0)
             command = run.call_args.args[0]
-            self.assertEqual(command[command.index("--provider") + 1], "deepseek")
+            self.assertEqual(command[command.index("--provider") + 1], "opencode-go")
             self.assertEqual(command[command.index("--model") + 1], "deepseek-v4-flash")
             self.assertEqual(command[command.index("--thinking") + 1], "max")
             self.assertIn("--no-context-files", command)
