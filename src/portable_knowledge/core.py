@@ -2364,7 +2364,8 @@ def parser_build() -> argparse.ArgumentParser:
     federation.add_argument("--limit", type=int, default=8)
     query = command("query")
     query.add_argument("query")
-    query.add_argument("--level", type=int, choices=(1, 2, 3), default=1)
+    query.add_argument("--level", type=int, choices=(1, 2, 3), default=2,
+                       help="检索深度：1 只搜 node/topic 标题，2 搜 claim 内容（默认，2026-08-22 实证默认 1 导致 claim 不可达），3 深度检索")
     query.add_argument("--limit", type=int, default=5)
     query.add_argument("--cursor", type=int, default=0)
     query.add_argument("--permission", choices=tuple(PERMISSIONS), default="internal")
