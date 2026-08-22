@@ -8,7 +8,7 @@
       "role": "current_implementation",
       "baseline_state": "committed_baseline",
       "change_policy": "invalidate_on_change",
-      "approved_hash": "4f2b4065d0478411696a7cf6789a29e8ab8c290b75f9350f0438f0bf0f0d860a",
+      "approved_hash": "45dd420df097a325d2cc0aa2428d9302e1e5736ef400f56a1806553387002fec",
       "claim_ids": [
         "clm_2A7C39AAEDCC3D4395D9E56EB5"
       ],
@@ -23,9 +23,24 @@
       "role": "current_implementation",
       "baseline_state": "committed_baseline",
       "change_policy": "invalidate_on_change",
-      "approved_hash": "fd4d5c2600766779d8374f9a48a42044bb31b0678551114c8c8e74c4609a12bb",
+      "approved_hash": "b9074a35f12b6c9b3785a959a09c6490fd470c24a9e320a667340804d0ba7b54",
       "claim_ids": [
         "clm_C28A0E89225EF8D21D34E5A379"
+      ],
+      "supports_fact_classes": [
+        "cli_behavior"
+      ]
+    },
+    {
+      "id": "aref_2229cc8c0081162c8569cc806d",
+      "path": "src/portable_knowledge/semantic_plan.py",
+      "locator": "def _authority_bytes",
+      "role": "current_implementation",
+      "baseline_state": "committed_baseline",
+      "change_policy": "invalidate_on_change",
+      "approved_hash": "45dd420df097a325d2cc0aa2428d9302e1e5736ef400f56a1806553387002fec",
+      "claim_ids": [
+        "clm_F8BD630E9C01A78FCBD04D4E34"
       ],
       "supports_fact_classes": [
         "cli_behavior"
@@ -38,7 +53,7 @@
       "role": "current_implementation",
       "baseline_state": "committed_baseline",
       "change_policy": "invalidate_on_change",
-      "approved_hash": "4f2b4065d0478411696a7cf6789a29e8ab8c290b75f9350f0438f0bf0f0d860a",
+      "approved_hash": "45dd420df097a325d2cc0aa2428d9302e1e5736ef400f56a1806553387002fec",
       "claim_ids": [
         "clm_83EBA25FDD31CB6DF23447C7C7"
       ],
@@ -53,7 +68,7 @@
       "role": "documented_contract",
       "baseline_state": "committed_baseline",
       "change_policy": "invalidate_on_change",
-      "approved_hash": "9021e040ec969698003246756588f7e2b6b47378fe0bbe3b96ee86e56649be89",
+      "approved_hash": "50ef888d7036f634396821f411885b54eb20512c22a220c8c959352f6b42322f",
       "claim_ids": [
         "clm_A8BA119B3C73E21DEB488EE768"
       ],
@@ -83,7 +98,7 @@
       "role": "current_implementation",
       "baseline_state": "committed_baseline",
       "change_policy": "invalidate_on_change",
-      "approved_hash": "fd4d5c2600766779d8374f9a48a42044bb31b0678551114c8c8e74c4609a12bb",
+      "approved_hash": "b9074a35f12b6c9b3785a959a09c6490fd470c24a9e320a667340804d0ba7b54",
       "claim_ids": [
         "clm_75D42A38D15CF9BF2CA282BD18"
       ],
@@ -98,7 +113,7 @@
       "role": "current_implementation",
       "baseline_state": "committed_baseline",
       "change_policy": "invalidate_on_change",
-      "approved_hash": "4f2b4065d0478411696a7cf6789a29e8ab8c290b75f9350f0438f0bf0f0d860a",
+      "approved_hash": "45dd420df097a325d2cc0aa2428d9302e1e5736ef400f56a1806553387002fec",
       "claim_ids": [
         "clm_0CCABBA16112B45E1E013C7B9D"
       ],
@@ -113,7 +128,7 @@
       "role": "current_implementation",
       "baseline_state": "committed_baseline",
       "change_policy": "invalidate_on_change",
-      "approved_hash": "fd4d5c2600766779d8374f9a48a42044bb31b0678551114c8c8e74c4609a12bb",
+      "approved_hash": "b9074a35f12b6c9b3785a959a09c6490fd470c24a9e320a667340804d0ba7b54",
       "claim_ids": [
         "clm_FEA9677C7712F21ACDD64C4212"
       ],
@@ -128,7 +143,7 @@
       "role": "documented_contract",
       "baseline_state": "committed_baseline",
       "change_policy": "review_on_change",
-      "approved_hash": "e8382aa5536855c9c81419c63539ee9f036a1afb1cb5fe5787d9f34654753d2f",
+      "approved_hash": "768535b654def842a241dd8d6ad8089c843c090347055b2794d381924806e1f6",
       "claim_ids": [
         "clm_FEA9677C7712F21ACDD64C4212"
       ],
@@ -143,7 +158,7 @@
       "role": "current_implementation",
       "baseline_state": "committed_baseline",
       "change_policy": "invalidate_on_change",
-      "approved_hash": "e8061cc4a1250bda71d15db5b911bd29608bdb75cab5026ebc16b2b204cbcb67",
+      "approved_hash": "6469895b1ae3248bea6ceb4b72cc3427ef75dc0a59d9d1f4503a3d824761d15d",
       "claim_ids": [
         "clm_A8BA119B3C73E21DEB488EE768"
       ],
@@ -158,12 +173,27 @@
       "role": "current_implementation",
       "baseline_state": "committed_baseline",
       "change_policy": "invalidate_on_change",
-      "approved_hash": "4f2b4065d0478411696a7cf6789a29e8ab8c290b75f9350f0438f0bf0f0d860a",
+      "approved_hash": "45dd420df097a325d2cc0aa2428d9302e1e5736ef400f56a1806553387002fec",
       "claim_ids": [
         "clm_75D42A38D15CF9BF2CA282BD18"
       ],
       "supports_fact_classes": [
         "cli_behavior"
+      ]
+    },
+    {
+      "id": "aref_cc4d991ff8349099e7b6928ee7",
+      "path": "docs/OPTIMIZATION-PLAN-v4.md",
+      "locator": "## 2. Outcome",
+      "role": "documented_contract",
+      "baseline_state": "committed_baseline",
+      "change_policy": "review_on_change",
+      "approved_hash": "770a938ee71db594f4f1760e16f432de0feca7b8ba3b6ad33bbf062b82bbe3a2",
+      "claim_ids": [
+        "clm_F8BD630E9C01A78FCBD04D4E34"
+      ],
+      "supports_fact_classes": [
+        "documented_contract"
       ]
     },
     {
@@ -173,7 +203,7 @@
       "role": "documented_contract",
       "baseline_state": "committed_baseline",
       "change_policy": "review_on_change",
-      "approved_hash": "fe4f6e6b93780990297196eceade168f0f54276ece88c6fd762ee089a9fc2b52",
+      "approved_hash": "507b323edb72f6c7aef86c7f04ec56867a3487a1ceac6ed241ac494469a8e65e",
       "claim_ids": [
         "clm_C28A0E89225EF8D21D34E5A379"
       ],

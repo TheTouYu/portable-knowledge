@@ -37,6 +37,15 @@
         "federation"
       ],
       "permission": "internal"
+    },
+    {
+      "id": "topic-worktree-baseline",
+      "node_id": "node-pkc-workflows",
+      "title": "Worktree 基线 Authority",
+      "path": "knowledge/pkc-workflows/worktree-baseline.md",
+      "summary": "记录 --baseline worktree 接受未提交设计文档作为 Authority 的契约",
+      "keywords": [],
+      "permission": "internal"
     }
   ],
   "relationships": [],
@@ -75,6 +84,12 @@
       ]
     },
     "clm_A8BA119B3C73E21DEB488EE768": {
+      "fact_classes": [
+        "cli_behavior",
+        "documented_contract"
+      ]
+    },
+    "clm_F8BD630E9C01A78FCBD04D4E34": {
       "fact_classes": [
         "cli_behavior",
         "documented_contract"
