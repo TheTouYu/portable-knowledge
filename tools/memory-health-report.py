@@ -125,7 +125,19 @@ def collect_capabilities(project: Path) -> dict:
 def collect_retrieval_eval(project: Path) -> dict:
     """Run retrieval evaluation if available."""
     eval_script = project / "tools/evaluate_pkc_retrieval.py"
+    # Prefer the configured evaluation dataset from project-intelligence.json
     eval_data = project / "data/knowledge/retrieval-evaluation.json"
+    pi_path = project / "project-intelligence.json"
+    if pi_path.is_file():
+        try:
+            pi = json.loads(pi_path.read_text(encoding="utf-8"))
+            configured = pi.get("evaluation", {}).get("cases_path")
+            if configured:
+                candidate = project / configured
+                if candidate.is_file():
+                    eval_data = candidate
+        except Exception:
+            pass
     if not eval_script.is_file() or not eval_data.is_file():
         return {"available": False}
 
@@ -227,7 +239,8 @@ def main():
     eprint(f"  Bundles: {report['bundles'].get('bundle_count', 0)}")
     if report["retrieval_eval"].get("available"):
         re = report["retrieval_eval"]["output"]
-        eprint(f"  Retrieval eval: {re.get('summary', '?')}")
+        counts = re.get("counts", {})
+        eprint(f"  Retrieval eval: {counts.get('passed', '?')}/{counts.get('cases', '?')} passed")
     vec = report["vector"]
     eprint(f"  Vector index: {'✓' if vec.get('index_exists') else '✗'} ({vec.get('index_size_bytes', 0)} bytes)")
     eprint(f"{'='*50}")
