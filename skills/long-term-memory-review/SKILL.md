@@ -62,6 +62,8 @@ python3 tools/memory-health-report.py --target <目标项目绝对路径>
 5. checkpoint / 压缩次数（越密，会话内结论越易蒸发）
 
 产出：任务全景表 + 障碍清单（每条带时间戳/次数证据）。
+以上只到 L1 统计层。要回答"记忆被真用起来没有 / 缺口花掉了什么"，继续做
+`references/session-depth-analysis.md` 的 L2 行为层 + L3 因果层分析。
 
 ### Phase 3 记忆载体盘点
 
@@ -71,9 +73,10 @@ python3 tools/memory-health-report.py --target <目标项目绝对路径>
 
 每类一行结论：`✓/✗ + 缺口一句话 + 证据`。
 
-### Phase 4 逐障碍评判（四分类，核心判据）
+### Phase 4 逐障碍评判（四分类 + 因果链，核心判据）
 
-对 Phase 2 每个障碍归入一类：
+先按 `references/session-depth-analysis.md` 的 L3 给每个障碍追一条因果链
+（行为 → 缺口 → 会话内检索 → 代价），再归入一类；不要只看现象贴标签：
 
 - **A 记忆命中**：跨会话成功检索到旧结论并复用 → 保留该机制。
 - **B 记忆缺失**：规则/结论未落盘，导致重新推导或等用户再做实验 → 本轮可落盘解决。
