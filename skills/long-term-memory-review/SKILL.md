@@ -65,6 +65,7 @@ python3 tools/memory-health-report.py --target <目标项目绝对路径>
 
 - `references/session-trace-extraction.md`：L1 统计层（错误计数、压缩次数、中断点、用户时间线）。
 - `references/session-depth-analysis.md`：L2 行为层（卡住第一动作、检索有效性三分、复用链、落盘时点）+ L3 因果层（行为→缺口→会话内检索→代价）。
+- **检索触发率量化（可重复，不靠人肉读轨迹）**：`python3 scripts/retrieval_trigger_rate.py <session.jsonl.zstd> [...]`——输出每会话与合计的「卡住点→第一动作是否检索」计数 + 触发率（含逐条证据片段，供 eyeball 抽查类别）；口径见 `references/session-depth-analysis.md` L2，≥70% 为达标线。
 - **重点标出"忆失败"**：没查 / 查错方式 / 查了但载体缺 / 跨项目没接。
 
 ### Phase 3 忆通道判缺陷 + 修复（不限形式）
