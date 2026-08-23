@@ -8,6 +8,8 @@ For easy cross-project installation and ongoing operation, this repository also 
 
 The repository also includes [`isolated-model-evaluator`](skills/isolated-model-evaluator/SKILL.md), which launches a fresh Pi model context with only explicitly selected Skills and records traces, correctness signals, tool errors, workspace changes, usage, latency, and cost for repeatable model-facing workflow evaluation.
 
+The repository additionally ships [`long-term-memory-review`](skills/long-term-memory-review/SKILL.md) — a periodic cross-project audit loop that reconstructs a target project's multi-session agent traces, judges each obstacle by whether long-term memory solved it, inventories the memory carriers (skills / PKC / authority docs / ledger / git), and lands optimizations. Run it on this knowledge-tree project to confirm the model is genuinely getting more efficient through long-term memory.
+
 ## Start here
 
 ### For an AI model
