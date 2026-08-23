@@ -122,7 +122,7 @@ python3 tools/memory-health-report.py --target <目标项目绝对路径>
 | L1 文书 | 写复盘报告、更新 docs 权威文档/账本、改技能 SKILL.md（不涉知识树） | 用户明示"优化/修改"后落 + 小步提交 |
 | L2 知识树 | 增删 Claim / Authority Ref / bundle apply / 升级 PKC 引擎 | 必须 hash 审批或项目流程；复盘者不得自审自批 |
 | L3 生产 | 改目标项目生产代码 / 游戏文件 / 地图数据 / .gil | 一律禁止；只登记 open-items 或写进继续提示词 |
-| 提交 | git add/commit | 用户明示授权；未授权只产出 diff + 建议 |
+| 提交 | git add/commit | 复盘/优化循环内的小步 L1 提交可自主执行（精确 add 限定路径 + diff --check，不卷无关改动）；push/合并/回退仍须用户确认 |
 
 复盘默认停在 L1 产出建议单；用户说"改"才落地 L1，L2/L3 始终交回用户或项目专业流程。
 

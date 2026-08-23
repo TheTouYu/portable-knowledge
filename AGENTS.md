@@ -51,7 +51,7 @@ Inside the target project, `--root` and `--config` normally use their defaults.
 - Never assemble JSON manifests in shell, use Python APIs, or call `bundle-create --manifest` for normal production knowledge ingestion.
 - Use high-level `knowledge-plan` operations for Claim and Authority Reference changes.
 - Do not use compatibility/maintainer mode unless a human explicitly requests recovery work.
-- Do not mutate Git state (`add`, `commit`, `push`, reset, clean, checkout) unless the human explicitly requests it.
+- Git commits of small, self-contained changes you have verified (docs/tools/skills/knowledge) are allowed: stage exact paths, run `git diff --check`, never sweep unrelated changes. `push`, branch switch, merge/rebase, reset/clean/checkout, and overwriting unexplained tree changes still require an explicit human request.
 - Preserve existing working-tree changes.
 - Working-tree-only observations cannot become stable authority.
 - Do not weaken permission, lifecycle, Authority coverage, provenance, staged validation, or exact-hash checks.
