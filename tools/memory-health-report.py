@@ -72,7 +72,8 @@ def collect_claims_info(project: Path) -> dict:
             topics.append(topic)
 
     # Sample claims via a broad query to get lifecycle/confirmation stats
-    broad = run_pkc(project, ["query", "--level", "2", "--limit", "200", "--status", "any", "--format", "json", "的"])
+    # rc5 CLI: `query` 无 `--status`，用常见中文虚词做广抽样；--status 仅属于 knowledge-search
+    broad = run_pkc(project, ["query", "的", "--level", "2", "--limit", "200", "--format", "json"])
     results = broad.get("results", [])
 
     lifecycle_counts = Counter()
