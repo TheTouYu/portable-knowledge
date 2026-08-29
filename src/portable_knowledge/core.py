@@ -30,7 +30,7 @@ from pathlib import Path, PurePosixPath
 from typing import Any, Iterable, Iterator
 
 from .instance import Instance, InstanceError, load_instance, validate_project_memory
-from .bundle import BundleError, apply_bundle, approval, build_bundle, bundle_paths, canonical as bundle_json, capture_bundle_draft, enforce_production_provenance, lifecycle_path, lifecycle_projection, rollback_bundle, seal_preflight, verify_bundle
+from .bundle import BundleError, _action_write, action_worktree_state, apply_bundle, approval, build_bundle, bundle_paths, canonical as bundle_json, capture_bundle_draft, enforce_production_provenance, lifecycle_path, lifecycle_projection, rollback_bundle, seal_preflight, verify_bundle
 from .authority import (FACT_CLASSES, POLICIES, ROLES, AuthorityRegistryError, authority_refs_from_document,
                         claim_authority_status, claim_authority_statuses, observe_authority_refs,
                         validate_authority_conflicts, validate_authority_coverage, validate_authority_ref)
@@ -1263,25 +1263,16 @@ def validate_planned_writes(root: Path, writes: dict[str, bytes | None], *, phas
 
 
 def _bundle_writes(root: Path, bundle: dict[str, Any]) -> dict[str, bytes | None]:
-    """Decode and hash-check Bundle after-images (including deletions) against the current baseline."""
+    """Decode and hash-check Bundle after-images (including deletions) against the current baseline.
+
+    R13 (2026-08-29): replace actions whose target already equals the after-image resolve as
+    byte-identical idempotent no-ops, and append-only event logs that already contain the
+    finalized after-image as a prefix keep their current bytes (later appended events survive);
+    everything else must still be at the pre-apply baseline or it fails closed as authority drift.
+    """
     writes: dict[str, bytes | None] = {}
     for action in bundle["actions"]:
-        target = root / action["path"]
-        old_hash = file_hash(target) if target.exists() else None
-        if old_hash != action["expected_hash"]:
-            raise BundleError(f"authority changed: {action['path']}")
-        if action["operation"] == "delete":
-            if action.get("content") is not None or action.get("new_hash") is not None:
-                raise BundleError("delete action must have a null after-image")
-            writes[action["path"]] = None
-            continue
-        try:
-            content = base64.b64decode(action["content"], validate=True)
-        except (ValueError, TypeError, binascii.Error) as exc:
-            raise BundleError("invalid action content") from exc
-        if hashlib.sha256(content).hexdigest() != action["new_hash"]:
-            raise BundleError("action content hash mismatch")
-        writes[action["path"]] = content
+        writes[action["path"]] = _action_write(root, action)
     return writes
 
 
@@ -2579,7 +2570,10 @@ def parser_build() -> argparse.ArgumentParser:
     plan_abandon = plan_command("abandon"); plan_abandon.add_argument("plan_id")
     plan_abandon.add_argument("--reason", required=True)
     plan_capture = plan_command("capture")
-    plan_capture.add_argument("--file", required=True)
+    plan_capture.add_argument("--file", required=True,
+                             help="capture draft file (JSON by default, Markdown with --draft-format markdown). Field-level DRAFT schema "
+                                  "with a minimal example: pkc-project-operator skill reference capture-draft-format.md "
+                                  "(also docs/SEMANTIC-CHANGES.md 'File-driven batch capture' in the portable-knowledge repo)")
     plan_capture.add_argument("--baseline", choices=("committed", "worktree"), default=None,
                               help="authority baseline mode for the one-command batch plan (default: committed; use worktree to reference not-yet-committed design docs)")
     plan_capture.add_argument("--draft-format", choices=("json", "markdown"), default=None,

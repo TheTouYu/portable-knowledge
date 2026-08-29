@@ -653,6 +653,29 @@ def _authority_registry_overlay(root: Path, instance: Instance, plan: dict[str, 
         _fail("PLAN_AUTHORITY_REFS_SCHEMA", str(exc), path=refs_rel)
 
 
+def _authority_ref_missing_fail(root: Path, instance: Instance, plan: dict[str, Any], refs_rel: str, authority_ref_id: str) -> None:
+    """R3 verification update (2026-08-29): distinguish 'Ref absent' from 'Ref exists in the working
+    tree but is invisible to the committed baseline' (an applied Bundle is uncommitted) and name the
+    exact recovery path for the second cause instead of a bare 'not found'."""
+    worktree_path = root / refs_rel
+    worktree_visible = False
+    if worktree_path.is_file():
+        try:
+            document = canonical_authority_document(json.loads(worktree_path.read_text(encoding="utf-8")))
+        except (OSError, ValueError, json.JSONDecodeError):
+            document = None
+        worktree_visible = bool(document) and any(item.get("id") == authority_ref_id for item in document.get("refs", []))
+    if worktree_visible:
+        _fail("PLAN_AUTHORITY_REF_MISSING",
+              f"Authority Ref {authority_ref_id} exists in the working tree but is not visible from this plan's "
+              "committed baseline (an applied maintenance Bundle is uncommitted); commit the applied Bundle first, "
+              "then abandon this plan and rebuild it on the new committed baseline",
+              path=refs_rel, authority_ref_id=authority_ref_id,
+              working_tree_visible=True, committed_baseline_visible=False,
+              recommended_action="Commit the applied Bundle (scoped git commit), then knowledge-plan abandon + init on the new committed baseline; rebase cannot re-anchor uncommitted working-tree content.")
+    _fail("PLAN_AUTHORITY_REF_MISSING", f"Authority Ref not found or not unique: {authority_ref_id}", path=refs_rel)
+
+
 def _store_authority_registry(plan: dict[str, Any], refs_rel: str, data: dict[str, Any], operation: str) -> None:
     data["refs"] = sorted(data["refs"], key=lambda item: item["id"])
     encoded = (json.dumps(data, ensure_ascii=False, indent=2) + "\n").encode("utf-8")
@@ -755,7 +778,7 @@ def refresh_authority_ref(root: Path, instance: Instance, args: argparse.Namespa
     refs_rel, data = _authority_registry_overlay(root, instance, plan)
     matches = [item for item in data["refs"] if item.get("id") == args.authority_ref_id]
     if len(matches) != 1:
-        _fail("PLAN_AUTHORITY_REF_MISSING", f"Authority Ref not found or not unique: {args.authority_ref_id}", path=refs_rel)
+        _authority_ref_missing_fail(root, instance, plan, refs_rel, args.authority_ref_id)
     old = matches[0]
     committed = _authority_bytes(root, plan, old["path"])
     if committed is None:
@@ -793,7 +816,7 @@ def retire_authority_ref(root: Path, instance: Instance, args: argparse.Namespac
     refs_rel, data = _authority_registry_overlay(root, instance, plan)
     matches = [item for item in data["refs"] if item.get("id") == args.authority_ref_id]
     if len(matches) != 1:
-        _fail("PLAN_AUTHORITY_REF_MISSING", f"Authority Ref not found or not unique: {args.authority_ref_id}", path=refs_rel)
+        _authority_ref_missing_fail(root, instance, plan, refs_rel, args.authority_ref_id)
     retired = matches[0]
     if replacement_ref:
         replacement = next((item for item in data["refs"] if item.get("id") == replacement_ref), None)
@@ -875,7 +898,7 @@ def update_authority_ref(root: Path, instance: Instance, args: argparse.Namespac
     refs_rel, data = _authority_registry_overlay(root, instance, plan)
     matches = [item for item in data["refs"] if item.get("id") == args.authority_ref_id]
     if len(matches) != 1:
-        _fail("PLAN_AUTHORITY_REF_MISSING", f"Authority Ref not found or not unique: {args.authority_ref_id}", path=refs_rel)
+        _authority_ref_missing_fail(root, instance, plan, refs_rel, args.authority_ref_id)
     old = matches[0]
     committed = _validate_authority_path(root, plan, args.path)
     new_hash = hashlib.sha256(committed).hexdigest()
@@ -955,6 +978,34 @@ def _case_blocking_map(contract: dict[str, Any]) -> dict[str, bool]:
     return {case["id"]: bool(case.get("blocking", True)) for case in contract["cases"]}
 
 
+_EVALUATION_DETAIL_KEYS = ("query", "terms", "returned_topics", "returned_topic_ids", "expected_topic_ids",
+                           "returned_claims", "returned_claim_ids", "expected_claim_ids", "topic_top_n",
+                           "claim_top_n", "best_expected_topic_rank", "best_expected_claim_rank",
+                           "failed_assertions", "mode")
+
+
+def _evaluation_failure_detail(records: list[dict[str, Any]], case_id: str) -> dict[str, Any]:
+    """R11: attach query/returned ranking (rank+score)/expected/top-N to an evaluation failure finding."""
+    row = next((item for item in records if item.get("case_id") == case_id), None)
+    if not row:
+        return {}
+    return {key: row[key] for key in _EVALUATION_DETAIL_KEYS if key in row}
+
+
+def _evaluation_failure_findings(records: list[dict[str, Any]], failed_case_ids: list[str], code: str,
+                                 *, artifact_path: str | None = None, contract: dict[str, Any] | None = None) -> list[dict[str, Any]]:
+    findings = []
+    for case_id in failed_case_ids:
+        finding = {"code": code, "path": "evaluation", "message": case_id, "case_id": case_id,
+                   **_evaluation_failure_detail(records, case_id)}
+        if artifact_path:
+            finding["artifact_path"] = artifact_path
+        if contract is not None:
+            finding["evaluator_contract_version"] = contract["contract_version"]
+        findings.append(finding)
+    return findings
+
+
 def _split_case_failures(contract: dict[str, Any], records: list[dict[str, Any]]) -> tuple[list[str], list[str]]:
     """Split failed evaluation rows into blocking and advisory (blocking: false) case ids."""
     blocking = _case_blocking_map(contract)
@@ -1023,8 +1074,8 @@ def check_delta(root: Path, instance: Instance, args: argparse.Namespace) -> dic
                 findings.extend(projection.get("errors", []))
         records = _run_cases(staging, instance, contract, affected, "delta") if not findings else []
         failed_case_ids, advisory_failed = _split_case_failures(contract, records)
-        findings.extend({"code": "PLAN_EVALUATION_FAILED", "path": "evaluation", "message": f"affected evaluation failed: {case_id}", "case_id": case_id}
-                        for case_id in failed_case_ids)
+        findings.extend(_evaluation_failure_findings(records, failed_case_ids, "PLAN_EVALUATION_FAILED",
+                                                     contract=contract))
         warnings = [{"code": "PLAN_EVALUATION_NON_BLOCKING", "path": "evaluation",
                      "message": f"non-blocking evaluation case failed (warning only): {case_id}", "case_id": case_id, "blocking": False}
                     for case_id in advisory_failed]
@@ -1074,10 +1125,13 @@ def _assert_finalized_environment(root: Path, plan: dict[str, Any], instance: In
         if not worktree_baseline and (not (root / ref["path"]).is_file() or (root / ref["path"]).read_bytes() != committed):
             _fail("PLAN_AUTHORITY_WORKTREE_DIRTY", "Authority has uncommitted content; restore the committed baseline, commit it and start a new plan, or use --baseline worktree", path=ref["path"])
     if not allow_applied:
+        # R13 (2026-08-29): classify each action's worktree state instead of requiring the exact
+        # pre-apply baseline. Idempotent replay of an applied Bundle (files already at the
+        # after-image) and append-only event logs whose finalized content gained later lines are
+        # replay states, not drift; anything else still fails closed.
         for action in (plan.get("finalized_bundle") or {}).get("actions", []):
-            target = root / action["path"]
-            actual = hashlib.sha256(target.read_bytes()).hexdigest() if target.exists() else None
-            if actual != action["expected_hash"]:
+            state = _core().action_worktree_state(root, action)
+            if state == "drift":
                 _fail("PLAN_WORKTREE_DRIFT", "planned authority changed after finalize", path=action["path"])
 
 
@@ -1189,10 +1243,10 @@ def finalize(root: Path, instance: Instance, args: argparse.Namespace) -> dict[s
                 "runtime_version": _runtime_version(), "cost_counters": _counters(plan),
             })
             findings = records["validation"].get("errors", []) + records["projection"].get("errors", []) + records["tree"].get("errors", [])
-            findings += [{"code": "PLAN_FULL_EVALUATION_FAILED", "path": "evaluation", "message": case_id,
-                          "case_id": case_id, "artifact_path": failed_artifact,
-                          "evaluator_contract_version": contract["contract_version"], "runtime_version": _runtime_version()}
-                         for case_id in records["blocking_failed_case_ids"]]
+            findings += _evaluation_failure_findings(records.get("evaluation_records", []),
+                                                     records["blocking_failed_case_ids"],
+                                                     "PLAN_FULL_EVALUATION_FAILED",
+                                                     artifact_path=failed_artifact, contract=contract)
             findings += blocking_authority + historical_warnings
             if not findings:
                 findings.append({"code": "PLAN_FULL_PREFLIGHT_FAILED", "path": "full_preflight",
@@ -1256,24 +1310,57 @@ def record_post_apply_full_check(root: Path, instance: Instance, bundle: dict[st
         return plan["post_apply_receipt"]
     contract = _evaluation_contract(root, instance)
     records = _validation_records(root, instance, contract, contract["cases"], "post_apply")
+    # R10 (2026-08-29): the post-apply gate evaluates every configured case for a full
+    # post-apply picture, but BLOCKS only on cases that intersect this plan's change scope —
+    # the exact same affected-case口径 as the finalize full preflight. Unrelated failing
+    # cases (affected_by disjoint from the plan's touched nodes/topics/claims) are advisory
+    # warnings, so an unrelated pre-existing failure can never block an unrelated apply.
+    touched_topics = {claim["topic_id"] for claim in plan.get("claims", {}).values()} | set(plan.get("affected_topics", []))
+    touched_nodes = set(plan.get("affected_nodes", []))
+    touched_claims = set(plan.get("existing_claim_changes", {}))
+    affected, decisions = select_delta_cases(contract, node_ids=touched_nodes,
+                                             topic_ids=touched_topics, claim_ids=touched_claims)
+    affected_ids = {case["id"] for case in affected}
+    blocking_failed_case_ids = [case_id for case_id in records["blocking_failed_case_ids"] if case_id in affected_ids]
+    advisory_failed_case_ids = ([case_id for case_id in records["blocking_failed_case_ids"] if case_id not in affected_ids]
+                                + records.get("non_blocking_failed_case_ids", []))
     blocking_authority, historical_warnings = _classify_authority_records(plan, records["authority_records"], phase="post-apply full validation")
     component_ok = (records["validation"].get("ok") and records["projection"].get("ok")
-                    and records["tree"].get("ok", False) and not records["blocking_failed_case_ids"])
+                    and records["tree"].get("ok", False) and not blocking_failed_case_ids)
     if not component_ok or blocking_authority:
         findings = records["validation"].get("errors", []) + records["projection"].get("errors", []) + records["tree"].get("errors", [])
-        findings += [{"code": "PLAN_POST_APPLY_EVALUATION_FAILED", "path": "evaluation", "message": case_id, "case_id": case_id}
-                     for case_id in records["blocking_failed_case_ids"]]
+        findings += _evaluation_failure_findings(records.get("evaluation_records", []),
+                                                 blocking_failed_case_ids, "PLAN_POST_APPLY_EVALUATION_FAILED",
+                                                 contract=contract)
         findings += blocking_authority
-        raise _core().SemanticPlanError("PLAN_POST_APPLY_FULL_FAILED", "post-apply full validation failed", findings)
+        # R10: the Bundle transaction has already been applied (and is NOT rolled back) by the
+        # time the post-apply gate runs — say so explicitly, with the review pointer, so the
+        # operator does not misread the exit code as a failed/rolled-back transaction.
+        findings.append({
+            "code": "PLAN_POST_APPLY_TRANSACTION_STATE", "path": "evaluation",
+            "message": ("transaction state: the Bundle WAS applied and was NOT rolled back — "
+                        f"{bundle['bundle_id']} .applied.json is written, knowledge changes are live in the working tree, "
+                        "and this failure is the post-apply evaluation gate only (exit 1 ≠ transaction failed); "
+                        "do not redo the apply — verify with bundle-status/bundle-inspect, then address the failing "
+                        "case with a follow-up plan (topic metadata → claim wording → evaluation fixture update, "
+                        "in that order) and confirm with knowledge-check"),
+            "bundle_id": bundle["bundle_id"], "applied": True, "rolled_back": False,
+            "advisory_failed_case_ids": advisory_failed_case_ids,
+        })
+        raise _core().SemanticPlanError(
+            "PLAN_POST_APPLY_FULL_FAILED",
+            f"post-apply full validation failed after the Bundle transaction was APPLIED (not rolled back): "
+            f"{', '.join(blocking_failed_case_ids) or 'component validation'}", findings)
     historical_warnings = historical_warnings + [
         {"code": "PLAN_EVALUATION_NON_BLOCKING", "path": "evaluation",
          "message": f"non-blocking evaluation case failed (warning only): {case_id}", "case_id": case_id, "blocking": False}
-        for case_id in records.get("non_blocking_failed_case_ids", [])
+        for case_id in advisory_failed_case_ids
     ]
     plan["counters"]["full_checks"] += 1; plan["counters"]["post_apply_full_checks"] += 1
     artifact = _artifact_rel(instance, plan["finalized_plan_digest"], "post-apply-full")
     receipt = {"ok": True, "plan_digest": plan["finalized_plan_digest"], "bundle_id": bundle["bundle_id"],
-               "artifact_path": artifact, "authority_warnings": historical_warnings}
+               "artifact_path": artifact, "authority_warnings": historical_warnings,
+               "case_selection": decisions}
     _write_artifact(root, artifact, {"schema_version": 1, **receipt, "records": records, "cost_counters": _counters(plan)})
     plan["post_apply_receipt"] = receipt; _save(path, plan)
     return receipt
@@ -1530,6 +1617,15 @@ def rebase_plan(root: Path, instance: Instance, args: argparse.Namespace) -> dic
         if result.returncode == 1:
             conflicts.append(rel)
     if conflicts:
+        if refs_rel and refs_rel in conflicts:
+            # R3 verification update (2026-08-29): the authority registry itself changed across
+            # baselines; re-anchoring would silently re-approve new content under old Ref IDs.
+            _fail("PLAN_REBASE_CONFLICT",
+                  "the authority registry itself changed between plan baseline and HEAD "
+                  f"({refs_rel}); rebase cannot re-anchor an authority registry that changed across baselines. "
+                  "Abandon this plan and re-init on the new committed baseline (operations replay with fresh Ref resolution).",
+                  path=refs_rel,
+                  recommended_action=f"knowledge-plan abandon {plan['plan_id']} --reason ... then knowledge-plan init on the new baseline.")
         _fail("PLAN_REBASE_CONFLICT",
               "Authority paths changed between plan baseline and HEAD; rebase would re-anchor them under new content: "
               + ", ".join(conflicts)
@@ -1818,12 +1914,31 @@ def capture(root: Path, instance: Instance, args: argparse.Namespace) -> dict[st
             verify_finalized_bundle_provenance(root, instance, plan["finalized_bundle"])
             return _capture_report(plan, str(file_path))
         claim_ids: dict[str, str] = {}; claim_by_index: dict[int, str] = {}
+        # R12 (2026-08-29): topic metadata is only valid when creating a new topic. Batch drafts
+        # commonly repeat it on every claim of the same topic; capture tolerates an exact repeat
+        # (idempotent strip) but rejects a conflicting repeat with the offending draft field.
+        topic_metadata_seen: dict[str, tuple[str | None, str | None, tuple[str, ...]]] = {}
         for index, claim in enumerate(draft["claims"]):
+            meta_title, meta_summary, meta_keywords = (claim.get("topic_title"),
+                                                       claim.get("topic_summary"),
+                                                       tuple(sorted(claim.get("topic_keywords", []))))
+            supplied_metadata = meta_title is not None or bool(meta_summary) or bool(meta_keywords)
+            if supplied_metadata and claim["topic_id"] in topic_metadata_seen:
+                first = topic_metadata_seen[claim["topic_id"]]
+                if first == (meta_title, meta_summary, meta_keywords):
+                    meta_title, meta_summary, meta_keywords = None, "", ()
+                else:
+                    _fail("PLAN_TOPIC_METADATA_CONFLICT",
+                          f"topic metadata for {claim['topic_id']} conflicts with the first claim that created/described it; "
+                          "repeat the first claim's topic metadata exactly, or omit topic metadata on later claims of the same topic",
+                          path=str(file_path), draft_field=_capture_field(index))
+            elif supplied_metadata:
+                topic_metadata_seen[claim["topic_id"]] = (meta_title, meta_summary, meta_keywords)
             ns = argparse.Namespace(plan_id=plan_id, node=claim["node"], node_name=claim.get("node_name"),
                 node_path=claim.get("node_path"), node_boundary=claim.get("node_boundary"),
                 node_keywords=claim.get("node_keywords", []), topic_id=claim["topic_id"],
-                topic_path=claim.get("topic_path"), topic_title=claim.get("topic_title"),
-                topic_summary=claim.get("topic_summary", ""), topic_keywords=claim.get("topic_keywords", []),
+                topic_path=claim.get("topic_path"), topic_title=meta_title,
+                topic_summary=meta_summary or "", topic_keywords=list(meta_keywords),
                 title=claim["title"], statement=claim["statement"], boundary=claim["boundary"],
                 permission=claim.get("permission", "internal"), duplicate_resolution=claim.get("duplicate_resolution", "cancel"),
                 fact_class=claim["fact_classes"])

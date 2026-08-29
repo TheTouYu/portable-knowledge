@@ -137,9 +137,11 @@ def evaluate_normalized_cases(contract: dict[str, Any], cases: list[dict[str, An
         try:
             result = search(case["query"], case["search_terms"], defaults["permission"], limit, semantic)
             results = result.get("results", [])
-            topic_rows = [{"rank": item.get("rank", index), "id": item.get("topic_id", item.get("id"))}
+            topic_rows = [{"rank": item.get("rank", index), "id": item.get("topic_id", item.get("id")),
+                           "score": item.get("score")}
                           for index, item in enumerate(results[:defaults["topic_top_n"]], 1)]
-            claim_rows = [{"rank": item.get("rank", index), "id": item.get("id")}
+            claim_rows = [{"rank": item.get("rank", index), "id": item.get("id"),
+                           "score": item.get("score")}
                           for index, item in enumerate(results[:defaults["claim_top_n"]], 1)]
             returned_topics = [item["id"] for item in topic_rows]
             returned_claims = [item["id"] for item in claim_rows]

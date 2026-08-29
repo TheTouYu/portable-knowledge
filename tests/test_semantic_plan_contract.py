@@ -833,6 +833,151 @@ class SemanticPlanContractTests(unittest.TestCase):
         self.assertEqual(len(list((self.root / "data/knowledge/bundles").glob("bnd_*.json"))), 0)
         self.assertEqual(self.formal_authority(), self.authority_before)
 
+    def _rewrite_evaluation_fixture(self, cases: list[dict]) -> None:
+        (self.root / "evaluation/cases-v1.json").write_text(
+            json.dumps({"schema_version": 1, "cases": cases}), encoding="utf-8")
+
+    def test_post_apply_unrelated_failing_case_is_advisory_not_blocking(self):
+        # R10: a blocking case whose affected_by is disjoint from the plan must not
+        # block post-apply; it surfaces as a non-blocking warning instead.
+        plan_id, _, _ = self.build_complete_plan()
+        finalized = self.cli("knowledge-plan", "finalize", plan_id)
+        self.cli("bundle-approve", finalized["bundle_id"], "--content-hash", finalized["content_hash"], "--apply")
+        self._rewrite_evaluation_fixture([
+            {"id": "eval-schema-v1", "query": "Schema Contract", "affected_by": {"topic_ids": ["topic-schema"]}},
+            {"id": "eval-unrelated-regression", "query": "Schema Contract",
+             "affected_by": {"topic_ids": ["topic-deployment"]},
+             "expected_claim_ids": ["clm_missing_fixture"]},
+        ])
+        applied = self.cli("bundle-apply", finalized["bundle_id"], "--content-hash", finalized["content_hash"], "--apply")
+        self.assertTrue(applied["ok"])
+        self.assertTrue(applied["post_apply_full_receipt"]["ok"])
+        warnings = applied["post_apply_full_receipt"]["authority_warnings"]
+        advisory = [item for item in warnings if item.get("case_id") == "eval-unrelated-regression"]
+        self.assertEqual(len(advisory), 1)
+        self.assertFalse(advisory[0].get("blocking", True))
+        self.assertEqual(advisory[0]["code"], "PLAN_EVALUATION_NON_BLOCKING")
+
+    def test_post_apply_affected_failing_case_blocks_with_transaction_state_and_detail(self):
+        # R10+R11: an affected failing case still blocks, but the error names the
+        # transaction state (applied, not rolled back) and carries the ranking detail.
+        plan_id, _, _ = self.build_complete_plan()
+        finalized = self.cli("knowledge-plan", "finalize", plan_id)
+        self.cli("bundle-approve", finalized["bundle_id"], "--content-hash", finalized["content_hash"], "--apply")
+        self._rewrite_evaluation_fixture([
+            {"id": "eval-schema-v1", "query": "Schema Contract", "affected_by": {"topic_ids": ["topic-schema"]},
+             "expected_claim_ids": ["clm_missing_fixture"]},
+        ])
+        before = self.formal_authority()
+        failed = self.cli("bundle-apply", finalized["bundle_id"], "--content-hash", finalized["content_hash"], "--apply", expected=1)
+        state = next(item for item in failed["errors"] if item["code"] == "PLAN_POST_APPLY_TRANSACTION_STATE")
+        self.assertTrue(state["applied"])
+        self.assertFalse(state["rolled_back"])
+        self.assertIn("NOT rolled back", state["message"])
+        self.assertIn("bundle-status", state["message"])
+        finding = next(item for item in failed["errors"] if item["code"] == "PLAN_POST_APPLY_EVALUATION_FAILED")
+        self.assertEqual(finding["case_id"], "eval-schema-v1")
+        self.assertEqual(finding["query"], "Schema Contract")
+        self.assertEqual(finding["topic_top_n"], 3)
+        self.assertEqual(finding["expected_claim_ids"], ["clm_missing_fixture"])
+        self.assertIn("returned_topic_ids", finding)
+        self.assertIn("failed_assertions", finding)
+        # The transaction landed even though the gate failed.
+        receipt = self.root / "data/knowledge/bundles" / f"{finalized['bundle_id']}.applied.json"
+        self.assertTrue(receipt.is_file())
+        self.assertNotEqual(self.formal_authority(), before)
+
+    def test_capture_repeated_topic_metadata_idempotent_and_conflict_rejected(self):
+        # R12: batch capture tolerates an exact repeat of the first claim's topic metadata
+        # for the same topic (idempotent strip) and rejects a conflicting repeat.
+        draft = {
+            "schema_version": 1,
+            "intent": "Batch topic metadata rule",
+            "risk": "medium",
+            "claims": [
+                {"id": "c1", "node": "software-core", "topic_id": "topic-batch-meta",
+                 "topic_path": "domain/topics/batch-meta.md", "topic_title": "Batch Metadata",
+                 "topic_summary": "Captures the topic-metadata-only-once rule.",
+                 "topic_keywords": ["batch"], "duplicate_resolution": "create_distinct_with_boundary",
+                 "title": "Batch metadata claim one", "statement": "First claim creates the topic with metadata.",
+                 "boundary": "Neutral fixture.", "fact_classes": ["documented_contract"],
+                 "authority_refs": [{"claim_id": "c1", "path": "authority/schema-contract.md",
+                                     "locator": "schema", "role": "documented_contract",
+                                     "change_policy": "invalidate_on_change", "fact_classes": ["documented_contract"]}]},
+                {"id": "c2", "node": "software-core", "topic_id": "topic-batch-meta",
+                 "topic_title": "Batch Metadata", "topic_summary": "Captures the topic-metadata-only-once rule.",
+                 "topic_keywords": ["batch"],
+                 "title": "Batch metadata claim two", "statement": "Second claim repeats identical metadata and is tolerated.",
+                 "boundary": "Neutral fixture.", "fact_classes": ["documented_contract"],
+                 "authority_refs": [{"claim_id": "c2", "path": "authority/runtime-contract.md",
+                                     "locator": "runtime", "role": "documented_contract",
+                                     "change_policy": "invalidate_on_change", "fact_classes": ["documented_contract"]}]},
+            ],
+        }
+        draft_path = self.root / "DRAFT.json"
+        draft_path.write_text(json.dumps(draft), encoding="utf-8")
+        captured = self.cli("knowledge-plan", "capture", "--file", "DRAFT.json")
+        self.assertTrue(captured["ok"])
+        self.assertEqual(len(captured["semantic_diff"]["claims_created"]), 2)
+        # Conflicting repeat must fail with the exact draft field.
+        draft["claims"][1]["topic_keywords"] = ["different"]
+        draft["intent"] = "Batch topic metadata conflict"
+        draft_path.write_text(json.dumps(draft), encoding="utf-8")
+        failed = self.cli("knowledge-plan", "capture", "--file", "DRAFT.json", expected=1)
+        finding = next(item for item in failed["errors"] if item["code"] == "PLAN_TOPIC_METADATA_CONFLICT")
+        self.assertEqual(finding["draft_field"], "claims[1]")
+        self.assertIn("topic-batch-meta", finding["message"])
+
+    def test_proposals_append_does_not_block_replay_and_preserves_appended_lines(self):
+        # R13: appending an unrelated event to the shared proposals log after finalize must
+        # not look like authority drift; idempotent replay applies and keeps the appended line.
+        plan_id, _, _ = self.build_complete_plan()
+        plan = json.loads(next((self.root / ".local/pkc/semantic-plans").glob("*.json")).read_text(encoding="utf-8"))
+        ref = next(item for item in plan["authority_refs"] if item["path"] == "authority/schema-contract.md")
+        self.cli("knowledge-plan", "update-authority-ref", plan_id, "--authority-ref-id", ref["id"],
+                 "--path", "authority/runtime-contract.md", "--reason", "Re-point to runtime contract")
+        self.cli("knowledge-plan", "check", plan_id, "--mode", "delta")
+        finalized = self.cli("knowledge-plan", "finalize", plan_id)
+        staged = [path for path in finalized["changed_files"]
+                  if path.startswith("data/store/proposals/") and path.endswith(".jsonl")]
+        self.assertTrue(staged)
+        target = self.root / staged[0]
+        # The Bundle's own append event has landed (applied state), then an unrelated
+        # operation appended one more line — that is the R13 drift false-positive scene.
+        bundle = json.loads((self.root / "data/knowledge/bundles" / f"{finalized['bundle_id']}.json").read_text(encoding="utf-8"))
+        action = next(item for item in bundle["actions"] if item["path"] in staged)
+        target.write_bytes(base64.b64decode(action["content"], validate=True))
+        event = {"schema_version": 1, "actor": "owner-channel", "performed_by": "test-agent",
+                 "event_id": "evt_" + "A" * 26, "event_type": "proposal_created", "proposal_id": "prp_" + "A" * 26,
+                 "proposal_type": "test", "target_id": None, "summary": "unrelated appended event",
+                 "rationale": "drift replay test", "status": "open", "created_at": "2026-08-29T00:00:00+00:00"}
+        with target.open("a", encoding="utf-8") as handle:
+            handle.write(json.dumps(event) + "\n")
+        self.cli("bundle-approve", finalized["bundle_id"], "--content-hash", finalized["content_hash"], "--apply")
+        applied = self.cli("bundle-apply", finalized["bundle_id"], "--content-hash", finalized["content_hash"], "--apply")
+        self.assertTrue(applied["ok"])
+        self.assertIn("unrelated appended event", target.read_text(encoding="utf-8"))
+
+    def test_authority_ref_missing_names_uncommitted_worktree_cause(self):
+        # R3 verification update: a Ref applied but not committed exists in the working tree
+        # yet is invisible to a new plan's committed baseline; the error must say commit-first.
+        plan_id, _, _ = self.build_complete_plan()
+        finalized = self.cli("knowledge-plan", "finalize", plan_id)
+        self.cli("bundle-approve", finalized["bundle_id"], "--content-hash", finalized["content_hash"], "--apply")
+        self.cli("bundle-apply", finalized["bundle_id"], "--content-hash", finalized["content_hash"], "--apply")
+        worktree_refs = json.loads((self.root / "data/store/authority-refs.json").read_text(encoding="utf-8"))
+        added = [item for item in worktree_refs["refs"] if item["path"].startswith("authority/")]
+        self.assertTrue(added)
+        new_plan = self.cli("knowledge-plan", "init", "--intent", "Follow-up maintenance", "--risk", "medium")["plan_id"]
+        failed = self.cli("knowledge-plan", "update-authority-ref", new_plan, "--authority-ref-id", added[0]["id"],
+                          "--path", "authority/schema-contract.md", "--reason", "follow-up", expected=1)
+        finding = failed["errors"][0]
+        self.assertEqual(finding["code"], "PLAN_AUTHORITY_REF_MISSING")
+        self.assertTrue(finding.get("working_tree_visible"))
+        self.assertFalse(finding.get("committed_baseline_visible"))
+        self.assertIn("uncommitted", finding["message"])
+        self.assertIn("recommended_action", finding)
+
     def test_delta_affected_cases_compact_stdout_and_finalize_receipt_reuse(self):
         plan_id, _, delta = self.build_complete_plan()
         self.assertEqual(delta["affected_case_ids"], ["eval-schema-v1", "eval-runtime-v1", "eval-validation-v1"])
@@ -1643,6 +1788,17 @@ class SemanticPlanContractTests(unittest.TestCase):
         self.assertIn("--mode", help_text)
         self.assertIn("delta", help_text)
         self.assertIn("legal values", help_text)
+
+    def test_capture_help_points_to_the_draft_format_contract(self):
+        env = os.environ.copy()
+        env["PYTHONPATH"] = str(PACKAGE / "src")
+        help_text = subprocess.run([sys.executable, "-m", "portable_knowledge.cli", "--root", str(self.root),
+                                    "knowledge-plan", "capture", "--help"], cwd=PACKAGE, env=env,
+                                   text=True, encoding="utf-8", capture_output=True).stdout
+        self.assertIn("--file", help_text)
+        self.assertIn("capture-draft-format.md", help_text)
+        self.assertIn("--draft-format", help_text)
+        self.assertIn("--preview-only", help_text)
 
     def test_invalid_enum_values_are_rejected_at_cli_parse_time(self):
         env = os.environ.copy()

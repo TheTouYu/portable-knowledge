@@ -224,21 +224,74 @@ def verify_approval(bundle: dict[str, Any], value: dict[str, Any]) -> None:
     if value != expected: raise BundleError("approval is invalid or stale")
 
 
+EVENT_LOG_CATEGORIES = ("proposals", "evidence", "sources")
+
+
+def is_append_event_log(rel: str) -> bool:
+    """R13 (2026-08-29): shared append-only event logs (store/<proposals|evidence|sources>/*.jsonl).
+
+    These files accumulate events from every plan/operation (rebuild appends too), so a later
+    unrelated append must never look like authority drift for a Bundle whose after-image was
+    finalized earlier. Drift checks treat them as prefix-idempotent instead of byte-exact.
+    The store prefix itself is instance-configured, so detection is category-based.
+    """
+    parts = PurePosixPath(rel).parts
+    return (len(parts) >= 3 and parts[-2] in EVENT_LOG_CATEGORIES and parts[-1].endswith(".jsonl"))
+
+
+def action_worktree_state(root: Path, action: dict[str, Any]) -> str:
+    """Classify one Bundle action's current worktree state for apply/drift gates.
+
+    - ``fresh``: file still at the pre-apply baseline (``expected_hash``) — normal first apply.
+    - ``replay_noop``: replace action whose file already equals the after-image (``new_hash``) —
+      idempotent re-apply; the write is a byte-identical no-op (deletes stay strict).
+    - ``applied_with_appends``: append-only event log whose current content has the finalized
+      after-image as a prefix — already applied, later events were appended; preserve them.
+    - ``drift``: anything else — unrelated changes; fail closed.
+    """
+    target = root / action["path"]
+    current = target.read_bytes() if target.is_file() else None
+    current_hash = hashlib.sha256(current).hexdigest() if current is not None else None
+    if current_hash == action["expected_hash"]:
+        return "fresh"
+    if action["operation"] == "replace" and current is not None and current_hash == action["new_hash"]:
+        return "replay_noop"
+    if action["operation"] == "replace" and current is not None and is_append_event_log(action["path"]):
+        try:
+            content = base64.b64decode(action["content"], validate=True)
+        except Exception:
+            content = None
+        if content and current.startswith(content):
+            return "applied_with_appends"
+    return "drift"
+
+
+def _action_write(root: Path, action: dict[str, Any]) -> bytes | None:
+    """Resolve the transactional write for one action given its current worktree state.
+
+    ``fresh`` applies the after-image; ``replay_noop``/``applied_with_appends`` preserve the
+    current bytes (idempotent replay, later appended events kept); ``drift`` fails closed.
+    """
+    state = action_worktree_state(root, action)
+    if state == "fresh":
+        if action["operation"] == "delete":
+            if action.get("content") is not None or action.get("new_hash") is not None:
+                raise BundleError("delete action must have a null after-image")
+            return None
+        content = base64.b64decode(action["content"], validate=True)
+        if hashlib.sha256(content).hexdigest() != action["new_hash"]:
+            raise BundleError("action content hash mismatch")
+        return content
+    if state in {"replay_noop", "applied_with_appends"}:
+        return (root / action["path"]).read_bytes()
+    raise BundleError(f"authority changed: {action['path']}")
+
+
 def apply_bundle(root: Path, bundle: dict[str, Any], approved: dict[str, Any], replace: Callable[..., list[str]]) -> list[str]:
     verify_bundle(bundle); verify_approval(bundle, approved)
     writes: dict[str, bytes | None] = {}
     for action in bundle["actions"]:
-        target = root / action["path"]
-        old = hashlib.sha256(target.read_bytes()).hexdigest() if target.exists() else None
-        if old != action["expected_hash"]: raise BundleError(f"authority changed: {action['path']}")
-        if action["operation"] == "delete":
-            if action.get("content") is not None or action.get("new_hash") is not None:
-                raise BundleError("delete action must have a null after-image")
-            writes[action["path"]] = None
-            continue
-        content = base64.b64decode(action["content"], validate=True)
-        if hashlib.sha256(content).hexdigest() != action["new_hash"]: raise BundleError("action content hash mismatch")
-        writes[action["path"]] = content
+        writes[action["path"]] = _action_write(root, action)
     return replace(root, "bundle-apply", writes)
 
 
