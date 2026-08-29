@@ -1435,36 +1435,42 @@ def plan_update_topic(root: Path, args: argparse.Namespace, *, event_id: str, cr
     """Plan a governed Topic metadata update (title/summary/keywords/aliases).
 
     The Topic identity, its Claim blocks, and Claim IDs are preserved; only the
-    registry metadata and the Markdown header/summary are rewritten. All updates
-    go through the same proposal + bundle + apply governance as other operations.
+    registry metadata and the Markdown header/summary are rewritten. Keyword/alias-only
+    updates touch the registry only (the Markdown header never carries them) and are
+    legal retrieval-tuning updates; title/summary changes rewrite the Markdown header.
+    All updates go through the same proposal + bundle + apply governance as other operations.
     """
+    def _fail_update(code: str, message: str) -> None:
+        raise SemanticPlanError(code, message, [{"code": code, "path": topic["path"], "message": message}])
     ensure_actor(root, args.actor, review_required=True)
     registry, _ = load_authority(root)
     topic = next((item for item in registry.get("topics", []) if item.get("id") == args.topic_id), None)
     if not topic:
-        raise SemanticPlanError("PLAN_TOPIC_UPDATE_SOURCE_MISSING", f"source Topic does not exist: {args.topic_id}")
+        raise SemanticPlanError("PLAN_TOPIC_UPDATE_SOURCE_MISSING", f"source Topic does not exist: {args.topic_id}",
+                                [{"code": "PLAN_TOPIC_UPDATE_SOURCE_MISSING", "path": ".", "message": f"source Topic does not exist: {args.topic_id}"}])
     path = root / topic["path"]
     if not path.is_file():
-        raise SemanticPlanError("PLAN_STRUCTURE_HISTORY_INCONSISTENT", f"Topic Markdown is missing: {topic['path']}")
+        raise SemanticPlanError("PLAN_STRUCTURE_HISTORY_INCONSISTENT", f"Topic Markdown is missing: {topic['path']}",
+                                [{"code": "PLAN_STRUCTURE_HISTORY_INCONSISTENT", "path": topic["path"],
+                                  "message": f"Topic Markdown is missing: {topic['path']}"}])
     title = (args.title or topic.get("title") or "").strip()
     summary = (args.summary if args.summary is not None else topic.get("summary") or "").strip()
     keywords = sorted(set(args.keywords)) if args.keywords is not None else sorted(set(topic.get("keywords", [])))
     aliases = sorted(set(args.aliases)) if args.aliases is not None else sorted(set(topic.get("aliases", [])))
     if not title:
-        raise SemanticPlanError("PLAN_INPUT_INVALID", "topic title must not be empty", path=topic["path"])
+        _fail_update("PLAN_INPUT_INVALID", "topic title must not be empty")
     before = {"title": topic.get("title"), "summary": topic.get("summary", ""),
               "keywords": sorted(set(topic.get("keywords", []))), "aliases": sorted(set(topic.get("aliases", [])))}
     after = {"title": title, "summary": summary, "keywords": keywords, "aliases": aliases}
     if before == after:
-        raise SemanticPlanError("PLAN_STRUCTURE_NOOP", "Topic metadata update does not change any field", path=topic["path"])
+        _fail_update("PLAN_STRUCTURE_NOOP", "Topic metadata update does not change any field")
     original = path.read_text(encoding="utf-8")
     lines = original.split("\n", 1)
     body_start = lines[1] if len(lines) > 1 else ""
     marker_index = body_start.find("<!-- CLAIM:START")
     body = body_start[marker_index:] if marker_index >= 0 else body_start.strip()
     new_text = _topic_markdown_with_metadata(title, summary, body)
-    if new_text == original:
-        raise SemanticPlanError("PLAN_STRUCTURE_NOOP", "Topic metadata update does not change Markdown content", path=topic["path"])
+    markdown_changed = new_text != original
     topic["title"] = title
     topic["summary"] = summary
     topic["keywords"] = keywords
@@ -1475,10 +1481,14 @@ def plan_update_topic(root: Path, args: argparse.Namespace, *, event_id: str, cr
     event = {**event_identity(root, args), "event_id": event_id, "event_type": "topic_updated",
              "topic_id": args.topic_id, "node_id": topic["node_id"], "path": topic["path"],
              "before": before, "after": after, "before_hash": sha256_bytes(original.encode("utf-8")),
-             "after_hash": sha256_bytes(new_text.encode("utf-8")), "reason": args.reason.strip(), "created_at": created_at}
+             "after_hash": sha256_bytes(new_text.encode("utf-8")) if markdown_changed else sha256_bytes(original.encode("utf-8")),
+             "reason": args.reason.strip(), "created_at": created_at}
     rel = shard_rel("proposals", args.actor, created_at)
-    writes = {REGISTRY_REL.as_posix(): (json.dumps(registry, ensure_ascii=False, indent=2) + "\n").encode("utf-8"),
-              topic["path"]: new_text.encode("utf-8"), rel: append_jsonl_bytes(root / rel, event)}
+    writes: dict[str, bytes | None] = {
+        REGISTRY_REL.as_posix(): (json.dumps(registry, ensure_ascii=False, indent=2) + "\n").encode("utf-8"),
+        rel: append_jsonl_bytes(root / rel, event)}
+    if markdown_changed:
+        writes[topic["path"]] = new_text.encode("utf-8")
     return writes, {"topic_id": args.topic_id, "node_id": topic["node_id"], "path": topic["path"],
                     "before": before, "after": after, "event_id": event_id, "event_path": rel}
 

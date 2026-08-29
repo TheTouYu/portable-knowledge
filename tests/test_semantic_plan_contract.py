@@ -1317,6 +1317,30 @@ class SemanticPlanContractTests(unittest.TestCase):
         self.assertIn(f"<!-- CLAIM:START {claim}", markdown)
         self.assertIn(before_markdown.split("<!-- CLAIM:START")[1], markdown)
 
+    def test_update_topic_keywords_only_is_legal_and_noop_fails_cleanly(self):
+        # Regression (2026-08-29): keyword-only topic updates crashed with a TypeError
+        # ("SemanticPlanError got unexpected keyword argument 'path'") and the Markdown
+        # no-op guard wrongly rejected them; keywords live in the registry only.
+        plan_id = self.init()["plan_id"]
+        updated = self.cli("knowledge-plan", "update-topic", plan_id, "--topic-id", "topic-schema",
+                           "--keyword", "schema", "--keyword", "检索调优",
+                           "--reason", "Keyword-only retrieval tuning.")
+        self.assertEqual(updated["changed_fields"], ["keywords"])
+        self.assertTrue(self.cli("knowledge-plan", "check", plan_id, "--mode", "delta")["can_finalize"])
+        finalized = self.cli("knowledge-plan", "finalize", plan_id)
+        bundle = json.loads((self.root / "data/knowledge/bundles" / f"{finalized['bundle_id']}.json").read_text())
+        self.cli("bundle-approve", finalized["bundle_id"], "--content-hash", finalized["content_hash"], "--apply")
+        self.cli("bundle-apply", finalized["bundle_id"], "--content-hash", finalized["content_hash"], "--apply")
+        registry = json.loads((self.root / "data/store/registry.json").read_text())
+        topic = next(item for item in registry["topics"] if item["id"] == "topic-schema")
+        self.assertEqual(topic["keywords"], ["schema", "检索调优"])
+        # A metadata no-op must be a clean structured error, not a TypeError crash.
+        plan2 = self.cli("knowledge-plan", "init", "--intent", "No-op retune", "--risk", "low")["plan_id"]
+        denied = self.cli("knowledge-plan", "update-topic", plan2, "--topic-id", "topic-schema",
+                          "--keyword", "schema", "--keyword", "检索调优", "--reason", "same keywords", expected=1)
+        self.assertEqual(denied["errors"][0]["code"], "PLAN_STRUCTURE_NOOP")
+        self.assertIn("does not change any field", denied["errors"][0]["message"])
+
     def test_update_authority_ref_repoints_path_and_recomputes_hash(self):
         seed = self.init()["plan_id"]
         claim = self.add_claim(seed, "schema", "Re-point authority", "This claim follows its Authority file.", ("documented_contract",))["claim_id"]
