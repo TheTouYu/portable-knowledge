@@ -2375,7 +2375,10 @@ def parser_build() -> argparse.ArgumentParser:
     query.add_argument("--node")
     query.add_argument("--topic")
     progressive = command("progressive-query", aliases=["query-context"])
-    progressive.add_argument("--context", required=True)
+    progressive.add_argument("--context", required=True,
+                             help="configured context id from project-intelligence.json memory.contexts "
+                                  "(its linked knowledge nodes come from relations.context_nodes); "
+                                  "legal values are the configured context ids, e.g. pkc tree --format text + the project config")
     progressive.add_argument("--intent", required=True)
     progressive.add_argument("--max-level", type=int, choices=(1, 2, 3), default=2)
     progressive.add_argument("--limit", type=int, default=3)

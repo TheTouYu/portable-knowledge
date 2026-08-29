@@ -1824,6 +1824,18 @@ class SemanticPlanContractTests(unittest.TestCase):
         self.assertIn("--draft-format", help_text)
         self.assertIn("--preview-only", help_text)
 
+    def test_progressive_query_help_explains_context_source(self):
+        # R9 (2026-08-16 A/B): --context legal values are instance-config-driven; the help
+        # must name the config source so operators can list them without reading source.
+        env = os.environ.copy()
+        env["PYTHONPATH"] = str(PACKAGE / "src")
+        help_text = subprocess.run([sys.executable, "-m", "portable_knowledge.cli", "--root", str(self.root),
+                                    "progressive-query", "--help"], cwd=PACKAGE, env=env,
+                                   text=True, encoding="utf-8", capture_output=True).stdout
+        self.assertIn("--context", help_text)
+        self.assertIn("memory.contexts", help_text)
+        self.assertIn("context_nodes", help_text)
+
     def test_invalid_enum_values_are_rejected_at_cli_parse_time(self):
         env = os.environ.copy()
         env["PYTHONPATH"] = str(PACKAGE / "src")
