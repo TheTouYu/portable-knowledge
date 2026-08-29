@@ -380,6 +380,15 @@ pkc bundle-status BUNDLE_ID --format json
 
 `knowledge-plan inspect` classifies non-current Authority References as `plan_affected` or `historical`. Refs affected by the current plan (staged paths or touched Claims) remain fail-closed blockers. Unrelated historical refs are reported as non-blocking maintenance warnings: finalize still completes while the preview lists their IDs, status, and hashes and recommends a dedicated `authority_maintenance` plan. After that Bundle is exact-hash approved and applied, a human must authorize committing the maintenance, then abandon and rebuild plans that depended on the old Authority snapshot; uncommitted maintenance is never accepted as a baseline.
 
+## Post-apply evaluation gate and idempotent replay (2026-08-29)
+
+Two deliberate refinements to the apply-time gates, both driven by the 2026-08-29 batch-maintenance practice:
+
+1. **Post-apply blocking scope equals preflight scope (R10).** After a Bundle applies, every configured evaluation case still runs so the receipt shows the full post-apply picture, but only cases whose `affected_by` intersects the plan's touched nodes/topics/claims can block. Disjoint failures surface as non-blocking `PLAN_EVALUATION_NON_BLOCKING` warnings — the same affected-case口径 as `check --mode delta` and finalize's full preflight. When the gate does block, the failure reports the transaction state explicitly (`PLAN_POST_APPLY_TRANSACTION_STATE`: applied, not rolled back — the `.applied.json` receipt and live working tree are real; exit 1 ≠ transaction failure) and each failing case carries its query, returned topics/claims with rank and score, expected ids, and the top-N口径.
+2. **Append-only event logs are prefix-idempotent (R13).** The configured store's `proposals`/`evidence`/`sources` JSONL shards accumulate events across plans and rebuilds, so a later appended line no longer looks like authority drift: an action whose current content has the finalized after-image as a prefix resolves as an idempotent no-op that preserves the appended lines. Replace actions whose target already equals the after-image (`new_hash`) also replay as byte-identical no-ops; everything else must still be at the pre-apply baseline (`expected_hash`) or apply fails closed with `authority changed`. Delete actions keep strict byte-exact drift semantics.
+
+Re-running `bundle-apply` on a Bundle whose files are already applied now succeeds idempotently (the post-apply gate re-runs and records the receipt when the previous run failed before recording it) instead of dying on `PLAN_WORKTREE_DRIFT`; the `PLAN_STALE_BASELINE`/uncommitted-maintenance guards for advanced or dirty baselines are unchanged.
+
 ## Fail-closed outcomes
 
 Expected structured rejections include:

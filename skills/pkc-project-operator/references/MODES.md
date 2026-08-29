@@ -200,9 +200,23 @@ git status --short --branch
 
 Post-apply checks prove Bundle lifecycle, text authority, projection, routing, and configured retrieval expectations only. Report evidence as separate layers: current source implementation; automated tests; generated/decoded GIA or equivalent artifact; editor import/loading; writeback/injection; and in-game behavior. Never promote one layer as proof of a later layer.
 
-Use `add-claim` for new knowledge, `revise-claim` for correction, `move-topic` for ownership/path refactoring, and `update-topic` to retune Topic retrieval metadata without rewriting Claim bodies. A finalized-but-not-applied plan whose committed baseline advanced can be recovered with `knowledge-plan rebase PLAN_ID --reason ...` (operations and Claim identity are preserved, the stale candidate Bundle is discarded, then re-check/re-finalize); a plan with an approval or apply record stays immutable. Batch capture supports Markdown drafts (`--draft-format markdown`) and `--preview-only` to show the exact candidate semantic_diff without finalizing. Multi-Bundle orchestration (`bundle_migration_plan`, formerly the ambiguous `migration_plan`) is non-atomic across phases and is not structure migration.
+Use `add-claim` for new knowledge, `revise-claim` for correction, `move-topic` for ownership/path refactoring, and `update-topic` to retune Topic retrieval metadata without rewriting Claim bodies. A finalized-but-not-applied plan whose committed baseline advanced can be recovered with `knowledge-plan rebase PLAN_ID --reason ...` (operations and Claim identity are preserved, the stale candidate Bundle is discarded, then re-check/re-finalize); a plan with an approval or apply record stays immutable. Batch capture (`capture --file DRAFT.json`) supports Markdown drafts (`--draft-format markdown`) and `--preview-only` to show the exact candidate semantic_diff without finalizing; the field-level DRAFT schema with a minimal example is `references/capture-draft-format.md`. Topic metadata (`topic_title`/`topic_summary`/`topic_keywords`) is only valid when creating a new topic — for a second claim on the same topic pass only `topic_id`. Multi-Bundle orchestration (`bundle_migration_plan`, formerly the ambiguous `migration_plan`) is non-atomic across phases and is not structure migration.
 
 Valid Authority roles are `design_intent`, `current_implementation`, `documented_contract`, and `external_environment_behavior`. Valid fact classes are `runtime_behavior`, `public_type_surface`, `cli_behavior`, `documented_contract`, `external_game_evidence`, `transform_defaults`, `writeback_behavior`, and `evidence_scope`. A role and a fact class are different controlled vocabularies. `bundle-status [bundle-id]` supports aggregate or single-Bundle status. Query text is positional; there is no `--text` option.
+
+## Evaluation fixture governance (R11, 2026-08-29)
+
+Evaluation failures (`PLAN_EVALUATION_FAILED` / `PLAN_FULL_EVALUATION_FAILED` / `PLAN_POST_APPLY_EVALUATION_FAILED`) now carry per-case detail in the finding: `query`, `returned_topics` (rank + score), `returned_topic_ids`, `expected_topic_ids` / `expected_claim_ids`, `topic_top_n` / `claim_top_n`, and `failed_assertions`. Read that detail first — it names exactly which topic was returned at which rank and what the top-N assertion expected, so the fix choice is evidence-based instead of guesswork.
+
+When new knowledge legally changes the retrieval landscape (semantic overlap: the new claim is itself a legitimate answer to the case's query), the fix ladder is, in order:
+
+1. **Topic metadata** (`update-topic`: keywords to de-compete) — the official lever;
+2. **Claim title wording** (`revise-claim`: clarify the declaration, never its body semantics);
+3. **Evaluation fixture update** (`expected_topic_ids` gains the new legitimate topic) — the last resort.
+
+Fixtures are tracked config, so a fixture change goes through the same governed path as any knowledge change: build it as a Bundle (e.g. the real 2026-08-29 case `bnd_253802ff`), show the exact before/after `expected_topic_ids` diff for the affected case, get human L3 approval on the Bundle's exact content hash, then apply and confirm with a full `knowledge-check` run (all cases green). Semantic assertions stay unchanged — only the top-N membership grows. Never delete or weaken a claim's body to satisfy retrieval; that trades governed knowledge for a green case.
+
+Post-apply gate scope note (R10): after a Bundle applies, every configured case runs, but only cases whose `affected_by` intersects the plan's touched nodes/topics/claims can block; disjoint failures surface as non-blocking `PLAN_EVALUATION_NON_BLOCKING` warnings. A post-apply failure still reports the transaction state (applied, not rolled back) — `exit 1 ≠ transaction failed`; verify with `bundle-status` and fix with the ladder above, never by redoing the apply.
 
 ## Human review language
 
