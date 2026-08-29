@@ -59,6 +59,7 @@ init → 每条 claim 一次 add-claim → 每条 authority ref 一次 add-autho
 
 - `role`（Authority 角色）：`design_intent` \| `current_implementation` \| `documented_contract` \| `external_environment_behavior`
 - `change_policy`：`existence_only` \| `review_on_change` \| `invalidate_on_change` \| `manual_review`
+  - **政策语义陷阱（2026-08-29 实踩）**：`manual_review` 的 ref **永远处于 non-current（manual_review）状态**——任何触及该 ref 关联 claim 的 plan 在 finalize 时会被 `PLAN_FULL_AUTHORITY_NOT_CURRENT (plan_affected)` 阻塞，等于**无法为绑定该 ref 的 claim 完成录入**。引用「本轮刚提交的文档」用 `review_on_change`（或 `invalidate_on_change`），`manual_review` 只用于允许其长期停留待审的易变源。
 - `fact_classes`：`runtime_behavior` \| `public_type_surface` \| `cli_behavior` \| `documented_contract` \| `external_game_evidence` \| `transform_defaults` \| `writeback_behavior` \| `evidence_scope`
 - `permission`：`restricted` \| `internal` \| `public_redacted` \| `public`
 - `risk`：`low` \| `medium` \| `high`
