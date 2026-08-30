@@ -39,8 +39,10 @@ def plan_one(operator: Path, project: Path, args: argparse.Namespace, out: Path)
     proc = subprocess.run(cmd, capture_output=True, text=True)
     row = {"project": str(project), "plan_path": str(out), "returncode": proc.returncode}
     try:
-        row["plan_hash"] = sha256_file(out)
-    except OSError:
+        # apply-plan verifies the plan's embedded canonical plan_hash (sha256 over the
+        # canonical JSON with the plan_hash key removed), NOT the file's byte hash.
+        row["plan_hash"] = json.loads(out.read_text(encoding="utf-8"))["plan_hash"]
+    except (OSError, ValueError, KeyError):
         row["plan_hash"] = None
     tail = (proc.stderr or proc.stdout).strip()
     row["output_tail"] = tail[-400:] if row["returncode"] else ""
