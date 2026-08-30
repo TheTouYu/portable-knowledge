@@ -146,7 +146,9 @@ Common change policies:
 
 The path must exist in the plan's baseline: for `--baseline committed` (default) it must be committed at the plan's git baseline, while `--baseline worktree` explicitly accepts applied-but-uncommitted and newly written working-tree files as Authority. Use the Claim ID returned by `add-claim`; do not invent one. An Authority Reference may not point to a path also modified by the same plan: delta rejects this as `PLAN_AUTHORITY_STAGED_DRIFT`. New references bind only to the accepted baseline hashes; PKC does not infer a staged self-reference or silently approve an after-image.
 
-The Authority Reference registry's canonical array key is `refs`. The legacy `authority_refs` key is accepted as an input alias and normalized to `refs` on the next governed write. Registries containing both keys with different values fail closed as `AUTHORITY_REFS_SCHEMA`.
+The Authority Reference registry's canonical array key is `refs`. The legacy `authority_refs` key is accepted as an input alias and normalized to `refs` on the next governed write.
+
+A Claim revised in the same plan that already has an Authority Ref must refresh that Ref (`PLAN_CLAIM_REVISED_NEEDS_REFRESH`). A revised Claim with no Authority Ref in the baseline has no refresh target, so `add-authority-ref` admits it: the plan may attach the Claim's first Reference, with fact classes and permission validated against the committed baseline claim exactly as for added Claims. This is the only governed path by which a `correct`/`expand` revision of a zero-coverage Claim can reach the required coverage. Registries containing both keys with different values fail closed as `AUTHORITY_REFS_SCHEMA`.
 
 Refresh an existing change-sensitive Authority Reference after its governed source changes:
 

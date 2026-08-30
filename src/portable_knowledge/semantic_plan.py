@@ -577,10 +577,28 @@ def add_authority_ref(root: Path, instance: Instance, args: argparse.Namespace) 
     if not claim:
         plan_path = _local_base(instance) / f"{plan['plan_id']}.json"
         if args.claim_id in plan.get("existing_claim_changes", {}):
-            _fail("PLAN_CLAIM_REVISED_NEEDS_REFRESH",
-                  f"claim {args.claim_id} was revised, not added in this plan; refresh its existing Authority Ref instead: "
-                  f"knowledge-plan refresh-authority-ref <plan_id> --authority-ref-id <ref_id> --reason ...; plan JSON: {plan_path.as_posix()}")
-        _fail("PLAN_CLAIM_MISSING", f"planned claim not found: {args.claim_id}; inspect {plan_path.as_posix()} (planned claim ids are listed under 'claims')")
+            _refs_rel, registry_overlay = _authority_registry_overlay(root, instance, plan)
+            if any(args.claim_id in ref.get("claim_ids", []) for ref in registry_overlay["refs"]):
+                _fail("PLAN_CLAIM_REVISED_NEEDS_REFRESH",
+                      f"claim {args.claim_id} was revised, not added in this plan; refresh its existing Authority Ref instead: "
+                      f"knowledge-plan refresh-authority-ref <plan_id> --authority-ref-id <ref_id> --reason ...; plan JSON: {plan_path.as_posix()}")
+            # A revised Claim with zero baseline Authority Refs has no refresh target; admit
+            # the plan's first add-authority-ref so the correction can gain coverage. Claim
+            # context (fact classes, permission) comes from the staged baseline parse, never
+            # from the revision input, so the checks below keep their original strength.
+            temporary, staging = _with_overlay(root, instance, plan)
+            try:
+                baseline_registry, _ = _core().load_authority(staging)
+                baseline_claims, parse_findings = _core().parse_claims(staging, baseline_registry)
+            finally:
+                temporary.cleanup()
+            parsed = next((item for item in baseline_claims if item["id"] == args.claim_id), None)
+            if parse_findings or not parsed:
+                _fail("PLAN_CLAIM_REVISION_UNSUPPORTED",
+                      f"zero-ref revised claim not parseable in the plan baseline: {args.claim_id}")
+            claim = parsed
+        else:
+            _fail("PLAN_CLAIM_MISSING", f"planned claim not found: {args.claim_id}; inspect {plan_path.as_posix()} (planned claim ids are listed under 'claims')")
     pure = PurePosixPath(args.path)
     if not args.path or pure.is_absolute() or ".." in pure.parts or "\\" in args.path or args.path.startswith(".local/"):
         _fail("PLAN_AUTHORITY_PATH_INVALID", "authority path must be portable, project-relative, and non-local", path=args.path)

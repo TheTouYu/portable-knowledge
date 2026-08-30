@@ -1733,6 +1733,47 @@ class SemanticPlanContractTests(unittest.TestCase):
                            "--fact-class", "documented_contract", expected=1)
         self.assertEqual(missing["errors"][0]["code"], "PLAN_CLAIM_MISSING")
 
+    def test_add_authority_ref_allows_first_ref_for_zero_ref_revised_claim(self):
+        first_plan = self.init()["plan_id"]
+        first = self.add_claim(first_plan, "schema", "Schema input is explicit",
+                               "The schema parser accepts explicit versioned fields.",
+                               ("documented_contract",))
+        self.add_ref(first_plan, first["claim_id"], "schema", "authority/schema-contract.md",
+                     "documented_contract", "documented_contract")
+        self.assertTrue(self.cli("knowledge-plan", "check", first_plan, "--mode", "delta")["can_finalize"])
+        finalized = self.cli("knowledge-plan", "finalize", first_plan)
+        self.cli("bundle-approve", finalized["bundle_id"], "--content-hash", finalized["content_hash"], "--apply")
+        self.cli("bundle-apply", finalized["bundle_id"], "--content-hash", finalized["content_hash"], "--apply")
+        subprocess.run(["git", "add", "data/store", "domain", "authority"], cwd=self.root, check=True)
+        subprocess.run(["git", "commit", "-qm", "apply first plan"], cwd=self.root, check=True)
+        # Reproduce the historical zero-ref shape: a committed Claim left with no Authority
+        # Ref at all. Such a Claim has no refresh target, so its next correct/expand revision
+        # must be able to gain coverage by adding its first Authority Ref in the same plan.
+        refs_path = self.root / "data" / "store" / "authority-refs.json"
+        refs = json.loads(refs_path.read_text(encoding="utf-8"))
+        refs["refs"] = [item for item in refs["refs"] if first["claim_id"] not in item.get("claim_ids", [])]
+        refs_path.write_text(json.dumps(refs, indent=2) + "\n", encoding="utf-8")
+        subprocess.run(["git", "add", "data/store/authority-refs.json"], cwd=self.root, check=True)
+        subprocess.run(["git", "commit", "-qm", "strip refs: historical zero-ref claim"], cwd=self.root, check=True)
+        self.authority_before = self.formal_authority()
+        plan_id = self.init()["plan_id"]
+        self.cli("knowledge-plan", "revise-claim", plan_id, "--claim-id", first["claim_id"],
+                 "--title", "Schema input is explicit and versioned",
+                 "--statement", "The schema parser accepts explicit versioned fields and rejects unknown ones.",
+                 "--boundary", "Only the committed neutral fixture is in scope.",
+                 "--semantic-declaration", "correct", "--reason", "Correct wording after evidence review.")
+        added = self.cli("knowledge-plan", "add-authority-ref", plan_id, "--claim-id", first["claim_id"],
+                         "--path", "authority/schema-contract.md", "--locator", "schema contract",
+                         "--role", "documented_contract", "--change-policy", "invalidate_on_change",
+                         "--fact-class", "documented_contract")
+        self.assertTrue(added["authority_ref_id"])
+        self.assertTrue(self.cli("knowledge-plan", "check", plan_id, "--mode", "delta")["can_finalize"])
+        second = self.cli("knowledge-plan", "finalize", plan_id)
+        self.cli("bundle-approve", second["bundle_id"], "--content-hash", second["content_hash"], "--apply")
+        self.cli("bundle-apply", second["bundle_id"], "--content-hash", second["content_hash"], "--apply")
+        refs = json.loads(refs_path.read_text(encoding="utf-8"))
+        self.assertTrue(any(first["claim_id"] in item.get("claim_ids", []) for item in refs["refs"]))
+
     def test_inspect_preview_lists_externally_invalidated_refs(self):
         refs_path = self.root / "data/store/authority-refs.json"
         refs = json.loads(refs_path.read_text(encoding="utf-8"))
