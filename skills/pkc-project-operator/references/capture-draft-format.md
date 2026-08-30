@@ -35,7 +35,7 @@ init → 每条 claim 一次 add-claim → 每条 authority ref 一次 add-autho
 | `node` | 是 | 节点 id | claim 归属节点 |
 | `node_name` / `node_path` / `node_boundary` / `node_keywords` | 仅新建节点时 | 字符串 / 字符串 / 字符串 / 字符串数组 | **仅当原子创建新节点时有效**；节点已存在再传会报「node metadata is only valid when atomically creating a new node」 |
 | `topic_id` | 是 | 字符串 | claim 归属 topic |
-| `topic_path` | 新建 topic 时必填 | Markdown 路径（须位于 node 路径下） | 已有 topic 时可省（会自动取注册值） |
+| `topic_path` | 新建 topic 时必填 | Markdown 路径（须位于 node 路径下） | 已有 topic 时可省（会自动取注册值）。**陷阱（2026-08-31 实证）**：node 的注册路径在知识树 `knowledge/` 下而不是源文档目录（如 `knowledge/game-engine-knowledge/…` 而非 `docs/game-engine-knowledge/…`）——写错报 `PLAN_TOPIC_INVALID: path must remain under knowledge/`；先 `pkc tree` 查 node 注册路径再填 |
 | `topic_title` / `topic_summary` / `topic_keywords` | 仅新建 topic 时 | 字符串 / 字符串 / 字符串数组 | **topic 元数据仅创建时有效**：同 topic 的第 2 条起不再接受元数据（交互式报 `PLAN_TOPIC_INVALID`；capture 批处理对「与首条完全一致」的重复元数据幂等忽略，不一致才报错） |
 | `title` / `statement` / `boundary` | 是 | 非空字符串 | Claim 三段：标题 / 断言 / 边界 |
 | `permission` | 否 | `restricted` \| `internal`（默认）\| `public_redacted` \| `public` | 必须等于其 topic 现有 permission |
