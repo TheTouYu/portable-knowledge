@@ -54,6 +54,7 @@ Inside the target project, `--root` and `--config` normally use their defaults.
 - Use high-level `knowledge-plan` operations for Claim and Authority Reference changes.
 - Do not use compatibility/maintainer mode unless a human explicitly requests recovery work.
 - Git commits of small, self-contained changes you have verified (docs/tools/skills/knowledge) are allowed: stage exact paths, run `git diff --check`, never sweep unrelated changes. `push`, branch switch, merge/rebase, reset/clean/checkout, and overwriting unexplained tree changes still require an explicit human request.
+- Commits touching public assets (`skills/`, `docs/`, `README/AGENTS/INSTALL`, `pyproject.toml`) must pass `tests/test_repository_contract.py` before commit: no source-project names, no personal absolute paths (2026-08-31: a skill-docs commit landed such strings without this check and blocked the full suite until a cleanup pass; the rule text itself must not quote the banned strings either).
 - Preserve existing working-tree changes.
 - Working-tree-only observations cannot become stable authority.
 - Do not weaken permission, lifecycle, Authority coverage, provenance, staged validation, or exact-hash checks.

@@ -125,7 +125,7 @@ It resolves the project root, reads `tools/pkc-lock.json`, verifies runtime loca
 
 ## Exact upgrade flow
 
-Install initializes an unconfigured project; adopt locks an existing unlocked instance; upgrade changes an already locked project's exact runtime selection. They are not substitutes.
+Install initializes an unconfigured project; adopt locks an existing unlocked instance; upgrade changes an already locked project's exact runtime selection. They are not substitutes. For several projects on one source repository, `scripts/batch_plan_upgrade.py` plans them in one pass (idempotent: projects already on the target commit are skipped) and prints each plan's embedded `plan_hash`; apply remains a separate, human-reviewed per-project step. Its `--project-check` is per-project truth: pick a command that exists and passes in EACH target (an inherited command that fails, or a project without npm, aborts that apply and restores the prior runtime — verified 2026-08-31).
 
 ```bash
 python skills/pkc-project-operator/scripts/pkc_operator.py plan-upgrade \
