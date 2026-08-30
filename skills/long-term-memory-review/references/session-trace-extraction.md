@@ -6,7 +6,7 @@ harness 没有该技能时，用本文件的最小方法，只读、不猜。
 ## 会话定位
 
 - 根目录：`~/.dsh/sessions/`
-- 项目目录名 = 项目绝对路径的 `/` → `-`，例如 `/home/h/genshin-ts-ui` → `--home-h-genshin-ts-ui--`
+- 项目目录名 = 项目绝对路径的 `/` → `-`，例如 `/home/<user>/<project>` → `--home-<user>-<project>--`
 - 单会话：`<项目目录>/<session-id>/session.jsonl.zstd`（zstd 压缩）；用 `ls -S` 按大小找主力会话（长任务往往几 MB）。
 
 ## 解压分析（勿先读原文）
