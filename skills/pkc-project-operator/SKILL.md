@@ -53,6 +53,26 @@ Do not build an identity bureaucracy. One real human review is sufficient, but a
 
 A prior installation, material, or Git approval never authorizes a later knowledge Bundle. Changed plan or Bundle content invalidates review.
 
+### 常规增量录入快速通道（standing authorization，2026-08-31 用户授权固化）
+
+用户原话定调："这种一次知识录入不需要我反复确认"——**满足以下全部条件的单次增量录入，模型可自行 approve+apply+提交，不需逐次向用户要哈希确认**（与仓库 AGENTS.md 自主提交授权同构）：
+
+准入条件（缺一即回退完整 L3 门）：
+- **纯增量**：semantic_diff 只有 claims_created + authority_refs_added（无 revise/retire/refresh/update 既有 claim/ref，无 stale-refresh 批处理）；
+- **规模小**：claims ≤ 4 且 operation_count ≤ 8；
+- **风险低**：risk ∈ {low, medium}，permission=internal；
+- **有锚**：每条新 claim 携带 ≥1 条指向已提交文件的 authority ref，change_policy ∈ {review_on_change, invalidate_on_change}（禁 manual_review——其永久 non-current 陷阱会锁死后续 plan）；
+- **人的来源**：录入内容由本会话任务叙述产生或用户明说"记下来/录进去"（语义来源是人，不是模型自产自销）。
+
+执行义务（透明替代门禁，不可省）：
+1. apply 前在会话内**完整展示 semantic diff**（claim 标题+断言+边界、ref 路径+locator+role）；
+2. apply 后**报告 bundle_id + content_hash** 供事后审计，并按 `bundle-apply` 返回的 git_add 清单精确提交（commit unit 规则不变）；
+3. 基线漂移重锚（PLAN_STALE_BASELINE → rebase → re-finalize）：若新 Bundle 的操作集与已展示版本**机械一致**（同 claim 数、同 ref id 或同 path+role+fact_classes、同 expected_changed_files），**无需重新确认**直接 apply；任一差异 → 回退完整 L3 门。
+
+仍需完整 L3 哈希评审（快速通道不覆盖）：修改/退役既有 claim、permission ∈ {restricted, public*}、risk=high、零 ref claim、超规模（>4 claim 或 >8 操作）、Memory 角色/Context/goal/scope 变更、整库 stale-refresh 维护轮。
+
+操作细节提醒（2026-08-31 实证）：`bundle-approve --apply` 只落 approval 记录；权威落盘需再跑 `bundle-apply <id> --apply`（返回 git_add 清单与建议 commit message = commit unit 清单）。
+
 ## Canonical mechanical interface
 
 ```bash
