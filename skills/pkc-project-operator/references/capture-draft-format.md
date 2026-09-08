@@ -146,3 +146,12 @@ python tools/pkc.py knowledge-plan capture --file DRAFT.json --preview-only
 - `--preview-only` 跑完整流水线但跳过 finalize：输出候选 Bundle 的 `semantic_diff` + `content_hash`，plan 保持 open（可继续 `finalize` 或 `abandon`）。
 - 草稿错误报 `PLAN_DRAFT_INVALID` 并带精确字段名（如 `claims[2].authority_refs[0].role`）；流程中段失败会报 `PLAN_DELTA_FAILED` 并把 finding 关联回草稿字段（`draft_field`），同时 abandon 半成品 plan（`retained_plan` 说明原因），绝不留部分 Bundle。
 - 同一草稿成功后再跑一次 = 重放同一不可变 Bundle（相同 intent）。
+
+## 8. 实操坑速查（2026-09-03 足球 R3 四条 claim 录入实证）
+
+- **claim.fact_classes 必须被 ref 全覆盖**：claim 声明了几个 fact_class，其 authority_refs 的 fact_classes 并集就要覆盖几个——漏一类报 `AUTHORITY_FACT_COVERAGE ... requires Authority Ref coverage for fact classes: xxx`（preview 即拦，零写）。写草稿时先自检：每类至少一条 ref 覆盖。
+- **失败后重跑必须换 intent**：流程中段失败会 abandon 半成品 plan 并提示 re-run with a new intent——同 intent 是「成功重放」语义，失败后复用会撞 retained plan；直接给 intent 加 v2/v3 后缀即可。
+- **先 `--preview-only` 再 finalize**：预览输出 would-be Bundle id + content_hash + semantic_diff + 预期改动文件 + 操作数，错误零副作用；确认无误再 finalize（同一 plan）。
+- **finalize 后 content_hash 即审批凭证**：`bundle-approve --apply` / `bundle-apply --apply` 都是显式写（无 --apply 只 dry-run）；apply 后立即 `pkc rebuild` + `validate`，再按返回/已知清单精确 `git add` 提交（bundle 三件套 + registry/authority/topic 文件）。
+- **capture 前最小四步**：①`pkc tree` 定 node+topic（新 claim 先看目标 topic 文件里的既有 claim 与 permission，别用 knowledge-search 找挂载点）②目标 topic md 读既有断言防重复③按需 knowledge-search 去重④写 DRAFT 走 preview。
+- **规模自检**：纯增量、claims ≤4、operation_count ≤8、risk low/medium、internal、每条 ≥1 已提交 ref → 满足快速通道（SKILL.md「Human Review Gate」），可一次 approve+apply；超出则走完整 L3 精确 hash 人工评审。
