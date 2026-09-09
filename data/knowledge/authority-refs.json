@@ -167,6 +167,21 @@
       ]
     },
     {
+      "id": "aref_b8365d94f67798d8eab7e3ca40",
+      "path": "docs/engram-integration-plan.md",
+      "locator": "可见性结论（按会话解析工作目录）",
+      "role": "documented_contract",
+      "baseline_state": "committed_baseline",
+      "change_policy": "review_on_change",
+      "approved_hash": "6a4f31b11d1adf2b2e55b9903d27eaa45e62c3df90c70ce16fd6658f500f7933",
+      "claim_ids": [
+        "clm_9776A0E078CE2E009A55DF9753"
+      ],
+      "supports_fact_classes": [
+        "documented_contract"
+      ]
+    },
+    {
       "id": "aref_bc82333d0ff700b6f15489a2a5",
       "path": "src/portable_knowledge/semantic_plan.py",
       "locator": "function:add_authority_ref",

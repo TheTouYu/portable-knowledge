@@ -11,6 +11,17 @@
         "workflow"
       ],
       "migration_status": "pilot"
+    },
+    {
+      "id": "node-memory-integration",
+      "name": "记忆层集成",
+      "path": "knowledge/memory-integration",
+      "boundary": "模型记忆层与 PKC 之间的集成契约与实测结论；不包含 PKC 自身的知识树治理流程，也不包含其他项目的业务知识。",
+      "keywords": [
+        "integration",
+        "memory"
+      ],
+      "migration_status": "pilot"
     }
   ],
   "topics": [
@@ -45,6 +56,17 @@
       "path": "knowledge/pkc-workflows/worktree-baseline.md",
       "summary": "记录 --baseline worktree 接受未提交设计文档作为 Authority 的契约",
       "keywords": [],
+      "permission": "internal"
+    },
+    {
+      "id": "topic-injection-visibility",
+      "node_id": "node-memory-integration",
+      "title": "记忆注入可见性",
+      "path": "knowledge/memory-integration/injection-visibility.md",
+      "summary": "记录记忆注入的可见性边界：分层准入如何决定哪些记忆能被唤醒。",
+      "keywords": [
+        "visibility"
+      ],
       "permission": "internal"
     }
   ],
@@ -92,6 +114,11 @@
     "clm_F8BD630E9C01A78FCBD04D4E34": {
       "fact_classes": [
         "cli_behavior",
+        "documented_contract"
+      ]
+    },
+    "clm_9776A0E078CE2E009A55DF9753": {
+      "fact_classes": [
         "documented_contract"
       ]
     }
