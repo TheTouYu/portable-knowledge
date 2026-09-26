@@ -94,3 +94,53 @@ S0–S3 已在真实环境跑通并留下可复算读数：
 按工作目录分层的记忆可见性判定，必须按发起请求的会话解析工作目录，不得使用进程级共享的工作目录字段：进程级单字段在并发会话下由后写者覆盖先写者，导致不同会话互相过滤对方的 project 层记忆；实测同一进程内两个会话在按会话解析后各得各自工作目录，过滤恢复正确。
 
 该规则不覆盖无会话标识的后台请求——此类请求没有独立工作目录，只能按全局层放行；也不证明任何具体记忆节点的内容正确性。
+
+## 8. 跨项目记忆联动实测（2026-09-09）
+
+本节回答「知识树跨项目联动到底有没有发挥价值」，并把结论固化为第四条桥。全部读数为本机实跑，命令可复算。
+
+### 8.1 实测读数
+
+- **PKC 侧常设联邦**：新建常驻登记 `~/.dsh/pkc-federation.json`（4 个已装 PKC 的项目，逐项含 root / read_permission / evidence_boundary）+ 入口脚本 `~/.dsh/bin/pkc-fed`（默认查全部登记项目，可追加项目 id）。实跑 federation-search 命中分布：knowledge 5/8/4/2，authority 4/5/4/2，memory 2/1/4/8，契约 0/2/0/0；返回 `read_only: true`、`cross_project_writes: false`；wrapper 退出码 0。**四个项目里只有 1 个装了自己的 `pkc` CLI，其余 3 个仍被联邦读到**（直读 registry / projection）——能力早已具备，缺的只是登记文件。
+- **engram 侧层分布**：升层前 151 节点（session 101 / project 47 / global 3）；本轮把 6 条与具体仓库无关的通用结论写为 global 层副本，另加 1 条跨项目查询入口元记忆 → global 3 → 10，总节点 162。
+- **覆盖缺口（关键）**：engram 的 project 桶只覆盖 4 个工作目录，PKC 已装项目是另外 4 个，两者交集仅 1 个。**跨项目记忆目前是「两套账本各记各的」。**
+
+### 8.2 桥 D · 跨项目互见（新增）
+
+- **读侧**：任何项目的会话都能用 `pkc-fed`（或显式 `--registry ~/.dsh/pkc-federation.json`）只读查询其他项目的 knowledge / authority / memory 三类命中；命中按项目分组，权限固定，不可命令行提权。
+- **写侧**：跨项目**不能**直接提升。engram 的 `engram_promote` 受可见性准入约束（project 层要求 `projectId === viewer.cwd`），对别的项目的节点一律「无权提升」——跨项目沉淀只有两条路：① 从归属项目的会话内提升；② 在目标项目内写同标题 global 副本（本轮采用 ②）。
+- **纪律**：联邦查询结果**不得跨项目合并为新事实**（看得到 ≠ 自动学到）；要升为项目事实，必须回到归属项目走 knowledge-plan + 人工 exact-hash 审批。
+
+### 8.3 待批项：两份安装计划（停在人工审哈希门）
+
+| 实例 | plan_hash（前 16 位） | 预期写入项 | 状态 |
+|---|---|---|---|
+| 实例 A（建模项目） | `e83d28e023710287` | 15 | 未 apply |
+| 实例 B（插件仓库） | `4ea147eb2779e66e` | 15 | 未 apply |
+
+计划为只读生成，目标项目零改动（无 `.local/pkc`、`tools/pkc.py`、`project-intelligence.json`、`knowledge` 痕迹）。**apply 需人工审 plan_hash 后另行发起**，本轮不 apply、不 push。
+
+### 8.4 数据质量发现与修法
+
+151 节点中 11 组同标题、26 条重复（约 17%）。去重门（2-gram 重叠 ≥0.55）没拦住，因为重复多是「同题不同措辞」。建议：① 写入前先 `engram_search` 查同标题；② 高频主题改走 `engram_update` 修订而非新增；③ 把「同题刷新」判据从纯字符重叠升级为「标题规范化 + 语义阈值」双门。
+
+### 8.5 未覆盖维度
+
+- 桥 D 只验证了**只读互见**，未验证跨项目写入闭环（受可见性准入的架构约束，需上游改造或人工跨会话执行）。
+- 联邦命中数字是 lexical 模式读数，未启用语义嵌入层。
+- 两份安装计划未 apply，「装完是否真能提升该项目大模型的忆」尚无实测。
+
+## 9. 安装执行记录（2026-09-09）
+
+第 8.3 节的两份待批计划已按人工批准执行安装，本节替代 8.3 的状态列。
+
+| 实例 | 计划哈希 | 写入项 | apply 结果 |
+|---|---|---|---|
+| 实例 B（插件仓库） | `4ea147eb2779e66e6e46c6636096f7813702f8327e134c77c20b695b72325b4c` | 15 文件 + 1 链接 | ok |
+| 实例 A（建模项目） | 重建后 `fd344d28f72fbc906894607bd3c1b765454564d4feb6daf7ac90beb2b948af25`（原 `e83d28e0237102879fc7fd65d5dac68e06aef9735587080f835517eb830b5c60` 作废） | 15 文件 + 1 链接 | ok |
+
+- **漂移处置**：实例 A 在计划生成后被并发会话写入 6 行，apply 的 Git 状态门（`skills/pkc-project-operator/scripts/pkc_operator.py:833`）会 fail-closed；按契约重建计划（旧计划文件保留作审计证据）后立即 apply。**这是 fail-closed 设计生效的实证，不是故障。**
+- **安装后判据**：两项目的 `tools/pkc.py` 均通过 capabilities / validate / rebuild / validate，runtime 版本 `0.2.0rc5`，lock 指向同一 commit `8a2a083360eeb06c634409a75cab6be9e824de6c`；`.gitignore` 采用追加写入（保留原规则 + `.local/`），既有脏文件零触碰。
+- **读数方法论修正（独立审计打回后重测）**：早期闭环探针把 `wrapper_checks_per_project` 写成字面常量（同义反复，非测量），被 fresh 子代理审计 reject；已改用真值探针 `.local/fed/measure_final.mjs`（计数由实跑 rc / 锁文件 / wheel 存在性推导，脚本内不出现结果常量）重测，读数不变：`installed_projects=2`、`wrapper_checks_per_project=2`、`pkc_ahead=2`、`knowledge_diff_lines=0`，并经第二位 fresh 子代理独立复跑复算 pass。
+- **权威仓零漂移**：PKC 仓库 `knowledge/` 无 diff、ahead 仍为 2、未 commit、未 push。
+- **未覆盖维度**：① 两项目知识树为空（nodes/topics/claims 全 0），first-use 未启动——「装完能不能真提升该项目的忆」尚无实测；② 未跑 adapter 评估用例；③ 安装产物留在目标项目工作树未提交（提交/推送属 L4，需另行批准）。
